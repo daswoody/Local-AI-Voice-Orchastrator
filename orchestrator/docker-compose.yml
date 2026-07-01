@@ -1,0 +1,20 @@
+services:
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: heimai-orchestrator
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    networks:
+      - ai-lab
+
+networks:
+  ai-lab:
+    external: true
+    # Name muss zum bestehenden Docker-Netzwerk von LiteLLM/Weaviate passen
+    # (siehe Sektion 4.6 der Spezifikation) - in Coolify unter dem jeweiligen
+    # Server/Projekt pruefen, notfalls per `docker network ls` auf der AI-VM.

@@ -1,0 +1,115 @@
+{
+  "templates": [
+    {
+      "card_type": "generic",
+      "layout_version": 1,
+      "root": {
+        "type": "column",
+        "children": [
+          { "type": "text", "text": "{{data.headline}}", "style": "title" },
+          { "type": "text", "text": "{{data.body}}" }
+        ]
+      }
+    },
+    {
+      "card_type": "weather",
+      "layout_version": 1,
+      "root": {
+        "type": "column",
+        "children": [
+          {
+            "type": "row",
+            "children": [
+              { "type": "icon", "name": "{{data.icon}}" },
+              { "type": "text", "text": "{{data.temperature}}°", "style": "title" }
+            ]
+          },
+          { "type": "text", "text": "{{data.description}}" }
+        ]
+      }
+    },
+    {
+      "card_type": "list",
+      "layout_version": 1,
+      "root": {
+        "type": "list",
+        "items_binding": "data.items",
+        "item_template": {
+          "type": "row",
+          "children": [{ "type": "text", "text": "{{item.label}}" }]
+        }
+      }
+    },
+    {
+      "card_type": "calendar",
+      "layout_version": 1,
+      "root": {
+        "type": "column",
+        "children": [
+          { "type": "text", "text": "{{data.title}}", "style": "title" },
+          { "type": "text", "text": "{{data.time}}" },
+          { "type": "text", "text": "{{data.location}}" }
+        ]
+      }
+    },
+    {
+      "card_type": "navigation",
+      "layout_version": 1,
+      "root": {
+        "type": "column",
+        "children": [
+          { "type": "text", "text": "{{data.destination}}", "style": "title" },
+          { "type": "text", "text": "{{data.eta}}" },
+          {
+            "type": "button",
+            "label": "Navigation starten",
+            "action": {
+              "type": "device_tool",
+              "tool": "navigate_to",
+              "params": { "destination": "{{data.destination}}" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "card_type": "notifications_summary",
+      "layout_version": 1,
+      "root": {
+        "type": "column",
+        "children": [
+          { "type": "text", "text": "{{data.count}} neue Benachrichtigungen", "style": "title" },
+          {
+            "type": "list",
+            "items_binding": "data.items",
+            "item_template": {
+              "type": "row",
+              "children": [
+                { "type": "text", "text": "{{item.app}}" },
+                { "type": "text", "text": "{{item.summary}}" }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "card_type": "media",
+      "layout_version": 1,
+      "root": {
+        "type": "row",
+        "children": [
+          { "type": "image", "src": "{{data.cover_url}}" },
+          {
+            "type": "column",
+            "children": [
+              { "type": "text", "text": "{{data.title}}", "style": "title" },
+              { "type": "text", "text": "{{data.artist}}" },
+              { "type": "progress", "value_binding": "data.progress" }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

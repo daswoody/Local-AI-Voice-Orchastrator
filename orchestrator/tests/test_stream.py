@@ -1,0 +1,22 @@
+from unittest.mock import AsyncMock
+
+from orchestrator import graph as graph_module
+
+
+def test_text_input_roundtrip_over_websocket(client, monkeypatch):
+    monkeypatch.setattr(
+        graph_module.weaviate_client, "search", AsyncMock(return_value=[])
+    )
+    monkeypatch.setattr(
+        graph_module.litellm_client, "chat", AsyncMock(return_value="Hallo zurueck!")
+    )
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        ws.send_json({"type": "hello", "mode": "chat"})
+        ws.send_json({"type": "text_input", "text": "Hallo"})
+
+        assistant_text = ws.receive_json()
+        done = ws.receive_json()
+
+    assert assistant_text == {"type": "assistant_text", "text": "Hallo zurueck!", "final": True}
+    assert done == {"type": "done"}

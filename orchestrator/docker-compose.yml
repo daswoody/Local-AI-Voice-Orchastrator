@@ -1,12 +1,22 @@
 services:
   orchestrator:
     build:
-      context: .
+      # Relativ zum Repo-Root, nicht zu dieser Datei: Coolify fuehrt
+      # "docker compose ... --project-directory <repo-root>" aus, auch wenn
+      # die Compose-Datei selbst in orchestrator/ liegt. Lokales
+      # `docker compose up` aus orchestrator/ heraus funktioniert damit
+      # NICHT - dafuer bewusst `docker build`/`docker run` in der README.
+      context: ./orchestrator
       dockerfile: Dockerfile
     container_name: heimai-orchestrator
     restart: unless-stopped
     env_file:
-      - .env
+      # Optional: existiert im Coolify-Checkout nicht (.env ist gitignored),
+      # Coolify injiziert die in seiner UI gesetzten Variablen selbst.
+      # Fuer lokales `docker compose up` aus dem Repo-Root wird sie genutzt,
+      # falls vorhanden.
+      - path: ./orchestrator/.env
+        required: false
     ports:
       - "8000:8000"
     networks:

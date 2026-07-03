@@ -11,9 +11,14 @@ dependencies = [
 
 [project.optional-dependencies]
 # coqui-tts ist der gepflegte Fork (idiap) der eingestellten Coqui-TTS-Lib -
-# das Original unterstuetzt kein Python 3.11+. Zieht torch (~2 GB Image).
+# das Original unterstuetzt kein Python 3.11+. WICHTIG: coqui-tts
+# deklariert torch NICHT als eigene Abhaengigkeit (erwartet ein
+# vorinstalliertes PyTorch) - ohne die expliziten Eintraege hier startet
+# die Engine mit "No module named 'torch'".
 engine = [
     "coqui-tts>=0.24",
+    "torch>=2.1",
+    "torchaudio>=2.1",
 ]
 dev = [
     "pytest>=8.3",

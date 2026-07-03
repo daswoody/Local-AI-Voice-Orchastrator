@@ -155,6 +155,30 @@ praktisch immer am Zertifikat - so grenzt man es ein:
 4. Danach in Coolify beim Orchestrator-Service pruefen, dass die Domain
    den neuen Certresolver nutzt, und neu deployen.
 
+**Wenn das Zertifikat gueltig ist (Let's Encrypt im Viewer), der Browser
+aber trotzdem "Nicht sicher" zeigt:**
+- Browser komplett neu starten bzw. frisches Tab/Inkognito - manche
+  Browser halten den Sicherheitszustand einer Seite fest, wenn das
+  Zertifikat erst waehrend der Sitzung ausgetauscht wurde.
+- DevTools (F12) -> Tab "Security"/"Sicherheit" oeffnen: dort steht der
+  EXAKTE Grund (Zertifikat, veraltetes TLS, Mixed Content) - das ist die
+  verbindliche Diagnose statt Raten.
+- Zertifikats-KETTE pruefen (wichtig fuer die Android-App - Android
+  laedt fehlende Zwischenzertifikate NICHT selbst nach, Desktop-Browser
+  teils schon):
+  ```bash
+  openssl s_client -connect ai.preuss.app:443 -servername ai.preuss.app -showcerts </dev/null | grep -E "s:|i:|Verify"
+  # Erwartet: 2 Zertifikate (Leaf + Let's-Encrypt-Intermediate) und "Verify return code: 0 (ok)"
+  ```
+  Alternativ https://www.ssllabs.com/ssltest/ - "Chain issues" muss
+  "None" sein (funktioniert nur, wenn die Domain oeffentlich erreichbar
+  ist; bei LAN-only-IP den openssl-Weg aus dem LAN nutzen).
+
+**Server-Adresse fuer die Android-App:** die nackte Basis-URL
+`https://ai.preuss.app` - ohne Pfad, ohne Port. Die App haengt selbst
+`/v1/health`, `/v1/auth/login` usw. an und leitet `wss://` fuer den
+Stream daraus ab. `/admin` ist NUR das Web-Panel fuer den Browser.
+
 Der frueher direkt veroeffentlichte Port 8000 ist aus der Compose-Datei
 entfernt - Klartext-HTTP haette Login-Tokens unverschluesselt uebertragen
 und war eine zweite Quelle fuer "Nicht sicher"-Warnungen. Die App-Clients

@@ -621,10 +621,11 @@ Verbindlicher Vertrag in `docs/PROTOCOL.md` (App-Repo). **Die App ist fertig geb
 **Ursache:** Traefik liefert sein Self-Signed-Fallback-Zertifikat ("TRAEFIK DEFAULT CERT"), weil die HTTP-01-Challenge bei einer Domain, die auf eine private LAN-IP zeigt, zwangsläufig scheitert.
 **Lösung:** DNS-01-Challenge über die Hetzner-DNS-API (Coolify-Doku "Switch Traefik to DNS Challenge"); Schritte in `orchestrator/README.md`. Zusätzlich ist der direkte Klartext-Port 8000 aus der Compose entfernt — Zugriff nur noch über die HTTPS-Domain.
 
-### XTTS-Stimmgenerierung bricht mit "incomplete chunked read" ab (NEU in v1.9.2)
+### XTTS-Stimmgenerierung bricht mit "incomplete chunked read" ab (NEU in v1.9.2, Ursache gefunden in v1.9.3)
 **Symptom:** Filler-Generierung meldet `peer closed connection without sending complete message body`.
-**Ursache:** Der XTTS-Container stirbt WÄHREND der Generierung (RAM-OOM-Kill oder CUDA-OOM sind die üblichen Verdächtigen auf der 16-GB/11-GB-VM) — und weil die Stream-Header schon gesendet waren, wurde jeder Fehler zum kryptischen Verbindungsabriss.
-**Status:** Diagnose-Fähigkeit behoben: XTTS erzeugt den ersten Audio-Chunk jetzt VOR der Antwort (Stream-Priming) — Fehler bei Modell-Laden/Latents/Sample kommen als Klartext-500 an; Mid-Stream-Abrisse werden in den Container-Logs mit Traceback protokolliert, und das Admin-Panel zeigt eine Checkliste (docker logs, dmesg/OOM, nvidia-smi) statt des httpx-Wortlauts. Die eigentliche Ursache auf der VM (RAM vs. VRAM) steht noch zur Prüfung aus — siehe Troubleshooting in `orchestrator/README.md`.
+**Diagnose-Weg:** Weil die Stream-Header schon gesendet waren, wurde jeder Fehler zum kryptischen Verbindungsabriss. Seit dem Stream-Priming (v1.9.2, erster Audio-Chunk vor der Antwort) kommen Fehler als Klartext-500 an — und genau das legte die echte Ursache frei:
+**Ursache:** `No module named 'torch'` — das PyPI-Paket `coqui-tts` (idiap-Fork, 0.27.5) deklariert **torch nicht als Abhängigkeit**, sondern erwartet ein vorinstalliertes PyTorch. Das Docker-Image hatte daher alles außer torch.
+**Status:** Gelöst (v1.9.3): `torch`/`torchaudio` explizit im `engine`-Extra von `tts-xtts`. Achtung beim Redeploy: Der Image-Build lädt jetzt die vollen PyTorch-CUDA-Wheels (~2,5 GB) — dauert einmalig entsprechend.
 
 ---
 
@@ -658,9 +659,10 @@ Verbindlicher Vertrag in `docs/PROTOCOL.md` (App-Repo). **Die App ist fertig geb
 
 ---
 
-**Version:** 1.9.2
+**Version:** 1.9.3
 **Stand:** 2026-07-03
 **Changelog:**
+- v1.9.3 (2026-07-03): **XTTS-Stimmgenerierung repariert:** Ursache des Generierungs-Fehlers war ein fehlendes PyTorch im XTTS-Image (`coqui-tts` deklariert torch nicht als Abhängigkeit) — sichtbar geworden durch das Stream-Priming aus v1.9.2. `torch`/`torchaudio` jetzt explizit im engine-Extra. Erstes Let's-Encrypt-Zertifikat für `ai.preuss.app` ist ausgestellt (Viewer bestätigt LE/YR2); verbleibende "Nicht sicher"-Anzeige wird über Browser-Neustart/DevTools-Security-Tab bzw. Ketten-Check diagnostiziert (Android braucht die volle Zertifikatskette — Hinweise in README).
 - v1.9.2 (2026-07-03): **HTTPS-Härtung + Stimmgenerierungs-Diagnose.** Orchestrator läuft hinter Traefik mit `--proxy-headers`; direkter Klartext-Port 8000 aus der Compose entfernt (Zugriff nur noch über die HTTPS-Domain, README erklärt die "Nicht sicher"-Diagnose inkl. DNS-01-Challenge via Hetzner für LAN-IPs). XTTS-Service: Stream-Priming — erster Audio-Chunk wird vor der Response erzeugt, damit Fehler (Modell-Laden, Latents, kaputte Samples, CUDA-OOM) als Klartext-500 ankommen statt als "incomplete chunked read"; Mid-Stream-Abrisse werden mit Traceback geloggt. Orchestrator übersetzt Stream-Abrisse in eine Admin-taugliche Checkliste (docker logs / dmesg / nvidia-smi). Zwei neue Bekannte-Probleme-Einträge.
 - v1.9.1 (2026-07-03): **Architektur-Korrektur Modell-Panel:** lief fälschlich direkt gegen LM Studios REST-API und verletzte damit das 4.6-Prinzip (LiteLLM als einziger LLM-Zugang). Jetzt: Modell-Liste aus LiteLLM (`/v1/models`), „Aktivieren" setzt `app_settings.active_model` (greift sofort für alle LLM-Calls, Fallback `.env`), physisches Laden/Entladen via LM Studios JIT/Idle-TTL. `LMSTUDIO_BASE_URL` und der LM-Studio-Client sind entfernt. 4.14 entsprechend umgeschrieben.
 - v1.9 (2026-07-03): **Mikro-Phase 1.12 code-seitig umgesetzt** — Tool-Calling als LangGraph-Agent-Loop mit drei Quellen: LiteLLM-MCP-Gateway (4.6, offizielle mcp-SDK über Streamable HTTP, degradiert sauber bei Nichterreichbarkeit), session-gebundene Geräte-Tools aus dem `hello`-Manifest (4.13, `tool_call`/`tool_result` über den WebSocket mit Timeout), `show_card`-Builtin für Karten-Push (4.12). Tool-Trigger aus 1.7d sind damit aktiv (Filler vor Tool-Calls, spezifische Muster vor generischen, max. einer pro Turn). 38 Tests grün; Tool-Loop inkl. Karten-Push zusätzlich live über den WebSocket gegen Fake-Backends validiert. **Offen:** Frame-Feldnamen gegen `docs/PROTOCOL.md` (App-Repo) prüfen, VM-Test gegen echtes Gateway.

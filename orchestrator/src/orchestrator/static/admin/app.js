@@ -147,27 +147,22 @@ views.models = async () => {
   try {
     const data = await api.get("/v1/admin/models");
     rows = data.models.map((model) => {
-      const key = model.model_key || model.key || model.id || "";
-      const instance = model.instance_id || (model.loaded_instances?.[0]?.instance_id) || key;
-      const loaded = model.state === "loaded" || model.loaded === true ||
-        (model.loaded_instances && model.loaded_instances.length > 0);
+      const id = model.id || "";
+      const active = id === data.active_model;
       return `<tr>
-        <td>${esc(key)}</td>
-        <td>${loaded ? '<span class="badge ok">geladen</span>' : '<span class="badge off">nicht geladen</span>'}</td>
+        <td>${esc(id)}</td>
+        <td>${active ? '<span class="badge ok">aktiv</span>' : '<span class="badge off">inaktiv</span>'}</td>
         <td class="actions">
-          ${loaded
-            ? `<button class="small danger" data-action="unloadModel" data-instance="${esc(instance)}">Entladen</button>`
-            : `<button class="small" data-action="loadModel" data-key="${esc(key)}">Laden</button>`}
+          ${active ? "" : `<button class="small" data-action="activateModel" data-id="${esc(id)}">Aktivieren</button>`}
         </td>
       </tr>`;
     }).join("");
   } catch (err) {
-    notice = `<div class="notice error">LM Studio nicht erreichbar: ${esc(err.message)}<br>
-      Base-URL per LMSTUDIO_BASE_URL konfigurieren (aktuell muss die native REST-API von LM Studio >= 0.4.0 laufen).</div>`;
+    notice = `<div class="notice error">LiteLLM nicht erreichbar: ${esc(err.message)}</div>`;
   }
   return `
     <h1>Modelle</h1>
-    <p class="hint">Hot-Swap ueber LM Studios native REST-API. Ein Wechsel bedeutet Sekunden bis Minuten Downtime fuer das LLM (bewusste Admin-Aktion, VRAM-Budget 4.2 beachten).</p>
+    <p class="hint">Liste aus LiteLLM - dem einzigen LLM-Zugang (Architektur 4.6). "Aktivieren" setzt das Modell fuer alle Antworten; LM Studio laedt es beim ersten Request selbst (JIT) und entlaedt ungenutzte Modelle per Idle-TTL. Neue Modelle zuerst in LiteLLM registrieren, dann erscheinen sie hier. VRAM-Budget (4.2) beachten.</p>
     ${notice}
     <section class="block">
       <table>
@@ -458,8 +453,7 @@ const formActions = {
 };
 
 const buttonActions = {
-  loadModel: (data) => api.post("/v1/admin/models/load", { model_key: data.key }),
-  unloadModel: (data) => api.post("/v1/admin/models/unload", { instance_id: data.instance }),
+  activateModel: (data) => api.post("/v1/admin/models/activate", { model: data.id }),
 
   editUser(data) {
     const users = JSON.parse(document.getElementById("users-data").textContent);

@@ -23,6 +23,8 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Nur tests/ einsammeln - die manuellen Skripte matchen sonst *_test.py.
+testpaths = ["tests"]
 
 [build-system]
 requires = ["hatchling"]

@@ -14,7 +14,7 @@ aus `ADMIN_USERNAME`/`ADMIN_PASSWORD` in die leere DB geschrieben.
 
 | Bereich | Funktion |
 |---|---|
-| Modelle | LM-Studio-Modelle anzeigen, laden/entladen (Hot-Swap, native REST-API >= 0.4.0) |
+| Modelle | In LiteLLM registrierte Modelle anzeigen und das aktive Modell setzen (LM Studio laedt per JIT beim ersten Request, Entladen per Idle-TTL) |
 | Charakter | Globaler System-Prompt; pro Nutzer ueberschreibbar (Nutzer-Formular) |
 | Nutzer | Anlegen/Bearbeiten/Loeschen, Tier 1-3, Standard-Stimme, Charakter-Override |
 | Stimmen | Anlegen + WAV-Sample-Upload (landet im XTTS-Voices-Volume, kein docker cp mehr) |

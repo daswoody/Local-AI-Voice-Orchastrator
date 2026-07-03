@@ -4,24 +4,46 @@ from ..config import settings
 
 
 class LiteLLMClient:
-    """Duenner Client gegen LiteLLMs OpenAI-kompatiblen Endpoint (4.6)."""
+    """Client gegen LiteLLM - den EINZIGEN LLM-Zugang des Projekts (4.6).
+    LM Studio haengt dahinter als Provider; der Orchestrator spricht nie
+    direkt mit LM Studio."""
 
     def __init__(self) -> None:
         self._base_url = settings.litellm_base_url.rstrip("/")
         self._api_key = settings.litellm_api_key
-        self._model = settings.litellm_model
+
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._api_key}"}
+
+    def active_model(self) -> str:
+        """Das im Admin-Panel gewaehlte Modell (app_settings), Fallback auf
+        die .env. Pro Call aufgeloest, damit ein Wechsel sofort greift."""
+        try:
+            from .. import repos
+
+            return repos.get_setting("active_model") or settings.litellm_model
+        except Exception:
+            # DB (noch) nicht initialisiert -> .env-Default statt Crash.
+            return settings.litellm_model
+
+    async def list_models(self) -> list[dict]:
+        """Modelle des LiteLLM-Proxys (= dort registrierte LM-Studio-Modelle)."""
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as client:
+            response = await client.get("/v1/models", headers=self._headers())
+            response.raise_for_status()
+            return response.json().get("data", [])
 
     async def chat_message(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
         """Liefert die komplette Assistant-Message (content UND tool_calls) -
         der Agent-Loop (1.12) braucht beides."""
-        payload: dict = {"model": self._model, "messages": messages}
+        payload: dict = {"model": self.active_model(), "messages": messages}
         if tools:
             payload["tools"] = tools
 
         async with httpx.AsyncClient(base_url=self._base_url, timeout=120.0) as client:
             response = await client.post(
                 "/v1/chat/completions",
-                headers={"Authorization": f"Bearer {self._api_key}"},
+                headers=self._headers(),
                 json=payload,
             )
             response.raise_for_status()

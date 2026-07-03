@@ -229,13 +229,42 @@ def test_card_admin_crud_bumps_version(client, admin_headers):
 # ---- Modelle -------------------------------------------------------------------------
 
 
-def test_models_panel_with_mocked_lmstudio(client, admin_headers, monkeypatch):
+def test_models_panel_lists_litellm_models_with_active_flag(client, admin_headers, monkeypatch):
     from unittest.mock import AsyncMock
     from orchestrator.routers import admin as admin_module
 
     monkeypatch.setattr(
-        admin_module.lmstudio_client, "list_models",
-        AsyncMock(return_value=[{"model_key": "gemma-4-e4b", "state": "loaded"}]),
+        admin_module.litellm_client, "list_models",
+        AsyncMock(return_value=[{"id": "gemma-4-e4b"}, {"id": "qwen3-8b"}]),
     )
     response = client.get("/v1/admin/models", headers=admin_headers)
-    assert response.json() == {"models": [{"model_key": "gemma-4-e4b", "state": "loaded"}]}
+    body = response.json()
+    assert [m["id"] for m in body["models"]] == ["gemma-4-e4b", "qwen3-8b"]
+    # Ohne Panel-Auswahl gilt der .env-Fallback
+    assert body["active_model"] == "gemma-4-e4b"
+
+
+def test_activate_model_switches_llm_calls(client, admin_headers, monkeypatch):
+    from unittest.mock import AsyncMock
+    from orchestrator import repos
+    from orchestrator.routers import admin as admin_module
+    from orchestrator.services.litellm_client import litellm_client
+
+    monkeypatch.setattr(
+        admin_module.litellm_client, "list_models",
+        AsyncMock(return_value=[{"id": "gemma-4-e4b"}, {"id": "qwen3-8b"}]),
+    )
+
+    response = client.post(
+        "/v1/admin/models/activate", json={"model": "qwen3-8b"}, headers=admin_headers
+    )
+    assert response.json() == {"active_model": "qwen3-8b"}
+    assert repos.get_setting("active_model") == "qwen3-8b"
+    # Der LLM-Client loest das aktive Modell pro Call auf
+    assert litellm_client.active_model() == "qwen3-8b"
+
+    # Unbekanntes Modell wird abgelehnt
+    bad = client.post(
+        "/v1/admin/models/activate", json={"model": "gibtsnicht"}, headers=admin_headers
+    )
+    assert bad.status_code == 404

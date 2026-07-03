@@ -18,7 +18,7 @@ from ..config import settings
 from ..schemas import CardLayout
 from ..security import hash_password, require_admin
 from ..services import filler_service
-from ..services.lmstudio_client import lmstudio_client
+from ..services.litellm_client import litellm_client
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/admin", dependencies=[Depends(require_admin)])
@@ -296,36 +296,34 @@ def delete_card(card_type: str) -> None:
         raise HTTPException(status_code=404, detail="Kartentyp nicht gefunden")
 
 
-# ---- Modelle (LM Studio Hot-Swap, 4.14) ---------------------------------------------
+# ---- Modelle (ueber LiteLLM, 4.6/4.14) ----------------------------------------------
+#
+# Der Orchestrator spricht NIE direkt mit LM Studio: Das Panel listet die in
+# LiteLLM registrierten Modelle und setzt das aktive Modell fuer alle
+# LLM-Calls. Das physische Laden erledigt LM Studio per JIT beim ersten
+# Request, das Entladen seine Idle-TTL/Auto-Evict.
 
 
-class ModelLoadPayload(BaseModel):
-    model_key: str
-
-
-class ModelUnloadPayload(BaseModel):
-    instance_id: str
+class ModelActivatePayload(BaseModel):
+    model: str
 
 
 @router.get("/models")
 async def list_models() -> dict:
     try:
-        return {"models": await lmstudio_client.list_models()}
+        models = await litellm_client.list_models()
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"LM Studio nicht erreichbar: {exc}")
+        raise HTTPException(status_code=502, detail=f"LiteLLM nicht erreichbar: {exc}")
+    return {"models": models, "active_model": litellm_client.active_model()}
 
 
-@router.post("/models/load")
-async def load_model(payload: ModelLoadPayload) -> dict:
+@router.post("/models/activate")
+async def activate_model(payload: ModelActivatePayload) -> dict:
     try:
-        return await lmstudio_client.load_model(payload.model_key)
+        known = {model.get("id") for model in await litellm_client.list_models()}
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Laden fehlgeschlagen: {exc}")
-
-
-@router.post("/models/unload")
-async def unload_model(payload: ModelUnloadPayload) -> dict:
-    try:
-        return await lmstudio_client.unload_model(payload.instance_id)
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Entladen fehlgeschlagen: {exc}")
+        raise HTTPException(status_code=502, detail=f"LiteLLM nicht erreichbar: {exc}")
+    if payload.model not in known:
+        raise HTTPException(status_code=404, detail=f"Modell '{payload.model}' ist in LiteLLM nicht registriert")
+    repos.set_setting("active_model", payload.model)
+    return {"active_model": payload.model}

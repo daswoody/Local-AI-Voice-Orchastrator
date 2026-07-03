@@ -37,6 +37,11 @@ def _sine_pcm16(seconds: float, rate: int, freq: float = 440.0) -> bytes:
 llm = FastAPI()
 
 
+@llm.get("/v1/models")
+async def list_models() -> dict:
+    return {"object": "list", "data": [{"id": "gemma-4-e4b"}, {"id": "qwen3-8b"}]}
+
+
 @llm.post("/v1/chat/completions")
 async def chat_completions(payload: dict) -> dict:
     messages = payload.get("messages", [])

@@ -1,6 +1,9 @@
-# Voice-Orchestrator (Mikro-Phase 1.7)
+# Voice-Orchestrator (Mikro-Phasen 1.7 + 1.11)
 
 Siehe `../docs/heim-ai-projektspezifikation.md` fuer den Gesamtkontext.
+Die Nachbar-Services der Voice-Pipeline liegen im selben Repo:
+`../stt-service` (1.8, faster-whisper), `../tts-piper` (1.9, Filler),
+`../tts-xtts` (1.10, Hauptstimme).
 
 ## 1. Lokal testen (ohne echtes LiteLLM/Weaviate)
 
@@ -34,6 +37,31 @@ Ohne echtes LiteLLM/Weaviate schlaegt der LLM-Call fehl (Verbindung
 verweigert) - das ist erwartet, solange `.env` nicht auf eure echte
 Infrastruktur zeigt. Die Weaviate-Abfrage selbst scheitert dabei bewusst
 "weich": Sie wird geloggt und uebersprungen, der Rest des Flows laeuft weiter.
+
+### Kompletter Voice-Loop ohne GPU (Fake-Backends)
+
+`scripts/dev_fake_services.py` stellt LiteLLM, STT, Piper und XTTS auf einem
+Port nach (inkl. simulierter LLM-Latenz, damit die Filler-Logik sichtbar wird):
+
+```bash
+# Terminal 1: Fake-Backends
+uv run python scripts/dev_fake_services.py
+
+# Terminal 2: Orchestrator dagegen starten
+LITELLM_BASE_URL=http://127.0.0.1:9100/llm \
+STT_BASE_URL=http://127.0.0.1:9100/stt \
+PIPER_BASE_URL=http://127.0.0.1:9100/piper \
+XTTS_BASE_URL=http://127.0.0.1:9100/xtts \
+WEAVIATE_URL=http://127.0.0.1:9100/weaviate-gibtsnicht \
+FILLER_DELAY_MS=800 \
+uv run uvicorn orchestrator.main:app --port 8000
+
+# Terminal 3: Audio-Roundtrip fahren
+uv run python scripts/manual_audio_ws_test.py
+```
+
+Erwartete Frame-Reihenfolge: `transcript` -> `audio_chunk` (Filler, VOR dem
+Text!) -> `assistant_text` -> `audio_chunk`(s) -> `audio_end` -> `done`.
 
 ## 2. Mit Docker lokal bauen (Vorab-Check vor Coolify)
 
@@ -78,10 +106,33 @@ ihre Compose-Service-Namen erreichen, genau wie die anderen Container.
    eintragen -> Health-Check sollte gruen sein -> Login (`ADMIN_USERNAME`/
    `ADMIN_PASSWORD` aus der `.env`) -> Text-Chat ausprobieren.
 
-## Bekannte Einschraenkungen dieser Mikro-Phase
+## Hinweise fuer den Voice-Stack auf der VM
+
+- Die Compose-Datei deployt alle vier Services zusammen; STT und XTTS
+  reservieren die GPU (`deploy.resources`). Dafuer muss das
+  **nvidia-container-toolkit** auf der AI-VM installiert sein - Fehlerbild
+  sonst: "could not select device driver nvidia". Uebergangsweise laeuft
+  Whisper auch per `WHISPER_DEVICE=cpu` (+ `WHISPER_COMPUTE_TYPE=int8`,
+  GPU-Block entfernen); XTTS ist auf CPU praktisch unbenutzbar.
+- XTTS braucht **deutsche Sample-WAVs** im `xtts-voices`-Volume, benannt
+  `{voice_id}.wav` (z. B. `default-de-female.wav`) - ca. 6-30s sauberes
+  Sprechmaterial, offener Punkt der Spezifikation. Ohne Sample antwortet
+  `/v1/synthesize` mit 404 und der Orchestrator faellt auf Text +
+  App-TTS-Fallback zurueck.
+- Modell-Downloads passieren beim ersten Start in die Volumes
+  (Whisper: faster-whisper-Download, Piper: HuggingFace via Entrypoint,
+  XTTS: Coqui-Downloader, TOS via ENV zugestimmt) - der erste Start
+  dauert entsprechend.
+
+## Bekannte Einschraenkungen dieses Stands
 
 - Login ist ein Stub (ein Admin-User aus der Config) bis 1.7b.
-- `/v1/voices` liefert zwei feste Platzhalter-Stimmen bis 1.7c/1.10.
+- `/v1/voices` liefert zwei feste Platzhalter-Stimmen bis 1.7c; die
+  IDs muessen zu den Sample-WAVs im xtts-voices-Volume passen.
 - Tool-Calling (MCP) kommt erst in 1.12 - der LLM-Call ist reines
   Text-Frage/Antwort ohne Tools.
-- WebSocket kennt nur `text_input`; Audio folgt in 1.11.
+- `transcript` kommt nur als final, nicht partial - Streaming-STT ist ein
+  spaeterer Ausbau, die App zeigt das Transkript dann eben erst nach dem
+  Sprechende.
+- Barge-in (`interrupt`) stoppt die Server-Seite; bereits gesendete
+  Audio-Frames muss die App selbst aus ihrem Player werfen.

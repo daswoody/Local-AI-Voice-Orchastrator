@@ -1,11 +1,12 @@
+# Voice-Stack: Orchestrator + STT + beide TTS-Engines als EIN Coolify-Deploy.
+# Alle build-contexts sind relativ zum Repo-Root, weil Coolify den Build mit
+# --project-directory <repo-root> ausfuehrt, auch wenn diese Datei in
+# orchestrator/ liegt. Lokales `docker compose up` daher vom Repo-Root aus:
+#   docker compose -f orchestrator/docker-compose.yml --project-directory . up
+
 services:
   orchestrator:
     build:
-      # Relativ zum Repo-Root, nicht zu dieser Datei: Coolify fuehrt
-      # "docker compose ... --project-directory <repo-root>" aus, auch wenn
-      # die Compose-Datei selbst in orchestrator/ liegt. Lokales
-      # `docker compose up` aus orchestrator/ heraus funktioniert damit
-      # NICHT - dafuer bewusst `docker build`/`docker run` in der README.
       context: ./orchestrator
       dockerfile: Dockerfile
     container_name: heimai-orchestrator
@@ -13,14 +14,75 @@ services:
     env_file:
       # Optional: existiert im Coolify-Checkout nicht (.env ist gitignored),
       # Coolify injiziert die in seiner UI gesetzten Variablen selbst.
-      # Fuer lokales `docker compose up` aus dem Repo-Root wird sie genutzt,
-      # falls vorhanden.
       - path: ./orchestrator/.env
         required: false
     ports:
       - "8000:8000"
     networks:
       - ai-lab
+    depends_on:
+      - stt
+      - tts-piper
+      - tts-xtts
+
+  stt:
+    build:
+      context: ./stt-service
+      dockerfile: Dockerfile
+    container_name: heimai-stt
+    restart: unless-stopped
+    environment:
+      # Fuer den ersten Test ohne nvidia-container-toolkit: WHISPER_DEVICE=cpu
+      # und WHISPER_COMPUTE_TYPE=int8 setzen (und den deploy-Block unten
+      # entfernen) - Medium auf CPU ist langsam, small/base sind fluessiger.
+      WHISPER_MODEL: medium
+      WHISPER_DEVICE: cuda
+      WHISPER_COMPUTE_TYPE: float16
+    volumes:
+      - whisper-models:/models
+    networks:
+      - ai-lab
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  tts-piper:
+    build:
+      context: ./tts-piper
+      dockerfile: Dockerfile
+    container_name: heimai-tts-piper
+    restart: unless-stopped
+    # Bewusst CPU: Piper ist auch ohne GPU sub-sekundenschnell (4.3) und
+    # das VRAM-Budget (4.2) ist fuer LLM/Whisper/XTTS reserviert.
+    volumes:
+      - piper-models:/models
+    networks:
+      - ai-lab
+
+  tts-xtts:
+    build:
+      context: ./tts-xtts
+      dockerfile: Dockerfile
+    container_name: heimai-tts-xtts
+    restart: unless-stopped
+    volumes:
+      - xtts-models:/models
+      # Deutsche Sample-WAVs ({voice_id}.wav) hier ablegen - offener Punkt
+      # der Spezifikation ("Konkrete Voice-Samples fuer XTTS-v2 erstellen").
+      - xtts-voices:/voices
+    networks:
+      - ai-lab
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
 networks:
   ai-lab:
@@ -28,3 +90,9 @@ networks:
     # Name muss zum bestehenden Docker-Netzwerk von LiteLLM/Weaviate passen
     # (siehe Sektion 4.6 der Spezifikation) - in Coolify unter dem jeweiligen
     # Server/Projekt pruefen, notfalls per `docker network ls` auf der AI-VM.
+
+volumes:
+  whisper-models:
+  piper-models:
+  xtts-models:
+  xtts-voices:

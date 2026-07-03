@@ -74,7 +74,7 @@ Charakter des Projekts: **Lernprojekt** – schrittweise Umsetzung mit erklären
 | Repo | Inhalt | Status |
 |---|---|---|
 | `Android-AI-Assistant-App` (GitHub: daswoody) | Android-App (Phase 2: Kotlin + Compose), Protokoll-Vertrag (`docs/PROTOCOL.md`), Karten-Format (`docs/CARDS.md`), CI-Workflow für APK-Build | ✅ Code komplett, CI grün, Debug-APK als Actions-Artifact (`heimai-debug-apk`) |
-| `Local-AI-Voice-Orchastrator` (GitHub: daswoody) (**NEU in v1.6**) | Voice-Orchestrator (Python, FastAPI + LangGraph) **und** Admin-Frontend (eigenständiges Frontend-Projekt) im selben Repo — siehe 4.14 für die Monorepo-Begründung | 🚧 In Arbeit (ab Mikro-Phase 1.7) |
+| `Local-AI-Voice-Orchastrator` (GitHub: daswoody) (**NEU in v1.6**) | Monorepo: `orchestrator/` (FastAPI + LangGraph, 1.7+1.11), `stt-service/` (faster-whisper, 1.8), `tts-piper/` (Filler, 1.9), `tts-xtts/` (Hauptstimme, 1.10), später `admin-frontend/` (1.7c) — siehe 4.14 | 🚧 1.7–1.11 code-seitig fertig (v1.7), VM-Validierung offen |
 
 ---
 
@@ -382,13 +382,14 @@ Build-Pipeline kopiert das gebaute Admin-Frontend nach `orchestrator/static/admi
 - SearXNG-API testen, Firecrawl lokal aufsetzen, Headscale-Routing, MCP-Wrapper in LiteLLM registrieren
 - **Erfolg:** Das LLM kann das Web durchsuchen und Seiten crawlen.
 
-#### Mikro-Phase 1.7: Voice-Orchestrator-Skelett (Python)
+#### ✅ Mikro-Phase 1.7: Voice-Orchestrator-Skelett (Python) – CODE-SEITIG FERTIG (v1.7)
 - Python-Projekt aufsetzen (FastAPI + LangGraph)
 - Minimaler Flow: Text rein → LLM-Call → Text raus
 - Anbindung an LiteLLM (LLM und MCP-Tools)
 - RAG-Anbindung an Weaviate mit `query:`/`passage:`-Präfix-Konvention (4.9)
 - REST-Endpoints aus `docs/PROTOCOL.md` implementieren (`/v1/health`, `/v1/auth/login`, `/v1/voices`, `/v1/cards/layouts`) sowie den WebSocket `/v1/assistant/stream` zunächst im Text-Modus (`text_input` → `assistant_text` → `done`)
 - **Erfolg:** Eigener API-Service liefert LLM-Antworten — **direkt testbar aus der Android-App** (Text-Chat inkl. TTS-Fallback-Vorlesen).
+- *Stand v1.7: Umgesetzt und mit gemockten Backends getestet (15 Tests). Weaviate bewusst per GraphQL/REST statt v4-Client (kein gRPC-Port eingerichtet). Offen: Validierung gegen die echte VM-Infra; App-Test wartet auf HTTPS (Zertifikats-Umzug läuft).*
 
 #### Mikro-Phase 1.7b: Minimal-User-/Charakter-Datenmodell (Vorzug aus Phase 4.1, NEU in v1.6)
 - Leichtgewichtiges Schema (SQLite oder Postgres, siehe 4.1): `users(id, username, password_hash, display_name, tier, system_prompt_override, default_voice_id)`
@@ -403,22 +404,26 @@ Build-Pipeline kopiert das gebaute Admin-Frontend nach `orchestrator/static/admi
 - Kann parallel zu 1.8–1.11 entstehen, sobald 1.7 und 1.7b stehen
 - **Erfolg:** Admin kann sich einloggen, eine Karte anlegen, und sie erscheint (nach Version-Bump) in der App.
 
-#### Mikro-Phase 1.8: STT-Service (Whisper)
+#### ✅ Mikro-Phase 1.8: STT-Service (Whisper) – CODE-SEITIG FERTIG (v1.7)
 - faster-whisper als eigenständigen Service, API: Audio rein → Text raus, Latenz messen
 - **Erfolg:** Audiodatei hochladen → Text zurück.
+- *Stand v1.7: `stt-service/` — WAV (beliebige Rate/Kanäle → 16k mono) oder Roh-PCM16, Antwort mit Latenz-Metriken. Whisper Medium, Deutsch fest. GPU über cuBLAS/cuDNN-pip-Pakete statt CUDA-Basis-Image (auf VM verifizieren). Offen: echte Inferenz + Latenzmessung auf der VM.*
 
-#### Mikro-Phase 1.9: TTS-Service Piper (Filler-Engine)
+#### ✅ Mikro-Phase 1.9: TTS-Service Piper (Filler-Engine) – CODE-SEITIG FERTIG (v1.7)
 - Piper-Container mit deutschem Voice-Modell, API: Text rein → Audio raus
 - **Erfolg:** Text-zu-Sprache (schnell, mittlere Qualität).
+- *Stand v1.7: `tts-piper/` — Wrapper um das piper-CLI (stabil über Versionen, gegen piper-tts 1.4.2 verifiziert), `de_DE-thorsten-medium` wird beim ersten Start von HuggingFace ins Volume geladen. Offen: Download+Synthese auf der VM (HuggingFace war aus der Entwicklungs-Sandbox geblockt).*
 
-#### Mikro-Phase 1.10: TTS-Service XTTS-v2 (Hauptstimme)
+#### ✅ Mikro-Phase 1.10: TTS-Service XTTS-v2 (Hauptstimme) – CODE-SEITIG FERTIG (v1.7)
 - XTTS-v2 mit deutschem Voice-Sample, API mit Streaming-Output
 - **Erfolg:** Hochwertige deutsche Sprachausgabe per API.
+- *Stand v1.7: `tts-xtts/` — coqui-tts-Fork (idiap, das Original kann kein Python 3.11), Streaming als Roh-PCM16/24k, Latents-Cache pro voice_id, Stimmen = Sample-WAVs im `/voices`-Volume. Offen: deutsche Voice-Samples erstellen (offener Punkt), GPU-Inferenz auf der VM.*
 
-#### Mikro-Phase 1.11: End-to-End-Voice-Loop
+#### ✅ Mikro-Phase 1.11: End-to-End-Voice-Loop – CODE-SEITIG FERTIG (v1.7)
 - Orchestrator verbindet STT + LLM + TTS, Filler-Logik (Piper parallel zu LLM-Call)
 - Audio-Pfad des WebSocket-Protokolls komplettieren (`audio_chunk` rein/raus, `transcript`-Streaming) — danach funktionieren Push-to-Talk, Realtime Talk und der Wake-Word-Assistant-Modus der App End-to-End
 - **Erfolg:** Vollständige Voice-Pipeline — vom Handy aus sprechen, Antwort hören.
+- *Stand v1.7: Audio-Pfad komplett (`audio_chunk`/`audio_end` rein und raus, `transcript` final, `interrupt`/Barge-in bricht LLM- und Audio-Stream ab, neuer Input = implizites Barge-in). Filler läuft latenzbasiert: erst wenn das LLM länger als `FILLER_DELAY_MS` braucht, spielt Piper eine 4.3-Phrase, resampled auf die Stream-Rate 24 kHz — für die App ein zusammenhängender Stream. End-to-End mit Fake-Backends validiert (`scripts/dev_fake_services.py`); v1-Einschränkungen: `transcript` nur final (kein Streaming-STT), Erfolgskriterium „vom Handy aus" steht bis HTTPS/VM-Deploy aus.*
 
 #### Mikro-Phase 1.12: Erstes Tool-Calling im Orchestrator
 - LangGraph-Flow um Tool-Routing erweitern, 2-3 Beispiel-Tools (Wetter, Web-Search, Zeit)
@@ -594,6 +599,16 @@ Build-Pipeline kopiert das gebaute Admin-Frontend nach `orchestrator/static/admi
 **Symptom:** Bei aktivem Wake Word zeigt Android permanent den grünen Mikrofon-Indikator und eine Foreground-Notification.
 **Status:** Erwartetes Plattform-Verhalten (Privacy-Feature), kein Bug. Akku-Last durch Porcupine selbst ist gering; dominanter Faktor ist das offene Mikrofon.
 
+### Coolify: Compose-Pfade sind Repo-Root-relativ (NEU in v1.7)
+**Symptom:** `failed to read dockerfile: open Dockerfile: no such file or directory` beim Deploy, obwohl Base Directory gesetzt ist.
+**Ursache:** Coolify führt `docker compose` mit `--project-directory <Repo-Root>` aus — das Base Directory steuert nur, wo die Compose-Datei *gesucht* wird, nicht wie Pfade darin aufgelöst werden.
+**Status:** Gelöst. Alle `build.context`-Pfade in `orchestrator/docker-compose.yml` sind Repo-Root-relativ (`./orchestrator`, `./stt-service`, …); `env_file` ist optional markiert, weil `.env` gitignored ist.
+
+### Browser zeigt {"detail":"Not Found"} auf der Orchestrator-Domain (NEU in v1.7)
+**Symptom:** Aufruf der nackten Domain sieht nach kaputtem Deploy aus.
+**Ursache:** Kein Fehler — das ist FastAPIs Standard-404: Der Service lief, es gab nur keine Route auf `/`.
+**Status:** Gelöst. `GET /` liefert jetzt Service-Info mit Verweis auf `/docs` und `/v1/health`.
+
 ---
 
 ## 8. Wichtige Constraints & Reminder
@@ -626,9 +641,10 @@ Build-Pipeline kopiert das gebaute Admin-Frontend nach `orchestrator/static/admi
 
 ---
 
-**Version:** 1.6
-**Stand:** 2026-07-01
+**Version:** 1.7
+**Stand:** 2026-07-03
 **Changelog:**
+- v1.7 (2026-07-03): **Mikro-Phasen 1.7–1.11 code-seitig umgesetzt** (Repo `Local-AI-Voice-Orchastrator`, Monorepo mit `orchestrator/`, `stt-service/`, `tts-piper/`, `tts-xtts/`). Orchestrator: Protokoll-Endpoints + WebSocket mit komplettem Audio-Pfad, latenzbasierter Filler-Logik (Piper → 24k resampled), Barge-in, RAG mit e5-Präfixen und Relativ-Filter (4.9), Tier-1-Ausschluss von PrivateKnowledge (4.4). Services jeweils mit lazy geladener Engine (Tests ohne GPU/Modelle), eigenem Dockerfile und Modell-Download in Volumes beim ersten Start. Gemeinsames Coolify-Deploy über eine Compose-Datei (GPU-Reservierung für STT/XTTS — nvidia-container-toolkit auf der VM nötig). End-to-End mit Fake-Backends validiert; **offen: Validierung auf der echten VM** (GPU-Inferenz, Modell-Downloads, deutsche XTTS-Voice-Samples) und App-Test nach HTTPS-Umstellung (Zertifikate via Hetzner in Arbeit). Coolify-Pfad-Eigenheit dokumentiert (--project-directory = Repo-Root). Bekanntes-Problem-Eintrag: FastAPI-404 auf `/` war kein Deploy-Fehler → Root-Route ergänzt.
 - v1.6 (2026-07-01): Vorbereitung der Mikro-Phasen 1.7–1.11 (Voice-Orchestrator). Neue Sektion **4.14 Admin-Frontend & Charakter-/Rechte-Verwaltung** — zentrale Verwaltungsoberfläche für Modelle, Charaktere/System-Prompts, Stimmen und Karten-Layouts, entschieden als Monorepo mit dem Voice-Orchestrator (kein eigenes Repo), um Protokoll-Drift wie zwischen App- und Orchestrator-Repo zu vermeiden. Neue Mikro-Phasen **1.7b** (Minimal-User-/Charakter-Datenmodell, Vorzug aus 4.1) und **1.7c** (Admin-Frontend-Grundgerüst). Begriffsklärung „Skills" (Ablauf-Definitionen im Orchestrator, referenzieren MCP-Tools + Karten; MCP-Verwaltung bleibt bei LiteLLM, Admin-Frontend verwaltet nur die Karten-Seite). Modell-Hot-Swap-Fähigkeit von LM Studio recherchiert und dokumentiert (native REST-API mit JIT/TTL, Quellen in 4.14). Neuer Eintrag in Abschnitt 3 (Codebasen). Offener Punkt ergänzt: Admin-Frontend-Tech-Stack (SPA vs. htmx) noch nicht final.
 - v1.5 (2026-06-12): **Phase 2 (Android, Mikro-Phasen 2.1–2.4) app-seitig komplett umgesetzt** — Repo `Android-AI-Assistant-App`, CI-Build grün, Debug-APK als Actions-Artifact. Neue Architektur-Sektionen: 4.11 App-Tech-Stack (Kotlin+Compose statt Flutter, Porcupine als Wake-Word-Engine), 4.12 Karten-System & Card-Layout-Server (zentrale Verwaltung, Layout-Updates ohne App-Update, plattformneutral für Windows), 4.13 App↔Orchestrator-Protokoll inkl. Geräte-Tool-Bridge und TTS-Fallback-Regel. Mikro-Phasen 1.7/1.11/1.12 um Protokoll-Implementierung erweitert, 1.14 relativiert. Tiered-Security-Umsetzung in der App dokumentiert (4.4); Geräte-Tools als dokumentierte MCP-Ausnahme (4.6). Drei neue bekannte Probleme (Android-15-FGS, Mikrofon-Exklusivität, Mikrofon-Indikator). Offene Punkte: Wake-Word-Engine und App-Stack entschieden; neu: Orchestrator-Mock, Release-Signing, On-Device-Action-Modell, Binär-Frames.
 - v1.4 (2026-06-04): Mikro-Phase 1.5b abgeschlossen (4 Collections, Test-Daten, semantische Suche validiert). Neue Mikro-Phase 1.5c (Retention-Workflow). Neue Sektionen 4.9 (RAG-Tuning) und 4.10 (UTC-First). e5-Hochbias dokumentiert.
@@ -636,4 +652,4 @@ Build-Pipeline kopiert das gebaute Admin-Frontend nach `orchestrator/static/admi
 - v1.2 (2026-05-11): Mikro-Phase 1.4 abgeschlossen. LiteLLM als zentrales MCP-Gateway. mcp-time deployed.
 - v1.1 (2026-04-29): Headscale als "noch nicht installiert" markiert.
 
-**Nächster Schritt:** Mikro-Phase 1.7 (Voice-Orchestrator-Skelett) inkl. 1.7b (Minimal-User-Modell). Danach 1.7c (Admin-Frontend-Grundgerüst) — kann parallel zu den STT/TTS-Services (1.8–1.10) laufen. Vorher weiterhin optional: 1.5c (Retention-Workflow, Server-Seite) und 1.6 (Web-Search) sind laut Reihenfolge noch offen.
+**Nächster Schritt:** VM-Validierung des Voice-Stacks (Coolify-Deploy aller vier Services, Modell-Downloads, GPU-Check, deutsche XTTS-Voice-Samples einspielen) — parallel läuft der HTTPS-Umzug (Hetzner-Zertifikate) für den App-End-to-End-Test. Code-seitig als Nächstes: 1.7b (Minimal-User-Modell) und 1.7c (Admin-Frontend-Grundgerüst). Laut Reihenfolge weiterhin offen: 1.5c (Retention-Workflow) und 1.6 (Web-Search).

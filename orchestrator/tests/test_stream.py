@@ -8,7 +8,8 @@ def test_text_input_roundtrip_over_websocket(client, monkeypatch):
         graph_module.weaviate_client, "search", AsyncMock(return_value=[])
     )
     monkeypatch.setattr(
-        graph_module.litellm_client, "chat", AsyncMock(return_value="Hallo zurueck!")
+        graph_module.litellm_client, "chat_message",
+        AsyncMock(return_value={"role": "assistant", "content": "Hallo zurueck!"}),
     )
 
     with client.websocket_connect("/v1/assistant/stream") as ws:

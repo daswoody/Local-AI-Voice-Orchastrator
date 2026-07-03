@@ -39,12 +39,35 @@ llm = FastAPI()
 
 @llm.post("/v1/chat/completions")
 async def chat_completions(payload: dict) -> dict:
+    messages = payload.get("messages", [])
     user_text = next(
-        (m["content"] for m in reversed(payload.get("messages", [])) if m.get("role") == "user"),
-        "",
+        (m["content"] for m in reversed(messages) if m.get("role") == "user"), ""
     )
+    has_tool_result = any(m.get("role") == "tool" for m in messages)
+
+    # Tool-Demo (1.12): Enthaelt die Frage "karte", ruft das Fake-LLM das
+    # show_card-Builtin auf - komplett server-seitig, kein MCP noetig.
+    if "karte" in user_text.lower() and payload.get("tools") and not has_tool_result:
+        return {"choices": [{"message": {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": "call_demo",
+                "type": "function",
+                "function": {
+                    "name": "show_card",
+                    "arguments": '{"card_type": "generic", "title": "Demo",'
+                                 ' "data": {"headline": "Fake-Karte", "body": "Aus dem Tool-Loop."}}',
+                },
+            }],
+        }}]}
+
     await asyncio.sleep(2.0)  # LLM-Latenz simulieren -> Filler-Logik wird sichtbar
-    return {"choices": [{"message": {"content": f"Fake-Antwort auf: {user_text}"}}]}
+    suffix = " (nach Tool-Aufruf)" if has_tool_result else ""
+    return {"choices": [{"message": {
+        "role": "assistant",
+        "content": f"Fake-Antwort auf: {user_text}{suffix}",
+    }}]}
 
 
 # --- Fake STT ----------------------------------------------------------------

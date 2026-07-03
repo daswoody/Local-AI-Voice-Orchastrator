@@ -22,13 +22,13 @@ async def _fake_xtts_stream(text, voice_id, language=None):
 
 
 def _patch_pipeline(monkeypatch, llm_response="Antwort", llm_delay=0.0):
-    async def fake_chat(messages):
+    async def fake_chat(messages, tools=None):
         if llm_delay:
             await asyncio.sleep(llm_delay)
-        return llm_response
+        return {"role": "assistant", "content": llm_response}
 
     monkeypatch.setattr(graph_module.weaviate_client, "search", AsyncMock(return_value=[]))
-    monkeypatch.setattr(graph_module.litellm_client, "chat", fake_chat)
+    monkeypatch.setattr(graph_module.litellm_client, "chat_message", fake_chat)
     monkeypatch.setattr(
         stream_module.stt_client, "transcribe", AsyncMock(return_value="Wie ist das Wetter?")
     )

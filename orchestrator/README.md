@@ -146,15 +146,42 @@ ihre Compose-Service-Namen erreichen, genau wie die anderen Container.
   XTTS: Coqui-Downloader, TOS via ENV zugestimmt) - der erste Start
   dauert entsprechend.
 
+## Tool-Calling (Mikro-Phase 1.12)
+
+Der Antwort-Pfad ist ein Agent-Loop (LangGraph: retrieve -> agent -> tools
+-> agent ...) mit drei Tool-Quellen:
+
+- **Server-Tools** ueber LiteLLMs MCP-Gateway (`LITELLM_MCP_URL`, Default
+  `http://litellm:4000/mcp`): alles, was dort registriert ist (z. B.
+  mcp-time), steht dem LLM automatisch zur Verfuegung. Gateway nicht
+  erreichbar = Turn laeuft ohne Server-Tools weiter, kein Fehler.
+- **Geraete-Tools** aus dem `hello`-Manifest der App (4.13): der Orchestrator
+  schickt `tool_call` ueber den WebSocket, die App antwortet mit
+  `tool_result` (Timeout `DEVICE_TOOL_TIMEOUT_S`, Default 60s wegen
+  moeglicher Bestaetigungs-Dialoge).
+- **show_card** (builtin): das LLM kann parallel zur Antwort eine Karte
+  (4.12) in die App pushen; verfuegbare Kartentypen werden ihm aus der DB
+  in die Tool-Beschreibung gereicht.
+
+Die Admin-definierten **Tool-Trigger** (1.7d) feuern jetzt: Vor einem
+Tool-Call spielt der Orchestrator den passenden Filler (spezifisches
+Muster wie `Calendar-*` schlaegt den generischen), hoechstens ein Filler
+pro Turn.
+
+**Wichtig - gegen `docs/PROTOCOL.md` im App-Repo verifizieren** (war aus
+dieser Umgebung nicht abrufbar): die Feldnamen der Frames
+`tool_call` (`{type, id, name, arguments}`),
+`tool_result` (`{type, id, result}`) und
+`card` (`{type: "card", card: {type, version, title?, data}}`).
+
 ## Bekannte Einschraenkungen dieses Stands
 
-- Login ist ein Stub (ein Admin-User aus der Config) bis 1.7b.
-- `/v1/voices` liefert zwei feste Platzhalter-Stimmen bis 1.7c; die
-  IDs muessen zu den Sample-WAVs im xtts-voices-Volume passen.
-- Tool-Calling (MCP) kommt erst in 1.12 - der LLM-Call ist reines
-  Text-Frage/Antwort ohne Tools.
+- `/v1/voices` liefert die Stimmen aus der DB; die IDs muessen zu den
+  Sample-WAVs im xtts-voices-Volume passen (Upload via Admin-Panel).
 - `transcript` kommt nur als final, nicht partial - Streaming-STT ist ein
   spaeterer Ausbau, die App zeigt das Transkript dann eben erst nach dem
   Sprechende.
 - Barge-in (`interrupt`) stoppt die Server-Seite; bereits gesendete
   Audio-Frames muss die App selbst aus ihrem Player werfen.
+- `search`-Trigger feuern erst, wenn Web-Search (1.6) als eigener Schritt
+  existiert; Tool- und Nachdenk-Trigger sind aktiv.

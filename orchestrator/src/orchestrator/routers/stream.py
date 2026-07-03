@@ -1,16 +1,20 @@
 import asyncio
 import contextlib
+import json
 import logging
+import uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from .. import repos
 from ..audio import b64_to_pcm, chunk_pcm, pcm_to_b64, resample_pcm16
 from ..config import settings
-from ..graph import orchestrator_graph
+from ..graph import initial_state, orchestrator_graph
+from ..schemas import DeviceTool
 from ..security import decode_access_token
 from ..services import filler_service
 from ..services.stt_client import stt_client
+from ..services.tool_executor import ToolExecutor
 from ..services.tts_client import piper_client, xtts_client
 
 logger = logging.getLogger(__name__)
@@ -41,6 +45,13 @@ class StreamSession:
         self.mode = "chat"
         self.audio_buffer = bytearray()
         self.active_task: asyncio.Task | None = None
+        # Geraete-Tool-Bridge (4.13): Manifest aus hello, laufende
+        # tool_call-Roundtrips warten hier auf ihr tool_result.
+        self.device_tools: list[DeviceTool] = []
+        self.pending_tool_results: dict[str, asyncio.Future] = {}
+        # Hoechstens ein Filler pro Turn (thinking ODER tool) - sonst
+        # stapeln sich bei mehreren Tool-Calls die Phrasen.
+        self._filler_played = False
 
         self.tier, self.username = _resolve_identity(websocket)
         self.system_prompt = repos.effective_system_prompt(self.username)
@@ -59,8 +70,16 @@ class StreamSession:
             self.mode = frame.get("mode", "chat")
             if frame.get("voice_id"):
                 self.voice_id = frame["voice_id"]
-            # Geraete-Tool-Manifest wird erst mit 1.12 als LLM-Tools
-            # registriert (4.13).
+            self.device_tools = _parse_device_tools(frame.get("device_tools") or [])
+            return
+
+        if frame_type == "tool_result":
+            # Antwort der App auf einen tool_call (4.13) - dem wartenden
+            # Roundtrip zustellen. Unbekannte IDs (z. B. nach Barge-in)
+            # verfallen kommentarlos.
+            future = self.pending_tool_results.pop(str(frame.get("id")), None)
+            if future is not None and not future.done():
+                future.set_result(frame)
             return
 
         if frame_type == "text_input":
@@ -135,21 +154,18 @@ class StreamSession:
 
     async def _respond(self, text: str, want_audio: bool) -> None:
         try:
+            self._filler_played = False
+            executor = self._make_executor(want_audio)
             llm_task = asyncio.create_task(
                 orchestrator_graph.ainvoke(
-                    {
-                        "text": text,
-                        "tier": self.tier,
-                        "system_prompt": self.system_prompt,
-                        "context_chunks": [],
-                        "response": "",
-                    }
+                    initial_state(text, self.tier, self.system_prompt, executor)
                 )
             )
 
             if want_audio and settings.filler_enabled:
                 done, _ = await asyncio.wait({llm_task}, timeout=settings.filler_delay_ms / 1000)
-                if not done:
+                if not done and not self._filler_played:
+                    self._filler_played = True
                     await self._stream_filler(kind="thinking")
 
             result = await llm_task
@@ -171,6 +187,51 @@ class StreamSession:
                     {"type": "error", "message": "interner Fehler bei der Antwortgenerierung"}
                 )
                 await self.ws.send_json({"type": "done"})
+
+    def _make_executor(self, want_audio: bool) -> ToolExecutor:
+        """Session-gebundener Executor (1.12): Geraete-Tools aus dem
+        hello-Manifest, Karten-Push und Tool-Filler haengen an DIESER
+        Verbindung."""
+
+        async def card_push(envelope: dict) -> None:
+            # Frame-Format gegen docs/PROTOCOL.md im App-Repo verifizieren
+            # (war aus dieser Umgebung nicht abrufbar).
+            await self.ws.send_json({"type": "card", "card": envelope})
+
+        async def on_tool_start(tool_name: str) -> None:
+            # Tool-Trigger aus dem Admin-Panel (1.7d): "Ich schaue kurz in
+            # den Kalender." - nur im Audio-Modus, hoechstens einmal pro Turn.
+            if want_audio and settings.filler_enabled and not self._filler_played:
+                self._filler_played = True
+                await self._stream_filler(kind="tool", tool_name=tool_name)
+
+        return ToolExecutor(
+            device_tools=self.device_tools,
+            device_call=self._call_device_tool,
+            card_push=card_push,
+            on_tool_start=on_tool_start,
+        )
+
+    async def _call_device_tool(self, name: str, arguments: dict) -> str:
+        """Geraete-Tool-Roundtrip (4.13): tool_call an die App, auf das
+        zugehoerige tool_result warten. Der Timeout ist grosszuegig, weil
+        sensible Tools eine Bestaetigung des Nutzers erfordern koennen (4.4).
+        Frame-Format gegen docs/PROTOCOL.md verifizieren."""
+        call_id = uuid.uuid4().hex
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        self.pending_tool_results[call_id] = future
+        try:
+            await self.ws.send_json(
+                {"type": "tool_call", "id": call_id, "name": name, "arguments": arguments}
+            )
+            frame = await asyncio.wait_for(future, timeout=settings.device_tool_timeout_s)
+        except asyncio.TimeoutError:
+            return f"Tool-Fehler: Geraet hat nicht innerhalb von {settings.device_tool_timeout_s}s geantwortet"
+        finally:
+            self.pending_tool_results.pop(call_id, None)
+
+        result = frame.get("result", frame.get("error", ""))
+        return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
 
     async def _stream_filler(self, kind: str, tool_name: str | None = None) -> None:
         """Filler nach 4.3/4.14: bevorzugt vorgeneriertes XTTS-Audio in der
@@ -220,6 +281,16 @@ class StreamSession:
             # killen: Text ist schon raus, die App liest ihn laut
             # TTS-Fallback-Regel (4.13) selbst vor.
             logger.warning("Haupt-TTS fehlgeschlagen - Antwort bleibt Text-only")
+
+
+def _parse_device_tools(raw: list) -> list[DeviceTool]:
+    tools = []
+    for entry in raw:
+        try:
+            tools.append(DeviceTool.model_validate(entry))
+        except Exception:
+            logger.warning("Ungueltiger Geraete-Tool-Eintrag im hello-Manifest: %r", entry)
+    return tools
 
 
 def _resolve_identity(websocket: WebSocket) -> tuple[int, str | None]:

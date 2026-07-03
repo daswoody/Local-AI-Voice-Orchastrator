@@ -25,12 +25,12 @@ async def _fake_xtts_stream(text, voice_id, language=None):
 
 
 def test_cached_filler_is_used_instead_of_piper(client, monkeypatch):
-    async def slow_chat(messages):
+    async def slow_chat(messages, tools=None):
         await asyncio.sleep(0.3)
-        return "Antwort"
+        return {"role": "assistant", "content": "Antwort"}
 
     monkeypatch.setattr(graph_module.weaviate_client, "search", AsyncMock(return_value=[]))
-    monkeypatch.setattr(graph_module.litellm_client, "chat", slow_chat)
+    monkeypatch.setattr(graph_module.litellm_client, "chat_message", slow_chat)
     monkeypatch.setattr(stream_module.xtts_client, "stream", _fake_xtts_stream)
     monkeypatch.setattr(settings, "filler_delay_ms", 20)
 
@@ -58,12 +58,12 @@ def test_cached_filler_is_used_instead_of_piper(client, monkeypatch):
 
 
 def test_piper_fallback_when_no_cached_audio(client, monkeypatch):
-    async def slow_chat(messages):
+    async def slow_chat(messages, tools=None):
         await asyncio.sleep(0.3)
-        return "Antwort"
+        return {"role": "assistant", "content": "Antwort"}
 
     monkeypatch.setattr(graph_module.weaviate_client, "search", AsyncMock(return_value=[]))
-    monkeypatch.setattr(graph_module.litellm_client, "chat", slow_chat)
+    monkeypatch.setattr(graph_module.litellm_client, "chat_message", slow_chat)
     monkeypatch.setattr(stream_module.xtts_client, "stream", _fake_xtts_stream)
     monkeypatch.setattr(settings, "filler_delay_ms", 20)
 
@@ -86,16 +86,16 @@ def test_piper_fallback_when_no_cached_audio(client, monkeypatch):
 def test_user_specific_voice_and_prompt_from_token(client, monkeypatch):
     captured = {}
 
-    async def capture_chat(messages):
+    async def capture_chat(messages, tools=None):
         captured["system"] = messages[0]["content"]
-        return "Ok"
+        return {"role": "assistant", "content": "Ok"}
 
     async def capture_xtts(text, voice_id, language=None):
         captured["voice_id"] = voice_id
         yield 24000, b"\x01\x02" * 100
 
     monkeypatch.setattr(graph_module.weaviate_client, "search", AsyncMock(return_value=[]))
-    monkeypatch.setattr(graph_module.litellm_client, "chat", capture_chat)
+    monkeypatch.setattr(graph_module.litellm_client, "chat_message", capture_chat)
     monkeypatch.setattr(stream_module.xtts_client, "stream", capture_xtts)
 
     from orchestrator.security import hash_password
@@ -123,7 +123,8 @@ def test_tts_failure_still_delivers_text(client, monkeypatch):
         yield  # pragma: no cover
 
     monkeypatch.setattr(graph_module.weaviate_client, "search", AsyncMock(return_value=[]))
-    monkeypatch.setattr(graph_module.litellm_client, "chat", AsyncMock(return_value="Antwort"))
+    monkeypatch.setattr(graph_module.litellm_client, "chat_message",
+                        AsyncMock(return_value={"role": "assistant", "content": "Antwort"}))
     monkeypatch.setattr(stream_module.xtts_client, "stream", broken_xtts)
     monkeypatch.setattr(settings, "filler_enabled", False)
 

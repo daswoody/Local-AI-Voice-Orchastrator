@@ -8,6 +8,18 @@ class Settings(BaseSettings):
     litellm_api_key: str = "sk-changeme"
     litellm_model: str = "gemma-4-e4b"
 
+    # MCP-Gateway von LiteLLM (4.6): aggregiert alle registrierten
+    # MCP-Server (z. B. mcp-time) unter einem Endpoint.
+    litellm_mcp_url: str = "http://litellm:4000/mcp"
+    # Tools-Liste nicht bei jedem Turn neu vom Gateway holen.
+    mcp_tools_cache_seconds: int = 300
+    # Obergrenze fuer LLM->Tool->LLM-Runden pro Turn (Schutz vor
+    # Endlosschleifen); danach wird ohne Tools final geantwortet.
+    tool_max_iterations: int = 5
+    # Geraete-Tools koennen eine App-seitige Bestaetigung erfordern (4.4) -
+    # der Nutzer braucht Zeit zum Tippen.
+    device_tool_timeout_s: int = 60
+
     weaviate_url: str = "http://weaviate:8080"
     weaviate_api_key: str | None = None
     weaviate_content_property: str = "content"

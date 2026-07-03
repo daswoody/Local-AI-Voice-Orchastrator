@@ -627,6 +627,7 @@ Verbindlicher Vertrag in `docs/PROTOCOL.md` (App-Repo). **Die App ist fertig geb
 **Ursache:** `No module named 'torch'` — das PyPI-Paket `coqui-tts` (idiap-Fork, 0.27.5) deklariert **torch nicht als Abhängigkeit**, sondern erwartet ein vorinstalliertes PyTorch. Das Docker-Image hatte daher alles außer torch.
 **Status:** Gelöst (v1.9.3): `torch`/`torchaudio` explizit im `engine`-Extra von `tts-xtts`. Achtung beim Redeploy: Der Image-Build lädt jetzt die vollen PyTorch-CUDA-Wheels (~2,5 GB) — dauert einmalig entsprechend.
 **Nachschlag (v1.9.4):** Danach zweiter Versions-Konflikt derselben Sorte — `coqui-tts` deklariert auch für `transformers` keine Obergrenze, nutzt aber 4.x-Interna (`isin_mps_friendly`, in transformers 5 entfernt). Gelöst durch Pin `transformers>=4.43,<5` (Lock: 4.57.6, Funktion dort verifiziert). Merksatz für 1.13+: Beim idiap-Fork von Coqui die transitiven Versionen im Lock gegenprüfen — er pflegt seine Grenzen nicht sauber.
+**Nachschlag (v1.9.5):** Dritte Schicht — ab PyTorch 2.9 verlangt torchaudio für Audio-I/O die separate `torchcodec`-Bibliothek. Gelöst über Coquis eigenes Extra (`coqui-tts[codec]`, Lock: torchcodec 0.14.0) plus `ffmpeg` per apt im Image (torchcodec lädt FFmpeg-Bibliotheken zur Laufzeit, die Wheels bringen sie nicht mit).
 
 ---
 
@@ -660,9 +661,10 @@ Verbindlicher Vertrag in `docs/PROTOCOL.md` (App-Repo). **Die App ist fertig geb
 
 ---
 
-**Version:** 1.9.4
+**Version:** 1.9.5
 **Stand:** 2026-07-03
 **Changelog:**
+- v1.9.5 (2026-07-03): Dritter XTTS-Abhängigkeits-Fix: `coqui-tts[codec]` (torchcodec — ab PyTorch 2.9 Pflicht für torchaudio-Audio-I/O) + `ffmpeg` im Image.
 - v1.9.4 (2026-07-03): Zweiter XTTS-Abhängigkeits-Fix: `transformers<5` gepinnt (coqui-tts nutzt `isin_mps_friendly` aus der 4.x-API, in v5 entfernt; Lock jetzt 4.57.6, Vorhandensein der Funktion im Wheel verifiziert).
 - v1.9.3 (2026-07-03): **XTTS-Stimmgenerierung repariert:** Ursache des Generierungs-Fehlers war ein fehlendes PyTorch im XTTS-Image (`coqui-tts` deklariert torch nicht als Abhängigkeit) — sichtbar geworden durch das Stream-Priming aus v1.9.2. `torch`/`torchaudio` jetzt explizit im engine-Extra. Erstes Let's-Encrypt-Zertifikat für `ai.preuss.app` ist ausgestellt (Viewer bestätigt LE/YR2); verbleibende "Nicht sicher"-Anzeige wird über Browser-Neustart/DevTools-Security-Tab bzw. Ketten-Check diagnostiziert (Android braucht die volle Zertifikatskette — Hinweise in README).
 - v1.9.2 (2026-07-03): **HTTPS-Härtung + Stimmgenerierungs-Diagnose.** Orchestrator läuft hinter Traefik mit `--proxy-headers`; direkter Klartext-Port 8000 aus der Compose entfernt (Zugriff nur noch über die HTTPS-Domain, README erklärt die "Nicht sicher"-Diagnose inkl. DNS-01-Challenge via Hetzner für LAN-IPs). XTTS-Service: Stream-Priming — erster Audio-Chunk wird vor der Response erzeugt, damit Fehler (Modell-Laden, Latents, kaputte Samples, CUDA-OOM) als Klartext-500 ankommen statt als "incomplete chunked read"; Mid-Stream-Abrisse werden mit Traceback geloggt. Orchestrator übersetzt Stream-Abrisse in eine Admin-taugliche Checkliste (docker logs / dmesg / nvidia-smi). Zwei neue Bekannte-Probleme-Einträge.

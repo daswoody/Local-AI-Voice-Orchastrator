@@ -16,7 +16,11 @@ dependencies = [
 # vorinstalliertes PyTorch) - ohne die expliziten Eintraege hier startet
 # die Engine mit "No module named 'torch'".
 engine = [
-    "coqui-tts>=0.24",
+    # [codec]-Extra: ab PyTorch 2.9 verlangt torchaudio fuer Audio-I/O die
+    # torchcodec-Bibliothek (Fehlerbild sonst: "the torchcodec library is
+    # required for audio IO"). torchcodec braucht zur Laufzeit FFmpeg-
+    # Systembibliotheken -> apt-get ffmpeg im Dockerfile.
+    "coqui-tts[codec]>=0.24",
     "torch>=2.1",
     "torchaudio>=2.1",
     # coqui-tts deklariert keine Obergrenze, nutzt aber transformers-4.x-

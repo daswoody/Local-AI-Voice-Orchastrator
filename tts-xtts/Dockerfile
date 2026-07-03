@@ -2,6 +2,11 @@ FROM python:3.11-slim
 
 COPY --from=ghcr.io/astral-sh/uv:0.8 /uv /uvx /bin/
 
+# torchcodec (Audio-I/O ab PyTorch 2.9) laedt FFmpeg-Bibliotheken zur
+# Laufzeit - die pip-Wheels bringen sie nicht mit.
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY pyproject.toml uv.lock ./

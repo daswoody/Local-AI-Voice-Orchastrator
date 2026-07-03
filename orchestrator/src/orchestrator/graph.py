@@ -11,6 +11,9 @@ _SYSTEM_PROMPT = "Du bist eine hilfreiche, deutschsprachige Heim-Assistenz."
 class OrchestratorState(TypedDict):
     text: str
     tier: int
+    # Effektiver Charakter-Prompt (4.14: global, pro User ueberschreibbar);
+    # leer -> Fallback auf den Default oben.
+    system_prompt: str
     context_chunks: list[str]
     response: str
 
@@ -26,7 +29,7 @@ async def generate_node(state: OrchestratorState) -> OrchestratorState:
 
 
 def _build_messages(state: OrchestratorState) -> list[dict[str, str]]:
-    system_prompt = _SYSTEM_PROMPT
+    system_prompt = state.get("system_prompt") or _SYSTEM_PROMPT
     if state["context_chunks"]:
         context = "\n".join(f"- {chunk}" for chunk in state["context_chunks"])
         system_prompt += f"\n\nRelevanter Kontext:\n{context}"

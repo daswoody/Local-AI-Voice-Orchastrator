@@ -1,18 +1,21 @@
 from fastapi import APIRouter, HTTPException
 
-from ..config import settings
+from .. import repos
 from ..schemas import LoginRequest, LoginResponse, UserInfo
-from ..security import create_access_token
+from ..security import create_access_token, verify_password
 
 router = APIRouter()
-
-# Admin-Tier bis Mikro-Phase 1.7b eine echte User-Tabelle liefert.
-_STUB_ADMIN_TIER = 3
 
 
 @router.post("/v1/auth/login", response_model=LoginResponse)
 def login(payload: LoginRequest) -> LoginResponse:
-    if payload.username != settings.admin_username or payload.password != settings.admin_password:
+    """Login gegen die User-Tabelle (1.7b); der Seed-Admin aus der .env wird
+    beim ersten Start angelegt, weitere User kommen aus dem Admin-Panel."""
+    stored_hash = repos.get_user_password_hash(payload.username)
+    if stored_hash is None or not verify_password(payload.password, stored_hash):
         raise HTTPException(status_code=401, detail="invalid credentials")
-    token = create_access_token(username=payload.username, tier=_STUB_ADMIN_TIER)
-    return LoginResponse(token=token, user=UserInfo(name=payload.username, tier=_STUB_ADMIN_TIER))
+
+    user = repos.get_user_by_username(payload.username)
+    token = create_access_token(username=user["username"], tier=user["tier"])
+    display_name = user["display_name"] or user["username"]
+    return LoginResponse(token=token, user=UserInfo(name=display_name, tier=user["tier"]))

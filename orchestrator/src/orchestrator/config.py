@@ -37,6 +37,21 @@ class Settings(BaseSettings):
 
     default_voice_id: str = "default-de-female"
 
+    # SQLite (1.7b) + Ablagen fuer Voice-Samples und vorgenerierte Filler
+    # (1.7d). /data und /voices sind Volumes im Compose; /voices ist
+    # dasselbe Volume, das XTTS liest - so landet ein Sample-Upload aus dem
+    # Admin-Panel direkt dort, wo XTTS es erwartet.
+    database_path: str = "/data/heimai.db"
+    voices_dir: str = "/voices"
+    filler_cache_dir: str = "/data/filler-cache"
+
+    # LM Studio native REST-API (ab 0.4.0) fuer das Modell-Panel (4.14).
+    # Laeuft auf dem VM-Host, nicht im Docker-Netz - daher IP statt
+    # Service-Name.
+    lmstudio_base_url: str = "http://192.168.2.105:1234"
+
+    # Seed-Admin fuer die Erst-Einrichtung (wird nur in eine leere DB
+    # geschrieben; danach verwaltet das Admin-Panel die User).
     admin_username: str = "admin"
     admin_password: str = "changeme"
 

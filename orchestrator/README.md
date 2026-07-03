@@ -1,9 +1,31 @@
-# Voice-Orchestrator (Mikro-Phasen 1.7 + 1.11)
+# Voice-Orchestrator (Mikro-Phasen 1.7, 1.7b-d, 1.11)
 
 Siehe `../docs/heim-ai-projektspezifikation.md` fuer den Gesamtkontext.
 Die Nachbar-Services der Voice-Pipeline liegen im selben Repo:
 `../stt-service` (1.8, faster-whisper), `../tts-piper` (1.9, Filler),
 `../tts-xtts` (1.10, Hauptstimme).
+
+## Admin-Panel (/admin)
+
+Verwaltungsoberflaeche unter `https://<domain>/admin/` (statisches
+Vanilla-JS, kein Build-Step - Entscheidung siehe Spezifikation 4.14).
+Login mit einem Tier-3-Konto; beim allerersten Start wird der Seed-Admin
+aus `ADMIN_USERNAME`/`ADMIN_PASSWORD` in die leere DB geschrieben.
+
+| Bereich | Funktion |
+|---|---|
+| Modelle | LM-Studio-Modelle anzeigen, laden/entladen (Hot-Swap, native REST-API >= 0.4.0) |
+| Charakter | Globaler System-Prompt; pro Nutzer ueberschreibbar (Nutzer-Formular) |
+| Nutzer | Anlegen/Bearbeiten/Loeschen, Tier 1-3, Standard-Stimme, Charakter-Override |
+| Stimmen | Anlegen + WAV-Sample-Upload (landet im XTTS-Voices-Volume, kein docker cp mehr) |
+| Filler & Trigger | Eigene Trigger (Nachdenken/Suche/Tool inkl. Tool-Muster wie `Calendar-*`), Filler mit Titel+Text, "Audio generieren" rendert sie per XTTS pro Stimme vor |
+| Karten | Layout-Templates (4.12) anlegen/bearbeiten/loeschen, Version zaehlt automatisch hoch |
+
+Ablauf fuer die erste Stimme: Stimme anlegen -> Sample hochladen (6-30s
+sauberes Deutsch) -> unter "Filler & Trigger" bei jedem Filler "Audio
+generieren" klicken. Ab dann spielt der Orchestrator Filler in der
+XTTS-Stimme aus dem Cache; ohne generiertes Audio faellt er auf Piper
+zurueck, ohne Piper laeuft die Antwort einfach ohne Filler.
 
 ## 1. Lokal testen (ohne echtes LiteLLM/Weaviate)
 

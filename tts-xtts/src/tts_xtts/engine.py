@@ -44,12 +44,17 @@ class XttsEngine:
         return sorted(p.stem for p in voices_dir.glob("*.wav"))
 
     def _latents(self, voice_id: str) -> tuple:
-        if voice_id not in self._latents_cache:
+        # mtime des Samples mitfuehren: Wird es ersetzt (Upload im
+        # Admin-Panel), werden die Latents automatisch neu berechnet -
+        # sonst wuerde die Stimme bis zum Container-Neustart alt klingen.
+        mtime = self._voice_path(voice_id).stat().st_mtime_ns
+        cached = self._latents_cache.get(voice_id)
+        if cached is None or cached[0] != mtime:
             gpt_cond_latent, speaker_embedding = self._model.get_conditioning_latents(
                 audio_path=[str(self._voice_path(voice_id))]
             )
-            self._latents_cache[voice_id] = (gpt_cond_latent, speaker_embedding)
-        return self._latents_cache[voice_id]
+            self._latents_cache[voice_id] = (mtime, (gpt_cond_latent, speaker_embedding))
+        return self._latents_cache[voice_id][1]
 
     def stream(self, text: str, voice_id: str, language: str | None = None) -> Iterator[bytes]:
         """Text -> Iterator von PCM16-Chunks (mono, 24 kHz)."""

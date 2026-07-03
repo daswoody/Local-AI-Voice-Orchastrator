@@ -1,28 +1,20 @@
 import asyncio
 import contextlib
 import logging
-import random
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from .. import repos
 from ..audio import b64_to_pcm, chunk_pcm, pcm_to_b64, resample_pcm16
 from ..config import settings
 from ..graph import orchestrator_graph
 from ..security import decode_access_token
+from ..services import filler_service
 from ..services.stt_client import stt_client
 from ..services.tts_client import piper_client, xtts_client
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-# Filler-Phrasen nach 4.3. Die Unterscheidung nach Trigger-Typ (Tool-Call vs.
-# RAG/Suche) kommt mit dem Tool-Routing in 1.12 - bis dahin gibt es nur den
-# "Nachdenk"-Fall.
-_FILLER_PHRASES = [
-    "Lass mich kurz nachdenken.",
-    "Hm, einen Augenblick.",
-    "Gib mir einen Moment.",
-]
 
 
 @router.websocket("/v1/assistant/stream")
@@ -41,16 +33,22 @@ async def assistant_stream(websocket: WebSocket) -> None:
 
 class StreamSession:
     """Zustand einer WebSocket-Verbindung: Modus/Stimme aus dem hello-Frame,
-    Audio-Eingangspuffer und der gerade laufende Antwort-Task (fuer
-    Barge-in/interrupt)."""
+    User-Kontext aus dem Token (Tier, Charakter-Override, Standard-Stimme),
+    Audio-Eingangspuffer und der laufende Antwort-Task (Barge-in)."""
 
     def __init__(self, websocket: WebSocket) -> None:
         self.ws = websocket
         self.mode = "chat"
-        self.voice_id = settings.default_voice_id
-        self.tier = _resolve_tier(websocket)
         self.audio_buffer = bytearray()
         self.active_task: asyncio.Task | None = None
+
+        self.tier, self.username = _resolve_identity(websocket)
+        self.system_prompt = repos.effective_system_prompt(self.username)
+        self.voice_id = settings.default_voice_id
+        if self.username:
+            user = repos.get_user_by_username(self.username)
+            if user and user["default_voice_id"]:
+                self.voice_id = user["default_voice_id"]
 
     # ---- Frame-Dispatch ----------------------------------------------------
 
@@ -139,14 +137,20 @@ class StreamSession:
         try:
             llm_task = asyncio.create_task(
                 orchestrator_graph.ainvoke(
-                    {"text": text, "tier": self.tier, "context_chunks": [], "response": ""}
+                    {
+                        "text": text,
+                        "tier": self.tier,
+                        "system_prompt": self.system_prompt,
+                        "context_chunks": [],
+                        "response": "",
+                    }
                 )
             )
 
             if want_audio and settings.filler_enabled:
                 done, _ = await asyncio.wait({llm_task}, timeout=settings.filler_delay_ms / 1000)
                 if not done:
-                    await self._stream_filler()
+                    await self._stream_filler(kind="thinking")
 
             result = await llm_task
             response_text = result["response"]
@@ -155,7 +159,6 @@ class StreamSession:
 
             if want_audio:
                 await self._stream_main_tts(response_text)
-                await self.ws.send_json({"type": "audio_end"})
 
             await self.ws.send_json({"type": "done"})
         except asyncio.CancelledError:
@@ -169,16 +172,24 @@ class StreamSession:
                 )
                 await self.ws.send_json({"type": "done"})
 
-    async def _stream_filler(self) -> None:
-        """Filler-Strategie 4.3: Piper-Audio ausspielen, waehrend das LLM noch
-        rechnet. Fuer die App transparent Teil desselben audio_chunk-Streams,
-        daher Resampling auf die Stream-Rate."""
+    async def _stream_filler(self, kind: str, tool_name: str | None = None) -> None:
+        """Filler nach 4.3/4.14: bevorzugt vorgeneriertes XTTS-Audio in der
+        Session-Stimme (1.7d), Fallback Piper-Live-Synthese mit dem
+        Filler-Text. Fuer die App transparent Teil desselben
+        audio_chunk-Streams, daher Resampling auf die Stream-Rate."""
+        filler = filler_service.select_filler(kind, self.voice_id, tool_name)
+        if filler is None:
+            return
+
         try:
-            pcm, rate = await piper_client.synthesize(random.choice(_FILLER_PHRASES))
+            if filler["path"] is not None:
+                pcm, rate = filler_service.load_audio(filler["path"])
+            else:
+                pcm, rate = await piper_client.synthesize(filler["text"])
         except Exception:
-            # Filler ist Komfort, kein Muss: Wenn Piper klemmt, wartet der
+            # Filler ist Komfort, kein Muss: Wenn er klemmt, wartet der
             # Nutzer einfach still auf die Hauptantwort.
-            logger.warning("Filler-Synthese fehlgeschlagen - fahre ohne Filler fort")
+            logger.warning("Filler-Audio fehlgeschlagen - fahre ohne Filler fort")
             return
 
         pcm = resample_pcm16(pcm, rate, settings.target_sample_rate)
@@ -192,26 +203,33 @@ class StreamSession:
             )
 
     async def _stream_main_tts(self, text: str) -> None:
-        async for rate, chunk in xtts_client.stream(text, self.voice_id):
-            if rate != settings.target_sample_rate:
-                chunk = resample_pcm16(chunk, rate, settings.target_sample_rate)
-            await self.ws.send_json(
-                {
-                    "type": "audio_chunk",
-                    "audio": pcm_to_b64(chunk),
-                    "sample_rate": settings.target_sample_rate,
-                }
-            )
+        try:
+            async for rate, chunk in xtts_client.stream(text, self.voice_id):
+                if rate != settings.target_sample_rate:
+                    chunk = resample_pcm16(chunk, rate, settings.target_sample_rate)
+                await self.ws.send_json(
+                    {
+                        "type": "audio_chunk",
+                        "audio": pcm_to_b64(chunk),
+                        "sample_rate": settings.target_sample_rate,
+                    }
+                )
+            await self.ws.send_json({"type": "audio_end"})
+        except Exception:
+            # TTS-Ausfall (z. B. Stimme ohne Sample) darf den Turn nicht
+            # killen: Text ist schon raus, die App liest ihn laut
+            # TTS-Fallback-Regel (4.13) selbst vor.
+            logger.warning("Haupt-TTS fehlgeschlagen - Antwort bleibt Text-only")
 
 
-def _resolve_tier(websocket: WebSocket) -> int:
-    # Tier kommt ueber das Login-Token (4.4); ohne/mit ungueltigem Token bis
-    # 1.7b bewusst Fallback auf Tier 1 (Gast) statt eines harten Fehlers.
+def _resolve_identity(websocket: WebSocket) -> tuple[int, str | None]:
+    """(tier, username) aus dem Login-Token (4.4); ohne/mit ungueltigem
+    Token bewusst Gast-Fallback statt eines harten Fehlers."""
     token = websocket.query_params.get("token")
     if not token:
-        return 1
+        return 1, None
     try:
         payload = decode_access_token(token)
-        return int(payload.get("tier", 1))
+        return int(payload.get("tier", 1)), payload.get("sub")
     except Exception:
-        return 1
+        return 1, None

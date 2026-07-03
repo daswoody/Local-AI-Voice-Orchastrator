@@ -316,20 +316,19 @@ Verbindlicher Vertrag in `docs/PROTOCOL.md` (App-Repo). **Die App ist fertig geb
 
 **Repo & Deployment:** Kein eigenes Repo — lebt im selben Repo wie der Voice-Orchestrator, um die Protokoll-Drift-Problematik (App-Repo vs. Orchestrator-Repo, siehe 4.13) nicht ein zweites Mal einzuführen. Begründung: gleiche Auth, gleiche DB, gleicher Deploy-Prozess; auf einer 16-GB-RAM-VM lohnt ein separater Service für einen einzigen Admin-Nutzer den Overhead nicht.
 
-```
-/orchestrator          ← Python/FastAPI/LangGraph
-/admin-frontend        ← eigenständiges Frontend-Projekt, eigenständig entwickelbar
-```
+**Frontend-Tech-Entscheidung (v1.8, ersetzt den Vite-Plan aus v1.6):** Statisches **Vanilla-JS ohne Build-Step** unter `orchestrator/src/orchestrator/static/admin/` (index.html + app.js + styles.css), von FastAPI unter `/admin` ausgeliefert. Begründung: kein Node-Toolchain im Deploy, kein Framework-Churn, für den Umfang eines Admin-Panels (6 Views, ein Nutzer) völlig ausreichend — und passt zum Lernprojekt-Charakter. Revisionierbar, falls die UI deutlich wächst. Admin-Frontend nutzt denselben Login (`POST /v1/auth/login`) wie die Apps; alle `/v1/admin/*`-Routen erfordern Tier 3 (4.4), die statischen Seiten selbst sind harmlos.
 
-Build-Pipeline kopiert das gebaute Admin-Frontend nach `orchestrator/static/admin`; FastAPI liefert es unter `/admin` aus. Ein Docker-Image, ein Deploy (via lokaler Registry, 4.7). Admin-Frontend nutzt denselben Login (`POST /v1/auth/login`) wie die Apps; Zugriff auf `/admin/*`-Routen erfordert Tier 3 (4.4).
+**Persistenz (v1.8):** SQLite (stdlib, bewusst ohne ORM) in einem `/data`-Volume: `users`, `app_settings` (Charakter), `voices`, `filler_triggers`, `fillers`, `card_layouts`. Seeds beim ersten Start: Admin aus `.env`, Standard-Trigger/-Filler (4.3), die sieben Karten-Templates (4.12), zwei Stimmen-Platzhalter.
 
 **Begriffsklärung „Skills":** Im Projekt wurde der Begriff bisher doppelt verwendet (4.12: "Karten (‚Skills')" vs. 1.13: Tool-Integrationen). Ab v1.6 gilt: **Skills** sind Ablauf-Definitionen (in Anlehnung an Claude Skills), die beschreiben, wie der Orchestrator auf bestimmte Situationen reagiert, und dabei auf **MCP-Tools** und **Karten** zurückgreifen. Die Skill-Logik selbst lebt als LangGraph-Flow im Orchestrator (ab 1.12/1.13) — sie wird nicht über das Admin-Frontend verwaltet. Das Admin-Frontend verwaltet nur die darin referenzierten **Karten** (CRUD-Editor, siehe 4.12). MCP-Tool-Server bleiben ausschließlich über LiteLLM registriert (4.6) — daran ändert sich nichts.
 
-**Karten-Editor:** Siehe 4.12 — `POST/PUT/DELETE /v1/admin/cards/layouts`, JSON-Paste-Eingabe (kein visueller Drag&Drop-Editor in v1), Liste/Bearbeiten/Löschen bestehender Templates.
+**Karten-Editor:** Siehe 4.12 — `GET/POST/PUT/DELETE /v1/admin/cards`, JSON-Paste-Eingabe (kein visueller Drag&Drop-Editor in v1), Liste/Bearbeiten/Löschen bestehender Templates. Jede Änderung erhöht die globale Layout-Version.
 
 **Charakter/System-Prompt:** Ein globaler Default-System-Prompt, der pro Nutzer überschrieben werden kann. Datenmodell siehe Minimal-User-Modell (Mikro-Phase 1.7b): Feld `system_prompt_override` (nullable — leer heißt "nutzt den globalen Default"). Kein Feld für Modell-Bindung pro Nutzer — Modellwahl ist server-weit, da VRAM keine mehreren gleichzeitig geladenen LLMs erlaubt.
 
-**Stimmen-Verwaltung:** `GET/POST/PUT/DELETE /v1/admin/voices` — Metadaten (Name, Sprache) + Sample-Upload für XTTS-v2 (funktionsfähig sobald Mikro-Phase 1.10 steht; bis dahin Stub mit reiner Metadaten-Verwaltung). Zuweisung an Nutzer über das Minimal-User-Modell (`default_voice_id`). `GET /v1/voices` (App-seitig, 4.13) bleibt unverändert und liefert weiterhin alle verfügbaren Stimmen zur Auswahl durch den Nutzer selbst.
+**Stimmen-Verwaltung:** `GET/POST/DELETE /v1/admin/voices` + `POST /v1/admin/voices/{id}/sample` (WAV-Upload). Das Voices-Volume ist zwischen Orchestrator und XTTS-Service geteilt — ein Upload aus dem Panel landet direkt dort, wo das Voice-Cloning es erwartet (kein `docker cp`). Zuweisung an Nutzer über `default_voice_id`. `GET /v1/voices` (App-seitig, 4.13) bleibt unverändert.
+
+**Filler-System (NEU in v1.8, ersetzt Piper-Live-Filler als Primärweg):** Filler werden im Admin-Panel angelegt (Titel, gesprochener Text, Trigger) und per XTTS **vorab** pro Stimme generiert (Cache-Matrix Filler × Stimme im `/data`-Volume). Vorteile: identische Stimme für Filler und Hauptantwort (kein hörbarer Piper→XTTS-Stimmbruch) und noch niedrigere Latenz (Datei abspielen statt Synthese). **Trigger sind admin-definierbar:** Art `thinking` (LLM langsam) / `search` (RAG/Web) / `tool` (vor Tool-Calls, optional eingeschränkt per fnmatch-Muster wie `Calendar-*`). Der Orchestrator kennt den Wartegrund selbst und wählt zufällig aus den passenden Fillern; spezifische Tool-Muster schlagen den generischen `*`-Trigger. Fallback-Kette zur Laufzeit: vorgeneriertes XTTS-Audio → Piper-Live-Synthese mit dem Filler-Text → kein Filler. `search`/`tool`-Trigger feuern, sobald Tool-Routing (1.12) bzw. Web-Search (1.6) existieren; bis dahin ist `thinking` der aktive Pfad. Piper (1.9) bleibt als Fallback im Stack, kann perspektivisch entfallen.
 
 **Modell-Hot-Swap:** LM Studio bietet ab Version 0.4.0 eine native REST-API (`POST /api/v1/models/load`, `POST /api/v1/models/unload` mit `instance_id`) sowie JIT-Loading mit konfigurierbarer TTL (automatisches Entladen bei Inaktivität, Standard 60 Minuten). Der Orchestrator kapselt diese API; das Admin-Frontend zeigt verfügbare Modelle, den aktuellen Ladezustand und einen Load/Unload-Button. Downtime während des Wechsels (Sekunden bis Minuten) ist eine bewusst akzeptierte, manuelle Admin-Aktion — kein automatisches Wechseln während eines laufenden Dialogs. Quellen: [LM Studio REST API](https://lmstudio.ai/docs/developer/rest), [Idle TTL and Auto-Evict](https://lmstudio.ai/docs/developer/core/ttl-and-auto-evict).
 
@@ -391,18 +390,22 @@ Build-Pipeline kopiert das gebaute Admin-Frontend nach `orchestrator/static/admi
 - **Erfolg:** Eigener API-Service liefert LLM-Antworten — **direkt testbar aus der Android-App** (Text-Chat inkl. TTS-Fallback-Vorlesen).
 - *Stand v1.7: Umgesetzt und mit gemockten Backends getestet (15 Tests). Weaviate bewusst per GraphQL/REST statt v4-Client (kein gRPC-Port eingerichtet). Offen: Validierung gegen die echte VM-Infra; App-Test wartet auf HTTPS (Zertifikats-Umzug läuft).*
 
-#### Mikro-Phase 1.7b: Minimal-User-/Charakter-Datenmodell (Vorzug aus Phase 4.1, NEU in v1.6)
-- Leichtgewichtiges Schema (SQLite oder Postgres, siehe 4.1): `users(id, username, password_hash, display_name, tier, system_prompt_override, default_voice_id)`
+#### ✅ Mikro-Phase 1.7b: Minimal-User-/Charakter-Datenmodell – CODE-SEITIG FERTIG (v1.8)
+- Leichtgewichtiges Schema (SQLite, stdlib ohne ORM): `users(id, username, password_hash, display_name, tier, system_prompt_override, default_voice_id)` plus `app_settings`, `voices`, `filler_triggers`, `fillers`, `card_layouts`
 - Ersetzt NICHT die volle Phase 4.1 (Geräte-Mapping, Permissions-Feinschliff folgen dort) — liefert nur die Felder, die Login-Flow (`user.tier`, 4.4) und Admin-Frontend (1.7c) jetzt schon brauchen
 - `POST /v1/auth/login` liest ab jetzt echte User statt Stub
-- **Erfolg:** Login liefert echten Tier + optionalen Charakter-Override aus der DB.
+- **Erfolg erreicht:** Login liefert echten Tier + optionalen Charakter-Override aus der DB; WebSocket-Sessions nutzen Charakter-Override und Standard-Stimme des eingeloggten Users (testabgedeckt). Passwörter mit stdlib-scrypt gehasht.
 
-#### Mikro-Phase 1.7c: Admin-Frontend-Grundgerüst (NEU in v1.6)
-- Frontend-Projekt unter `/admin-frontend` (Tech-Stack noch offen, siehe Abschnitt 6), Build-Integration in Orchestrator (siehe 4.14)
+#### ✅ Mikro-Phase 1.7c: Admin-Frontend-Grundgerüst – CODE-SEITIG FERTIG (v1.8)
+- Statisches Vanilla-JS unter `/admin` (Tech-Entscheidung siehe 4.14 — kein Vite/Node-Build mehr)
 - Login-Screen (nutzt `/v1/auth/login`, nur Tier 3 kommt rein)
-- Erste Screens: Karten-Editor (CRUD gegen `/v1/admin/cards/layouts`), Charakter-Editor (global + pro Nutzer), Stimmen-Liste (Metadaten + Zuweisung), Modell-Panel (Liste + Load/Unload gegen LM Studio, siehe 4.14)
-- Kann parallel zu 1.8–1.11 entstehen, sobald 1.7 und 1.7b stehen
-- **Erfolg:** Admin kann sich einloggen, eine Karte anlegen, und sie erscheint (nach Version-Bump) in der App.
+- Views: Modelle (LM-Studio-Hot-Swap), Charakter (global + pro Nutzer im Nutzer-Formular), Nutzer-CRUD, Stimmen (Anlegen + WAV-Sample-Upload ins geteilte XTTS-Volume), Filler & Trigger (1.7d), Karten-Editor (JSON-CRUD mit Auto-Version-Bump)
+- **Erfolg erreicht (Sandbox):** Kompletter Panel-Durchlauf headless im Browser verifiziert (Login → alle Views → CRUD → Logout, keine JS-Fehler). Der App-Gegencheck „Karte erscheint nach Version-Bump in der App" steht bis zum VM/HTTPS-Test aus.
+
+#### ✅ Mikro-Phase 1.7d: Filler-Verwaltung & Pre-Generierung (NEU in v1.8) – CODE-SEITIG FERTIG
+- Konzept siehe 4.14: admin-definierte Trigger (auch tool-spezifisch per Muster), Filler mit Titel/Text/Trigger, XTTS-Pre-Generierung pro Stimme, Laufzeit-Fallback-Kette Cache → Piper → ohne Filler
+- Text-Änderung invalidiert den Audio-Cache des Fillers; Trigger-Löschung räumt Filler samt Cache ab (CASCADE)
+- **Erfolg erreicht (Sandbox):** Laufzeit-Tests belegen: gecachter Filler wird Piper vorgezogen, spezifisches Tool-Muster schlägt den generischen Trigger, Piper springt ohne Cache ein. Echte XTTS-Generierung folgt auf der VM.
 
 #### ✅ Mikro-Phase 1.8: STT-Service (Whisper) – CODE-SEITIG FERTIG (v1.7)
 - faster-whisper als eigenständigen Service, API: Audio rein → Text raus, Latenz messen
@@ -554,9 +557,12 @@ Build-Pipeline kopiert das gebaute Admin-Frontend nach `orchestrator/static/admi
 - [ ] **Release-Signing der APK** – aktuell Debug-Signatur (für Sideload ok); für saubere Update-Pfade eigenen Keystore anlegen und im CI signieren
 - [ ] **On-Device-Action-Modell** in den `ActionPlanner` integrieren – Pfad: Gemma-3-270M-Finetune ("Mobile Actions") via MediaPipe LLM Inference; offizielles Modell-Artefakt war zum Zeitpunkt v1.5 nicht verifizierbar → prüfen
 - [ ] **Binär-WebSocket-Frames statt Base64** für Audio evaluieren (~33 % Overhead; im LAN unkritisch, daher v1 bewusst simpel und debugbar)
-- [ ] **NEU (v1.6): Admin-Frontend-Tech-Stack finalisieren** – Kandidaten: leichtgewichtiges SPA-Framework (z. B. Vite + React/Svelte) vs. serverseitig gerendert (htmx + Jinja, passt ggf. besser zum Python-lastigen "Lernprojekt"-Charakter, weniger neues Tooling). Entscheidung ansteht bei Start von Mikro-Phase 1.7c
-- [ ] **NEU (v1.6): Card-Editor-UX** – reiner JSON-Paste in v1; visueller Editor (Formular statt Rohtext) als späterer Ausbau evaluieren
-- [ ] **NEU (v1.6): Persona-Datenmodell erweitern** – ggf. weitere Felder (Begrüßungssatz, Tonalität) nach erster Nutzung in 1.7c evaluieren
+- [x] ~~Admin-Frontend-Tech-Stack finalisieren~~ → **Vanilla-JS ohne Build-Step** (v1.8, Begründung 4.14); revisionierbar bei deutlichem UI-Wachstum
+- [ ] **Card-Editor-UX** – reiner JSON-Paste in v1; visueller Editor (Formular statt Rohtext) als späterer Ausbau evaluieren
+- [ ] **Persona-Datenmodell erweitern** – ggf. weitere Felder (Begrüßungssatz, Tonalität) nach erster Nutzung in 1.7c evaluieren
+- [ ] **NEU (v1.8): LM-Studio-REST-API auf der VM verifizieren** – Modell-Panel nutzt `GET/POST /api/v1/models[/load|/unload]` (LM Studio ≥ 0.4.0); Antwortformat kann zwischen Versionen abweichen, Client deckt zwei Varianten ab
+- [ ] **NEU (v1.8): Piper perspektivisch entfernen** – sobald das Filler-Pre-Generieren auf der VM rund läuft, ist die Fallback-Kette der einzige Piper-Nutzer (RAM sparen)
+- [x] ~~XTTS-Latents-Cache bei Sample-Austausch~~ → gelöst (v1.8): Cache prüft die Datei-mtime des Samples und berechnet Latents bei Austausch automatisch neu
 
 ---
 
@@ -641,9 +647,10 @@ Build-Pipeline kopiert das gebaute Admin-Frontend nach `orchestrator/static/admi
 
 ---
 
-**Version:** 1.7
+**Version:** 1.8
 **Stand:** 2026-07-03
 **Changelog:**
+- v1.8 (2026-07-03): **Mikro-Phasen 1.7b/1.7c/1.7d code-seitig umgesetzt.** SQLite-Persistenz (stdlib, ohne ORM) für User/Charakter/Stimmen/Trigger/Filler/Karten; Login liest echte User (scrypt-Hashing), WebSocket-Sessions nutzen Charakter-Override + Standard-Stimme des Users. **Admin-Panel unter `/admin`** (Entscheidung: Vanilla-JS ohne Build-Step statt Vite, 4.14) mit Modelle/Charakter/Nutzer/Stimmen/Filler&Trigger/Karten — headless im Browser durchgetestet. **Neues Filler-Konzept (1.7d):** Filler werden per XTTS pro Stimme vorgeneriert statt live von Piper gesprochen (kein Stimmbruch, niedrigere Latenz); Trigger sind admin-definierbar inkl. tool-spezifischer Muster (`Calendar-*`), Fallback-Kette Cache → Piper → ohne Filler. Stimmen-Sample-Upload über das Panel ins geteilte XTTS-Volume (kein `docker cp`). Karten-CRUD mit automatischem Version-Bump. XTTS-Latents-Cache invalidiert jetzt per Sample-mtime. nvidia-container-toolkit auf der VM installiert (GPU-Deploy funktioniert). 32 Tests grün; VM-Validierung (echte XTTS-Generierung, LM-Studio-API-Format) und App-E2E (wartet auf HTTPS) offen.
 - v1.7 (2026-07-03): **Mikro-Phasen 1.7–1.11 code-seitig umgesetzt** (Repo `Local-AI-Voice-Orchastrator`, Monorepo mit `orchestrator/`, `stt-service/`, `tts-piper/`, `tts-xtts/`). Orchestrator: Protokoll-Endpoints + WebSocket mit komplettem Audio-Pfad, latenzbasierter Filler-Logik (Piper → 24k resampled), Barge-in, RAG mit e5-Präfixen und Relativ-Filter (4.9), Tier-1-Ausschluss von PrivateKnowledge (4.4). Services jeweils mit lazy geladener Engine (Tests ohne GPU/Modelle), eigenem Dockerfile und Modell-Download in Volumes beim ersten Start. Gemeinsames Coolify-Deploy über eine Compose-Datei (GPU-Reservierung für STT/XTTS — nvidia-container-toolkit auf der VM nötig). End-to-End mit Fake-Backends validiert; **offen: Validierung auf der echten VM** (GPU-Inferenz, Modell-Downloads, deutsche XTTS-Voice-Samples) und App-Test nach HTTPS-Umstellung (Zertifikate via Hetzner in Arbeit). Coolify-Pfad-Eigenheit dokumentiert (--project-directory = Repo-Root). Bekanntes-Problem-Eintrag: FastAPI-404 auf `/` war kein Deploy-Fehler → Root-Route ergänzt.
 - v1.6 (2026-07-01): Vorbereitung der Mikro-Phasen 1.7–1.11 (Voice-Orchestrator). Neue Sektion **4.14 Admin-Frontend & Charakter-/Rechte-Verwaltung** — zentrale Verwaltungsoberfläche für Modelle, Charaktere/System-Prompts, Stimmen und Karten-Layouts, entschieden als Monorepo mit dem Voice-Orchestrator (kein eigenes Repo), um Protokoll-Drift wie zwischen App- und Orchestrator-Repo zu vermeiden. Neue Mikro-Phasen **1.7b** (Minimal-User-/Charakter-Datenmodell, Vorzug aus 4.1) und **1.7c** (Admin-Frontend-Grundgerüst). Begriffsklärung „Skills" (Ablauf-Definitionen im Orchestrator, referenzieren MCP-Tools + Karten; MCP-Verwaltung bleibt bei LiteLLM, Admin-Frontend verwaltet nur die Karten-Seite). Modell-Hot-Swap-Fähigkeit von LM Studio recherchiert und dokumentiert (native REST-API mit JIT/TTL, Quellen in 4.14). Neuer Eintrag in Abschnitt 3 (Codebasen). Offener Punkt ergänzt: Admin-Frontend-Tech-Stack (SPA vs. htmx) noch nicht final.
 - v1.5 (2026-06-12): **Phase 2 (Android, Mikro-Phasen 2.1–2.4) app-seitig komplett umgesetzt** — Repo `Android-AI-Assistant-App`, CI-Build grün, Debug-APK als Actions-Artifact. Neue Architektur-Sektionen: 4.11 App-Tech-Stack (Kotlin+Compose statt Flutter, Porcupine als Wake-Word-Engine), 4.12 Karten-System & Card-Layout-Server (zentrale Verwaltung, Layout-Updates ohne App-Update, plattformneutral für Windows), 4.13 App↔Orchestrator-Protokoll inkl. Geräte-Tool-Bridge und TTS-Fallback-Regel. Mikro-Phasen 1.7/1.11/1.12 um Protokoll-Implementierung erweitert, 1.14 relativiert. Tiered-Security-Umsetzung in der App dokumentiert (4.4); Geräte-Tools als dokumentierte MCP-Ausnahme (4.6). Drei neue bekannte Probleme (Android-15-FGS, Mikrofon-Exklusivität, Mikrofon-Indikator). Offene Punkte: Wake-Word-Engine und App-Stack entschieden; neu: Orchestrator-Mock, Release-Signing, On-Device-Action-Modell, Binär-Frames.
@@ -652,4 +659,4 @@ Build-Pipeline kopiert das gebaute Admin-Frontend nach `orchestrator/static/admi
 - v1.2 (2026-05-11): Mikro-Phase 1.4 abgeschlossen. LiteLLM als zentrales MCP-Gateway. mcp-time deployed.
 - v1.1 (2026-04-29): Headscale als "noch nicht installiert" markiert.
 
-**Nächster Schritt:** VM-Validierung des Voice-Stacks (Coolify-Deploy aller vier Services, Modell-Downloads, GPU-Check, deutsche XTTS-Voice-Samples einspielen) — parallel läuft der HTTPS-Umzug (Hetzner-Zertifikate) für den App-End-to-End-Test. Code-seitig als Nächstes: 1.7b (Minimal-User-Modell) und 1.7c (Admin-Frontend-Grundgerüst). Laut Reihenfolge weiterhin offen: 1.5c (Retention-Workflow) und 1.6 (Web-Search).
+**Nächster Schritt:** Redeploy auf der VM (Volumes `orchestrator-data`/`xtts-voices` kommen neu dazu), dann über das Admin-Panel: Passwort ändern, erste Stimme mit Sample anlegen, Filler generieren — danach voller Voice-Loop-Test (Skript oder App, sobald HTTPS steht). Code-seitig als Nächstes: 1.12 (Tool-Calling — aktiviert auch die `search`/`tool`-Trigger) oder vorgezogen 1.5c/1.6. LM-Studio-REST-API-Format beim ersten Modell-Panel-Einsatz verifizieren.

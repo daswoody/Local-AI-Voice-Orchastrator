@@ -18,6 +18,12 @@ services:
         required: false
     ports:
       - "8000:8000"
+    volumes:
+      # SQLite (User/Trigger/Filler/Karten) + vorgenerierte Filler-Audios
+      - orchestrator-data:/data
+      # Dasselbe Volume, das XTTS liest: Sample-Uploads aus dem Admin-Panel
+      # landen direkt dort, wo das Voice-Cloning sie erwartet.
+      - xtts-voices:/voices
     networks:
       - ai-lab
     depends_on:
@@ -92,6 +98,7 @@ networks:
     # Server/Projekt pruefen, notfalls per `docker network ls` auf der AI-VM.
 
 volumes:
+  orchestrator-data:
   whisper-models:
   piper-models:
   xtts-models:

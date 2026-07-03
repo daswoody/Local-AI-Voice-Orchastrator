@@ -19,6 +19,10 @@ engine = [
     "coqui-tts>=0.24",
     "torch>=2.1",
     "torchaudio>=2.1",
+    # coqui-tts deklariert keine Obergrenze, nutzt aber transformers-4.x-
+    # Interna (isin_mps_friendly wurde in transformers 5 entfernt) ->
+    # ohne Pin loest der Resolver 5.x auf und XTTS crasht beim Import.
+    "transformers>=4.43,<5",
 ]
 dev = [
     "pytest>=8.3",

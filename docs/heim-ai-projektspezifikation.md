@@ -548,7 +548,7 @@ Verbindlicher Vertrag in `docs/PROTOCOL.md` (App-Repo). **Die App ist fertig geb
 - [ ] Eigene Wake-Word-Phrase definieren → bei Porcupine: Custom-`.ppn` über die Picovoice-Konsole trainieren und in der App hinterlegen
 - [ ] Konkrete Voice-Samples für XTTS-v2 erstellen (deutsch)
 - [x] ~~App-Tech-Stack finalisieren~~ → Kotlin + Jetpack Compose (4.11); Windows-Stack bei 2.5
-- [ ] **Lokales DNS mit Zertifikat** – für die App relevant, sobald `wss://`/HTTPS erzwungen wird; Cleartext-HTTP im LAN funktioniert, ist aber Übergangslösung
+- [~] **Lokales DNS mit Zertifikat** – in Arbeit (v1.9.2): echte Domain (`ai.preuss.app` via Hetzner-DNS) statt `.ai.lab` läuft; für ein browservertrauenswürdiges Zertifikat bei LAN-IP fehlt noch die DNS-01-Challenge im Coolify-Traefik (Anleitung in `orchestrator/README.md`). Cleartext-Port 8000 ist entfernt
 - [ ] **Upgrade auf `multilingual-e5-large`** sobald die VM mehr RAM hat (Ziel: 128 GB). Reindexing erforderlich.
 - [ ] **Slim-Image für Embedding-Sidecar** evaluieren (~5-6 GB Plattenplatz)
 - [ ] **e5-Präfixe (`query:`/`passage:`) im Voice-Orchestrator implementieren** (4.9, Phase 1.7+)
@@ -616,6 +616,16 @@ Verbindlicher Vertrag in `docs/PROTOCOL.md` (App-Repo). **Die App ist fertig geb
 **Ursache:** Kein Fehler — das ist FastAPIs Standard-404: Der Service lief, es gab nur keine Route auf `/`.
 **Status:** Gelöst. `GET /` liefert jetzt Service-Info mit Verweis auf `/docs` und `/v1/health`.
 
+### Browser stuft HTTPS-Domain als "Nicht sicher" ein (NEU in v1.9.2)
+**Symptom:** Seite lädt über `https://`, wird aber als unsicher markiert.
+**Ursache:** Traefik liefert sein Self-Signed-Fallback-Zertifikat ("TRAEFIK DEFAULT CERT"), weil die HTTP-01-Challenge bei einer Domain, die auf eine private LAN-IP zeigt, zwangsläufig scheitert.
+**Lösung:** DNS-01-Challenge über die Hetzner-DNS-API (Coolify-Doku "Switch Traefik to DNS Challenge"); Schritte in `orchestrator/README.md`. Zusätzlich ist der direkte Klartext-Port 8000 aus der Compose entfernt — Zugriff nur noch über die HTTPS-Domain.
+
+### XTTS-Stimmgenerierung bricht mit "incomplete chunked read" ab (NEU in v1.9.2)
+**Symptom:** Filler-Generierung meldet `peer closed connection without sending complete message body`.
+**Ursache:** Der XTTS-Container stirbt WÄHREND der Generierung (RAM-OOM-Kill oder CUDA-OOM sind die üblichen Verdächtigen auf der 16-GB/11-GB-VM) — und weil die Stream-Header schon gesendet waren, wurde jeder Fehler zum kryptischen Verbindungsabriss.
+**Status:** Diagnose-Fähigkeit behoben: XTTS erzeugt den ersten Audio-Chunk jetzt VOR der Antwort (Stream-Priming) — Fehler bei Modell-Laden/Latents/Sample kommen als Klartext-500 an; Mid-Stream-Abrisse werden in den Container-Logs mit Traceback protokolliert, und das Admin-Panel zeigt eine Checkliste (docker logs, dmesg/OOM, nvidia-smi) statt des httpx-Wortlauts. Die eigentliche Ursache auf der VM (RAM vs. VRAM) steht noch zur Prüfung aus — siehe Troubleshooting in `orchestrator/README.md`.
+
 ---
 
 ## 8. Wichtige Constraints & Reminder
@@ -648,9 +658,10 @@ Verbindlicher Vertrag in `docs/PROTOCOL.md` (App-Repo). **Die App ist fertig geb
 
 ---
 
-**Version:** 1.9.1
+**Version:** 1.9.2
 **Stand:** 2026-07-03
 **Changelog:**
+- v1.9.2 (2026-07-03): **HTTPS-Härtung + Stimmgenerierungs-Diagnose.** Orchestrator läuft hinter Traefik mit `--proxy-headers`; direkter Klartext-Port 8000 aus der Compose entfernt (Zugriff nur noch über die HTTPS-Domain, README erklärt die "Nicht sicher"-Diagnose inkl. DNS-01-Challenge via Hetzner für LAN-IPs). XTTS-Service: Stream-Priming — erster Audio-Chunk wird vor der Response erzeugt, damit Fehler (Modell-Laden, Latents, kaputte Samples, CUDA-OOM) als Klartext-500 ankommen statt als "incomplete chunked read"; Mid-Stream-Abrisse werden mit Traceback geloggt. Orchestrator übersetzt Stream-Abrisse in eine Admin-taugliche Checkliste (docker logs / dmesg / nvidia-smi). Zwei neue Bekannte-Probleme-Einträge.
 - v1.9.1 (2026-07-03): **Architektur-Korrektur Modell-Panel:** lief fälschlich direkt gegen LM Studios REST-API und verletzte damit das 4.6-Prinzip (LiteLLM als einziger LLM-Zugang). Jetzt: Modell-Liste aus LiteLLM (`/v1/models`), „Aktivieren" setzt `app_settings.active_model` (greift sofort für alle LLM-Calls, Fallback `.env`), physisches Laden/Entladen via LM Studios JIT/Idle-TTL. `LMSTUDIO_BASE_URL` und der LM-Studio-Client sind entfernt. 4.14 entsprechend umgeschrieben.
 - v1.9 (2026-07-03): **Mikro-Phase 1.12 code-seitig umgesetzt** — Tool-Calling als LangGraph-Agent-Loop mit drei Quellen: LiteLLM-MCP-Gateway (4.6, offizielle mcp-SDK über Streamable HTTP, degradiert sauber bei Nichterreichbarkeit), session-gebundene Geräte-Tools aus dem `hello`-Manifest (4.13, `tool_call`/`tool_result` über den WebSocket mit Timeout), `show_card`-Builtin für Karten-Push (4.12). Tool-Trigger aus 1.7d sind damit aktiv (Filler vor Tool-Calls, spezifische Muster vor generischen, max. einer pro Turn). 38 Tests grün; Tool-Loop inkl. Karten-Push zusätzlich live über den WebSocket gegen Fake-Backends validiert. **Offen:** Frame-Feldnamen gegen `docs/PROTOCOL.md` (App-Repo) prüfen, VM-Test gegen echtes Gateway.
 - v1.8 (2026-07-03): **Mikro-Phasen 1.7b/1.7c/1.7d code-seitig umgesetzt.** SQLite-Persistenz (stdlib, ohne ORM) für User/Charakter/Stimmen/Trigger/Filler/Karten; Login liest echte User (scrypt-Hashing), WebSocket-Sessions nutzen Charakter-Override + Standard-Stimme des Users. **Admin-Panel unter `/admin`** (Entscheidung: Vanilla-JS ohne Build-Step statt Vite, 4.14) mit Modelle/Charakter/Nutzer/Stimmen/Filler&Trigger/Karten — headless im Browser durchgetestet. **Neues Filler-Konzept (1.7d):** Filler werden per XTTS pro Stimme vorgeneriert statt live von Piper gesprochen (kein Stimmbruch, niedrigere Latenz); Trigger sind admin-definierbar inkl. tool-spezifischer Muster (`Calendar-*`), Fallback-Kette Cache → Piper → ohne Filler. Stimmen-Sample-Upload über das Panel ins geteilte XTTS-Volume (kein `docker cp`). Karten-CRUD mit automatischem Version-Bump. XTTS-Latents-Cache invalidiert jetzt per Sample-mtime. nvidia-container-toolkit auf der VM installiert (GPU-Deploy funktioniert). 32 Tests grün; VM-Validierung (echte XTTS-Generierung, LM-Studio-API-Format) und App-E2E (wartet auf HTTPS) offen.

@@ -14,6 +14,8 @@ import random
 import wave
 from pathlib import Path
 
+import httpx
+
 from .. import repos
 from ..config import settings
 from .tts_client import xtts_client
@@ -97,9 +99,22 @@ async def generate_audio(filler_id: int) -> list[dict]:
                 pcm.extend(chunk)
             _write_wav(audio_path(filler_id, voice_id), bytes(pcm), rate)
             results.append({"voice_id": voice_id, "ok": True})
+        except httpx.RemoteProtocolError:
+            # Verbindung mitten im Stream weg = der XTTS-Container ist
+            # waehrend der Generierung gestorben (haeufigste Ursachen:
+            # RAM-/VRAM-Knappheit, OOM-Kill). Dem Admin sagen, wo er
+            # nachsehen muss, statt nur den httpx-Wortlaut zu zeigen.
+            logger.exception("XTTS-Stream fuer Stimme %s abgerissen", voice_id)
+            results.append({
+                "voice_id": voice_id, "ok": False,
+                "error": "XTTS-Service waehrend der Generierung abgestuerzt. "
+                         "Auf der VM pruefen: 'docker logs heimai-tts-xtts' "
+                         "(Fehlertext/Traceback) und 'dmesg | grep -i oom' "
+                         "(RAM-Knappheit) sowie nvidia-smi (VRAM).",
+            })
         except Exception as exc:
             logger.exception("Filler-Generierung fuer Stimme %s fehlgeschlagen", voice_id)
-            results.append({"voice_id": voice_id, "ok": False, "error": str(exc)[:200]})
+            results.append({"voice_id": voice_id, "ok": False, "error": str(exc)[:350]})
     return results
 
 

@@ -128,6 +128,62 @@ ihre Compose-Service-Namen erreichen, genau wie die anderen Container.
    eintragen -> Health-Check sollte gruen sein -> Login (`ADMIN_USERNAME`/
    `ADMIN_PASSWORD` aus der `.env`) -> Text-Chat ausprobieren.
 
+## HTTPS / Browser sagt "Nicht sicher"
+
+TLS terminiert am Coolify-Traefik, nicht in der App. Wenn die Seite unter
+der HTTPS-Domain laeuft, aber als "Nicht sicher" markiert wird, liegt es
+praktisch immer am Zertifikat - so grenzt man es ein:
+
+1. **Schloss-Symbol -> Zertifikat anzeigen.** Steht dort als Aussteller
+   "TRAEFIK DEFAULT CERT", liefert Traefik sein Self-Signed-Fallback aus,
+   weil Let's Encrypt kein Zertifikat ausstellen konnte.
+2. **Ursache bei LAN-Setups:** Der Standard-Weg (HTTP-01-Challenge)
+   verlangt, dass Let's Encrypt die Domain von aussen auf Port 80
+   erreicht. Zeigt der DNS-Eintrag auf die private IP (192.168.x.x),
+   schlaegt das zwangslaeufig fehl.
+3. **Loesung: DNS-01-Challenge ueber die Hetzner-DNS-API** - dabei weist
+   Traefik den Domain-Besitz per TXT-Record nach, die VM muss NICHT
+   oeffentlich erreichbar sein. Coolify hat dafuer eine offizielle
+   Anleitung: https://coolify.io/docs/knowledge-base/proxy/traefik/dns-challenge
+   Kurzfassung: In Coolify -> Server -> Proxy die Traefik-Konfiguration
+   um einen certificatesresolver mit `dnsChallenge.provider=hetzner`
+   erweitern und den Hetzner-DNS-API-Token als Env-Variable in den
+   Proxy-Container geben (`HETZNER_API_KEY`; neuere Traefik/lego-Versionen
+   akzeptieren auch `HETZNER_API_TOKEN` - im Zweifel beide setzen).
+   Damit ist auch ein Wildcard-Zertifikat (`*.eure-domain`) moeglich,
+   das alle kuenftigen internen Services abdeckt.
+4. Danach in Coolify beim Orchestrator-Service pruefen, dass die Domain
+   den neuen Certresolver nutzt, und neu deployen.
+
+Der frueher direkt veroeffentlichte Port 8000 ist aus der Compose-Datei
+entfernt - Klartext-HTTP haette Login-Tokens unverschluesselt uebertragen
+und war eine zweite Quelle fuer "Nicht sicher"-Warnungen. Die App-Clients
+nutzen die HTTPS-Domain (`https://` bzw. `wss://`).
+
+## Troubleshooting: Stimmgenerierung schlaegt fehl
+
+Fehlerbild `peer closed connection without sending complete message body`
+= der XTTS-Container ist WAEHREND der Generierung gestorben. Seit dem
+Stream-Priming (erster Audio-Chunk wird vor der Antwort erzeugt) kommen
+Fehler beim Modell-Laden/Sample-Einlesen stattdessen als Klartext-500 an;
+bleibt der Abriss, auf der VM pruefen:
+
+```bash
+docker logs heimai-tts-xtts --tail 100   # Traceback? CUDA out of memory?
+dmesg | grep -i -E "oom|killed process"  # RAM-OOM-Kill? (16-GB-VM ist eng)
+nvidia-smi                               # VRAM: LM-Studio-Modell + XTTS <= 11 GB?
+docker inspect -f '{{.RestartCount}}' heimai-tts-xtts  # >0 = Container stirbt
+```
+
+Typische Ursachen und Abhilfen:
+- **VRAM voll:** grosses LM-Studio-Modell + XTTS (~3 GB) passen nicht
+  gleichzeitig -> kleineres LLM aktivieren oder LM-Studio-TTL abwarten.
+- **RAM-OOM:** XTTS/torch braucht mehrere GB Prozess-RAM -> pruefen, was
+  parallel laeuft (Embedding-Sidecar, Whisper); ggf. XTTS zuerst alleine
+  testen.
+- **Sample-Datei:** WAV mit ~6-30s sauberem Sprechmaterial verwenden;
+  sehr lange Samples treiben die Latents-Berechnung in den Speicher.
+
 ## Hinweise fuer den Voice-Stack auf der VM
 
 - Die Compose-Datei deployt alle vier Services zusammen; STT und XTTS

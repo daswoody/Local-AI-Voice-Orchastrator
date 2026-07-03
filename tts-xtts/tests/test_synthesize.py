@@ -27,3 +27,19 @@ def test_synthesize_unknown_voice_is_404(client):
 def test_synthesize_rejects_empty_text(client):
     response = client.post("/v1/synthesize", json={"text": " ", "voice_id": "default-de-female"})
     assert response.status_code == 400
+
+
+def test_engine_failure_becomes_clean_500_instead_of_stream_abort(client, fake_engine):
+    """Stream-Priming: Fehler beim Laden/Latents/Sample muessen als 500 mit
+    Fehlertext ankommen, nicht als mitten im Stream gekappte Verbindung."""
+
+    def broken_stream(text, voice_id, language=None):
+        raise RuntimeError("CUDA out of memory beim Laden der Latents")
+        yield  # pragma: no cover - macht die Funktion zum Generator
+
+    fake_engine.stream = broken_stream
+    response = client.post(
+        "/v1/synthesize", json={"text": "Hallo", "voice_id": "default-de-female"}
+    )
+    assert response.status_code == 500
+    assert "CUDA out of memory" in response.json()["detail"]

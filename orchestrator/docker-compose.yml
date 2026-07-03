@@ -16,8 +16,13 @@ services:
       # Coolify injiziert die in seiner UI gesetzten Variablen selbst.
       - path: ./orchestrator/.env
         required: false
-    ports:
-      - "8000:8000"
+    # Bewusst KEIN direkt veroeffentlichter Port mehr: Zugriff laeuft
+    # ausschliesslich ueber Coolify/Traefik (HTTPS-Domain). Der alte
+    # Klartext-Zugang http://<IP>:8000 war der Grund fuer "Nicht sicher"-
+    # Warnungen und haette Login-Tokens unverschluesselt durchs LAN
+    # geschickt. Fuer Debugging voruebergehend wieder einkommentieren:
+    # ports:
+    #   - "8000:8000"
     volumes:
       # SQLite (User/Trigger/Filler/Karten) + vorgenerierte Filler-Audios
       - orchestrator-data:/data

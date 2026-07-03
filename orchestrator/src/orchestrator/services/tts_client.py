@@ -34,7 +34,13 @@ class XttsClient:
 
         async with httpx.AsyncClient(base_url=settings.xtts_base_url.rstrip("/"), timeout=300.0) as client:
             async with client.stream("POST", "/v1/synthesize", json=payload) as response:
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    # Fehler-Body explizit lesen: bei Streams ist er sonst
+                    # nicht verfuegbar (raise_for_status + .text wuerde an
+                    # ResponseNotRead scheitern) - und der XTTS-Service
+                    # liefert seit dem Stream-Priming echte Fehlertexte.
+                    detail = (await response.aread()).decode("utf-8", "replace")
+                    raise RuntimeError(f"XTTS-Fehler {response.status_code}: {detail[:300]}")
                 rate = int(response.headers.get("x-sample-rate", "24000"))
                 async for chunk in response.aiter_bytes(chunk_size=48000):
                     if chunk:

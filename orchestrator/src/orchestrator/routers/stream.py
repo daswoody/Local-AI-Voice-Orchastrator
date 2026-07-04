@@ -13,6 +13,7 @@ from ..graph import initial_state, orchestrator_graph
 from ..schemas import DeviceTool
 from ..security import decode_access_token
 from ..services import filler_service
+from ..services.litellm_client import litellm_client
 from ..services.stt_client import stt_client
 from ..services.tool_executor import ToolExecutor
 from ..services.tts_client import piper_client, xtts_client
@@ -25,6 +26,8 @@ router = APIRouter()
 async def assistant_stream(websocket: WebSocket) -> None:
     await websocket.accept()
     session = StreamSession(websocket)
+    # session-Frame laut docs/PROTOCOL.md direkt nach dem Connect.
+    await websocket.send_json({"type": "session", "session_id": session.session_id})
     try:
         while True:
             frame = await websocket.receive_json()
@@ -42,6 +45,7 @@ class StreamSession:
 
     def __init__(self, websocket: WebSocket) -> None:
         self.ws = websocket
+        self.session_id = uuid.uuid4().hex
         self.mode = "chat"
         self.audio_buffer = bytearray()
         self.active_task: asyncio.Task | None = None
@@ -70,26 +74,28 @@ class StreamSession:
             self.mode = frame.get("mode", "chat")
             if frame.get("voice_id"):
                 self.voice_id = frame["voice_id"]
-            self.device_tools = _parse_device_tools(frame.get("device_tools") or [])
+            # Manifest-Feld laut docs/PROTOCOL.md: "tools".
+            self.device_tools = _parse_device_tools(frame.get("tools") or [])
             return
 
         if frame_type == "tool_result":
             # Antwort der App auf einen tool_call (4.13) - dem wartenden
             # Roundtrip zustellen. Unbekannte IDs (z. B. nach Barge-in)
             # verfallen kommentarlos.
-            future = self.pending_tool_results.pop(str(frame.get("id")), None)
+            future = self.pending_tool_results.pop(str(frame.get("call_id")), None)
             if future is not None and not future.done():
                 future.set_result(frame)
             return
 
         if frame_type == "text_input":
-            # Audio-Antwort nur in den Sprach-Modi; im Chat-Modus liest die
-            # App per TTS-Fallback selbst vor (4.13).
-            await self.start_response(frame.get("text", ""), want_audio=self.mode in ("talk", "assist"))
+            # Antwort-Modalitaet: Text rein -> Text raus. Sprachausgabe gibt
+            # es nur fuer gesprochene Eingaben (siehe finish_audio_input) -
+            # so liest die Assistenz nicht ungefragt getippte Chats vor.
+            await self.start_response(frame.get("text", ""), want_audio=False)
             return
 
         if frame_type == "audio_chunk":
-            pcm = b64_to_pcm(frame.get("audio", ""))
+            pcm = b64_to_pcm(frame.get("data", ""))
             if len(self.audio_buffer) + len(pcm) > settings.max_audio_buffer_bytes:
                 self.audio_buffer.clear()
                 await self.ws.send_json({"type": "error", "message": "Audio-Puffer-Limit ueberschritten"})
@@ -131,7 +137,7 @@ class StreamSession:
             await self.ws.send_json({"type": "done"})
             return
 
-        # Gesprochene Frage -> gesprochene Antwort, unabhaengig vom Modus.
+        # Gesprochene Frage -> gesprochene Antwort (+ Details im Chat).
         await self.start_response(text, want_audio=True)
 
     # ---- Antwort-Pipeline --------------------------------------------------
@@ -174,7 +180,10 @@ class StreamSession:
             await self.ws.send_json({"type": "assistant_text", "text": response_text, "final": True})
 
             if want_audio:
-                await self._stream_main_tts(response_text)
+                # Kurze Sprachantwort, Details im Chat: lange Antworten
+                # werden fuer die Sprachausgabe zusammengefasst, der volle
+                # Text steht bereits als assistant_text im Chat.
+                await self._stream_main_tts(await self._speech_text(response_text))
 
             await self.ws.send_json({"type": "done"})
         except asyncio.CancelledError:
@@ -216,13 +225,13 @@ class StreamSession:
         """Geraete-Tool-Roundtrip (4.13): tool_call an die App, auf das
         zugehoerige tool_result warten. Der Timeout ist grosszuegig, weil
         sensible Tools eine Bestaetigung des Nutzers erfordern koennen (4.4).
-        Frame-Format gegen docs/PROTOCOL.md verifizieren."""
+        Frame-Felder laut docs/PROTOCOL.md: call_id + ok + result."""
         call_id = uuid.uuid4().hex
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         self.pending_tool_results[call_id] = future
         try:
             await self.ws.send_json(
-                {"type": "tool_call", "id": call_id, "name": name, "arguments": arguments}
+                {"type": "tool_call", "call_id": call_id, "name": name, "arguments": arguments}
             )
             frame = await asyncio.wait_for(future, timeout=settings.device_tool_timeout_s)
         except asyncio.TimeoutError:
@@ -230,8 +239,37 @@ class StreamSession:
         finally:
             self.pending_tool_results.pop(call_id, None)
 
-        result = frame.get("result", frame.get("error", ""))
-        return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+        result = frame.get("result", "")
+        result_text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+        if frame.get("ok") is False:
+            return f"Tool-Fehler auf dem Geraet: {result_text or 'keine Details'}"
+        return result_text
+
+    async def _speech_text(self, response_text: str) -> str:
+        """Kurze Sprachfassung fuer lange Antworten (zweiter, kleiner
+        LLM-Call). Schlaegt er fehl, wird eben der volle Text gesprochen -
+        Komfort-Feature, kein Muss."""
+        if not settings.voice_summary_enabled or len(response_text) <= settings.voice_summary_max_chars:
+            return response_text
+        try:
+            summary = await litellm_client.chat(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Fasse die folgende Assistenz-Antwort fuer eine Sprachausgabe "
+                            "zusammen: maximal zwei kurze, natuerlich gesprochene Saetze, "
+                            "keine Aufzaehlungen, keine Formatierung, Deutsch. Schliesse "
+                            "sinnvoll ab, z. B. mit einem Verweis auf die Details im Chat."
+                        ),
+                    },
+                    {"role": "user", "content": response_text},
+                ]
+            )
+            return summary.strip() or response_text
+        except Exception:
+            logger.warning("Sprach-Kurzfassung fehlgeschlagen - spreche den vollen Text")
+            return response_text
 
     async def _stream_filler(self, kind: str, tool_name: str | None = None) -> None:
         """Filler nach 4.3/4.14: bevorzugt vorgeneriertes XTTS-Audio in der
@@ -258,7 +296,7 @@ class StreamSession:
             await self.ws.send_json(
                 {
                     "type": "audio_chunk",
-                    "audio": pcm_to_b64(chunk),
+                    "data": pcm_to_b64(chunk),
                     "sample_rate": settings.target_sample_rate,
                 }
             )
@@ -271,7 +309,7 @@ class StreamSession:
                 await self.ws.send_json(
                     {
                         "type": "audio_chunk",
-                        "audio": pcm_to_b64(chunk),
+                        "data": pcm_to_b64(chunk),
                         "sample_rate": settings.target_sample_rate,
                     }
                 )
@@ -295,8 +333,18 @@ def _parse_device_tools(raw: list) -> list[DeviceTool]:
 
 def _resolve_identity(websocket: WebSocket) -> tuple[int, str | None]:
     """(tier, username) aus dem Login-Token (4.4); ohne/mit ungueltigem
-    Token bewusst Gast-Fallback statt eines harten Fehlers."""
-    token = websocket.query_params.get("token")
+    Token bewusst Gast-Fallback statt eines harten Fehlers.
+
+    Die App sendet den Token laut docs/PROTOCOL.md als
+    Authorization-Header; der Query-Parameter bleibt als Fallback fuer
+    die manuellen Test-Skripte (websockets-CLI kann Header, aber der
+    Query-Weg ist beim Debuggen bequemer)."""
+    token = None
+    auth_header = websocket.headers.get("authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        token = auth_header[7:]
+    if not token:
+        token = websocket.query_params.get("token")
     if not token:
         return 1, None
     try:

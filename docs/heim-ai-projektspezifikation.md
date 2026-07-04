@@ -310,6 +310,10 @@ Verbindlicher Vertrag in `docs/PROTOCOL.md` (App-Repo). **Die App ist fertig geb
 
 **TTS-Fallback-Regel:** Kommt bis zur `done`-Nachricht kein Server-Audio im Turn, liest die App den Antwort-Text per Android-On-Device-TTS vor (in den Einstellungen abschaltbar).
 
+**Antwort-Modalitäten & Sprach-Kurzfassung (NEU in v1.10):** Der Orchestrator entscheidet die Ausgabe-Modalität nach der Eingabe-Modalität: **Text rein → Text raus** (kein Server-Audio, egal in welchem Modus — die Assistenz liest getippte Chats nicht ungefragt vor), **Audio rein → Sprachantwort + Details im Chat**. Bei langen Antworten (> `VOICE_SUMMARY_MAX_CHARS`, Default 280) wird für die Sprachausgabe per zweitem, kleinem LLM-Call eine **Kurzfassung** (max. zwei gesprochene Sätze) erzeugt; der vollständige Text steht parallel als `assistant_text` im Chat/Popup. Schlägt die Kurzfassung fehl, wird der volle Text gesprochen. Abschaltbar per `VOICE_SUMMARY_ENABLED`.
+
+**Protokoll-Verifikation (v1.10):** Die Frame- und REST-Formate des Orchestrators sind gegen das echte `docs/PROTOCOL.md` des App-Repos abgeglichen (Audio-Feld `data`, Tool-Frames mit `call_id`/`ok`/`result`, Geräte-Manifest im hello-Feld `tools` inkl. `sensitive`, `session`-Frame nach Connect, Auth per `Authorization`-Header auch am WebSocket, `/v1/voices` → `{voices: []}`, `/v1/cards/layouts` → `{version, layouts}`).
+
 ### 4.14 Admin-Frontend & Charakter-/Rechte-Verwaltung (NEU in v1.6)
 
 **Zweck:** Zentrale Verwaltungsoberfläche für den Admin (Tier 3) — Modelle wechseln, Charakter/System-Prompt definieren, Stimmen anlegen/importieren/zuweisen, Karten-Layouts pflegen. Übernimmt damit auch die Rolle des Rechte-Verwaltungs-UIs für Phase 4/5.
@@ -661,9 +665,10 @@ Verbindlicher Vertrag in `docs/PROTOCOL.md` (App-Repo). **Die App ist fertig geb
 
 ---
 
-**Version:** 1.9.5
-**Stand:** 2026-07-03
+**Version:** 1.10
+**Stand:** 2026-07-04
 **Changelog:**
+- v1.10 (2026-07-04): **Protokoll-Abgleich mit der echten App** (`docs/PROTOCOL.md` war nun einsehbar): Audio-Frames nutzen `data`, Tool-Frames `call_id`/`ok`/`result`, Geräte-Manifest im hello-Feld `tools`, neues `session`-Frame nach Connect, WebSocket-Auth per `Authorization`-Header, `/v1/health`/`/v1/voices`/`/v1/cards/layouts` in den App-Formaten. **Neue Antwort-Modalitäten:** Text rein → Text raus; Audio rein → Sprachantwort + Details im Chat, mit LLM-Kurzfassung für die Sprachausgabe bei langen Antworten (4.13). Beides live gegen Fake-Backends validiert; 42 Tests grün.
 - v1.9.5 (2026-07-03): Dritter XTTS-Abhängigkeits-Fix: `coqui-tts[codec]` (torchcodec — ab PyTorch 2.9 Pflicht für torchaudio-Audio-I/O) + `ffmpeg` im Image.
 - v1.9.4 (2026-07-03): Zweiter XTTS-Abhängigkeits-Fix: `transformers<5` gepinnt (coqui-tts nutzt `isin_mps_friendly` aus der 4.x-API, in v5 entfernt; Lock jetzt 4.57.6, Vorhandensein der Funktion im Wheel verifiziert).
 - v1.9.3 (2026-07-03): **XTTS-Stimmgenerierung repariert:** Ursache des Generierungs-Fehlers war ein fehlendes PyTorch im XTTS-Image (`coqui-tts` deklariert torch nicht als Abhängigkeit) — sichtbar geworden durch das Stream-Priming aus v1.9.2. `torch`/`torchaudio` jetzt explizit im engine-Extra. Erstes Let's-Encrypt-Zertifikat für `ai.preuss.app` ist ausgestellt (Viewer bestätigt LE/YR2); verbleibende "Nicht sicher"-Anzeige wird über Browser-Neustart/DevTools-Security-Tab bzw. Ketten-Check diagnostiziert (Android braucht die volle Zertifikatskette — Hinweise in README).

@@ -248,11 +248,20 @@ Tool-Call spielt der Orchestrator den passenden Filler (spezifisches
 Muster wie `Calendar-*` schlaegt den generischen), hoechstens ein Filler
 pro Turn.
 
-**Wichtig - gegen `docs/PROTOCOL.md` im App-Repo verifizieren** (war aus
-dieser Umgebung nicht abrufbar): die Feldnamen der Frames
-`tool_call` (`{type, id, name, arguments}`),
-`tool_result` (`{type, id, result}`) und
-`card` (`{type: "card", card: {type, version, title?, data}}`).
+Die Frame- und REST-Formate sind gegen `docs/PROTOCOL.md` des App-Repos
+abgeglichen (Stand Branch claude/sharp-pascal-r1vi0y): Audio-Feld `data`,
+Tool-Frames `call_id`/`ok`/`result`, Manifest im hello-Feld `tools`,
+`session`-Frame nach Connect, Auth per Authorization-Header.
+
+## Antwort-Modalitaeten
+
+- **Text rein -> Text raus:** getippte Eingaben bekommen NIE Server-Audio.
+- **Audio rein -> Sprachantwort + Details im Chat:** gesprochene Eingaben
+  (Push-to-Talk, Realtime, Assist) bekommen Audio; lange Antworten werden
+  fuer die Sprachausgabe per zweitem LLM-Call auf max. zwei Saetze
+  gekuerzt (`VOICE_SUMMARY_MAX_CHARS`, Default 280; abschaltbar per
+  `VOICE_SUMMARY_ENABLED`), waehrend der volle Text als assistant_text im
+  Chat steht.
 
 ## Bekannte Einschraenkungen dieses Stands
 

@@ -208,7 +208,7 @@ def test_generate_filler_writes_wav_for_voices_with_sample(client, admin_headers
 
 
 def test_card_admin_crud_bumps_version(client, admin_headers):
-    before = client.get("/v1/cards/layouts").json()["layout_version"]
+    before = client.get("/v1/cards/layouts").json()["version"]
 
     client.post(
         "/v1/admin/cards",
@@ -216,12 +216,12 @@ def test_card_admin_crud_bumps_version(client, admin_headers):
         headers=admin_headers,
     )
     after = client.get("/v1/cards/layouts").json()
-    assert after["layout_version"] == before + 1
-    assert "shopping_list" in [t["card_type"] for t in after["templates"]]
+    assert after["version"] == before + 1
+    assert "shopping_list" in [t["card_type"] for t in after["layouts"]]
 
     # since_version liefert nur die neue Karte
     delta = client.get(f"/v1/cards/layouts?since_version={before}").json()
-    assert [t["card_type"] for t in delta["templates"]] == ["shopping_list"]
+    assert [t["card_type"] for t in delta["layouts"]] == ["shopping_list"]
 
     assert client.delete("/v1/admin/cards/shopping_list", headers=admin_headers).status_code == 204
 

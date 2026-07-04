@@ -33,15 +33,15 @@ async def run(url: str) -> None:
         await ws.send(json.dumps({"type": "hello", "mode": "talk"}))
         await ws.send(json.dumps({
             "type": "audio_chunk",
-            "audio": base64.b64encode(_test_audio()).decode(),
+            "data": base64.b64encode(_test_audio()).decode(),
         }))
         await ws.send(json.dumps({"type": "audio_end"}))
 
         async for raw in ws:
             frame = json.loads(raw)
             if frame.get("type") == "audio_chunk":
-                audio_bytes_received += len(base64.b64decode(frame["audio"]))
-                frame["audio"] = f"<{len(frame['audio'])} b64-Zeichen>"
+                audio_bytes_received += len(base64.b64decode(frame["data"]))
+                frame["data"] = f"<{len(frame['data'])} b64-Zeichen>"
             print(frame)
             if frame.get("type") == "done":
                 break

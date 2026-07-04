@@ -1,14 +1,20 @@
 """Tool-Calling im Orchestrator (Mikro-Phase 1.12): Agent-Loop, MCP-Server-
-Tools, Geraete-Tool-Bridge, show_card und Tool-Filler."""
+Tools, Geraete-Tool-Bridge, show_card und Tool-Filler. Frame-Felder laut
+docs/PROTOCOL.md der App (call_id, tools-Manifest, session-Frame)."""
 
 import json
 from unittest.mock import AsyncMock
 
 from orchestrator import graph as graph_module, repos
+from orchestrator.audio import pcm_to_b64
 from orchestrator.config import settings
 from orchestrator.routers import stream as stream_module
 from orchestrator.services import filler_service
 from orchestrator.services import mcp_gateway as mcp_gateway_module
+
+
+def _open(ws) -> None:
+    assert ws.receive_json()["type"] == "session"
 
 
 def _tool_call(name: str, arguments: dict, call_id: str = "call_1") -> dict:
@@ -68,6 +74,7 @@ def test_server_tool_via_mcp_gateway(client, monkeypatch):
     )
 
     with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
         ws.send_json({"type": "hello", "mode": "chat"})
         ws.send_json({"type": "text_input", "text": "Wie spaet ist es?"})
         frames = _collect_until_done(ws)
@@ -80,17 +87,20 @@ def test_server_tool_via_mcp_gateway(client, monkeypatch):
 
 
 def test_device_tool_roundtrip_over_websocket(client, monkeypatch):
-    """Geraete-Tool-Bridge (4.13): tool_call an die App, tool_result zurueck."""
+    """Geraete-Tool-Bridge (4.13): tool_call an die App, tool_result zurueck.
+    Manifest kommt laut PROTOCOL.md im hello-Feld "tools"."""
     _scripted_llm(monkeypatch, [
         _tool_call("set_alarm", {"time": "07:30"}),
         {"role": "assistant", "content": "Wecker fuer 7:30 Uhr gestellt."},
     ])
 
     with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
         ws.send_json({
             "type": "hello", "mode": "chat",
-            "device_tools": [{"name": "set_alarm", "description": "Stellt einen Wecker",
-                              "parameters": {"type": "object", "properties": {"time": {"type": "string"}}}}],
+            "tools": [{"name": "set_alarm", "description": "Stellt einen Wecker",
+                       "parameters": {"type": "object", "properties": {"time": {"type": "string"}}},
+                       "sensitive": False}],
         })
         ws.send_json({"type": "text_input", "text": "Weck mich um 7:30"})
 
@@ -98,12 +108,36 @@ def test_device_tool_roundtrip_over_websocket(client, monkeypatch):
         assert tool_call["type"] == "tool_call"
         assert tool_call["name"] == "set_alarm"
         assert tool_call["arguments"] == {"time": "07:30"}
+        assert tool_call["call_id"]
 
-        ws.send_json({"type": "tool_result", "id": tool_call["id"],
-                      "result": {"ok": True, "alarm": "07:30"}})
+        ws.send_json({"type": "tool_result", "call_id": tool_call["call_id"],
+                      "ok": True, "result": {"alarm": "07:30"}})
         frames = _collect_until_done(ws)
 
     assert {"type": "assistant_text", "text": "Wecker fuer 7:30 Uhr gestellt.", "final": True} in frames
+
+
+def test_device_tool_error_result_is_passed_to_llm(client, monkeypatch):
+    """ok=false im tool_result wird dem LLM als Tool-Fehler gereicht."""
+    transcript = []
+    _scripted_llm(monkeypatch, [
+        _tool_call("open_app", {"app": "spotify"}),
+        {"role": "assistant", "content": "Das hat leider nicht geklappt."},
+    ], transcript)
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "chat",
+                      "tools": [{"name": "open_app", "description": "Oeffnet eine App"}]})
+        ws.send_json({"type": "text_input", "text": "Mach Spotify an"})
+        tool_call = ws.receive_json()
+        ws.send_json({"type": "tool_result", "call_id": tool_call["call_id"],
+                      "ok": False, "result": "App nicht installiert"})
+        _collect_until_done(ws)
+
+    tool_messages = [m for m in transcript[1]["messages"] if m["role"] == "tool"]
+    assert "Tool-Fehler auf dem Geraet" in tool_messages[0]["content"]
+    assert "App nicht installiert" in tool_messages[0]["content"]
 
 
 def test_show_card_pushes_card_frame(client, monkeypatch):
@@ -114,6 +148,7 @@ def test_show_card_pushes_card_frame(client, monkeypatch):
     ])
 
     with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
         ws.send_json({"type": "hello", "mode": "chat"})
         ws.send_json({"type": "text_input", "text": "Zeig mir eine Karte"})
         frames = _collect_until_done(ws)
@@ -130,13 +165,16 @@ def test_show_card_pushes_card_frame(client, monkeypatch):
 
 
 def test_tool_filler_with_specific_pattern_plays_before_tool(client, monkeypatch):
-    """Der Admin-definierte Tool-Trigger (1.7d) feuert jetzt wirklich:
-    Kalender-Tool -> Kalender-Filler aus dem Cache, vor der Antwort."""
+    """Der Admin-definierte Tool-Trigger (1.7d) feuert: Kalender-Tool ->
+    Kalender-Filler aus dem Cache, vor der Antwort. Sprach-Turn = Audio-Input."""
     _scripted_llm(monkeypatch, [
         _tool_call("Calendar-list_events", {}),
         {"role": "assistant", "content": "Morgen hast du zwei Termine."},
     ])
     monkeypatch.setattr(mcp_gateway_module.mcp_gateway, "call_tool", AsyncMock(return_value="2 Termine"))
+    monkeypatch.setattr(
+        stream_module.stt_client, "transcribe", AsyncMock(return_value="Was steht morgen an?")
+    )
 
     async def fake_xtts(text, voice_id, language=None):
         yield 24000, b"\x01\x02" * 600
@@ -160,8 +198,10 @@ def test_tool_filler_with_specific_pattern_plays_before_tool(client, monkeypatch
         f.writeframes(b"\x09\x0a" * 600)
 
     with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
         ws.send_json({"type": "hello", "mode": "talk"})
-        ws.send_json({"type": "text_input", "text": "Was steht morgen an?"})
+        ws.send_json({"type": "audio_chunk", "data": pcm_to_b64(b"\x00\x00" * 1600)})
+        ws.send_json({"type": "audio_end"})
         frames = _collect_until_done(ws)
 
     types = [f["type"] for f in frames]
@@ -195,6 +235,7 @@ def test_tool_loop_terminates_at_iteration_limit(client, monkeypatch):
     monkeypatch.setattr(mcp_gateway_module.mcp_gateway, "call_tool", AsyncMock(return_value="12:00"))
 
     with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
         ws.send_json({"type": "hello", "mode": "chat"})
         ws.send_json({"type": "text_input", "text": "Und jetzt?"})
         frames = _collect_until_done(ws)
@@ -213,9 +254,10 @@ def test_device_tool_timeout_becomes_tool_error(client, monkeypatch):
     ], transcript)
 
     with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
         ws.send_json({
             "type": "hello", "mode": "chat",
-            "device_tools": [{"name": "open_app", "description": "Oeffnet eine App"}],
+            "tools": [{"name": "open_app", "description": "Oeffnet eine App"}],
         })
         ws.send_json({"type": "text_input", "text": "Mach Spotify an"})
         tool_call = ws.receive_json()

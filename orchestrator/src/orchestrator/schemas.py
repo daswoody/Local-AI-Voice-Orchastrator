@@ -32,14 +32,22 @@ class CardLayout(BaseModel):
 
 
 class CardLayoutsResponse(BaseModel):
-    layout_version: int
-    templates: list[CardLayout]
+    # Feldnamen laut docs/PROTOCOL.md der App: version + layouts.
+    version: int
+    layouts: list[CardLayout]
+
+
+class VoicesResponse(BaseModel):
+    voices: list[Voice]
 
 
 class DeviceTool(BaseModel):
     name: str
     description: str | None = None
     parameters: dict[str, Any] = {}
+    # 4.4: sensible Geraete-Tools erfordern App-seitige Bestaetigung; der
+    # Orchestrator reicht das Flag nur durch (App setzt es im Manifest).
+    sensitive: bool = False
 
 
 class HelloFrame(BaseModel):

@@ -44,6 +44,12 @@ class Settings(BaseSettings):
     filler_enabled: bool = True
     filler_delay_ms: int = 1200
 
+    # Kurze Sprachantwort, Details im Chat: Antworten ueber dieser Laenge
+    # werden fuer die Sprachausgabe per zweitem LLM-Call zusammengefasst
+    # (der volle Text steht als assistant_text im Chat).
+    voice_summary_enabled: bool = True
+    voice_summary_max_chars: int = 280
+
     # ~5 Minuten PCM16/16k; schuetzt vor unbegrenzt wachsendem Puffer.
     max_audio_buffer_bytes: int = 10 * 1024 * 1024
 

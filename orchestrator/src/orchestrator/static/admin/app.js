@@ -181,9 +181,13 @@ views.character = async () => {
     <p class="hint">Globaler System-Prompt der Assistenz. Pro Nutzer ueberschreibbar (Feld "Charakter-Override" im Nutzer-Formular).</p>
     <section class="block">
       <form class="grid" data-submit="saveCharacter">
-        <label class="full">System-Prompt
+        <label class="full">System-Prompt (Antworten)
           <textarea name="prompt" rows="8">${esc(data.prompt)}</textarea>
         </label>
+        <label class="full">System-Prompt fuer die Audio-Zusammenfassung
+          <textarea name="voice_summary_prompt" rows="6" placeholder="Leer = eingebauter Standard">${esc(data.voice_summary_prompt)}</textarea>
+        </label>
+        <p class="hint full">Die Audio-Zusammenfassung wird gesprochen, wenn eine Antwort laenger als das Limit ist (Details bleiben im Chat). Wichtig: XTTS liest den Text WOERTLICH vor - der Prompt sollte Emojis, Formatierung und Emotions-Tags wie [froehlich] ausdruecklich verbieten (der Standard tut das).</p>
         <div><button type="submit">Speichern</button></div>
       </form>
     </section>`;
@@ -402,7 +406,10 @@ views.cards = async () => {
 // ---- Formular-/Button-Aktionen ----------------------------------------------------------------
 
 const formActions = {
-  saveCharacter: (form) => api.put("/v1/admin/character", { prompt: form.prompt.value }),
+  saveCharacter: (form) => api.put("/v1/admin/character", {
+    prompt: form.prompt.value,
+    voice_summary_prompt: form.voice_summary_prompt.value,
+  }),
 
   async saveUser(form) {
     const id = form.id.value;

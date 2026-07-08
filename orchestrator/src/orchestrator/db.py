@@ -61,6 +61,18 @@ CREATE TABLE IF NOT EXISTS card_layouts (
 
 _DEFAULT_CHARACTER_PROMPT = "Du bist eine hilfreiche, deutschsprachige Heim-Assistenz."
 
+# Default fuer den Sprach-Kurzfassungs-Prompt (Admin > Charakter, editierbar).
+# Wichtig: XTTS liest Text WOERTLICH vor - Emotions-Tags wie [froehlich],
+# Emojis oder Markdown wuerden mitgesprochen, daher verbietet der Default sie.
+DEFAULT_VOICE_SUMMARY_PROMPT = (
+    "Fasse die folgende Assistenz-Antwort fuer eine Sprachausgabe zusammen: "
+    "maximal zwei kurze, natuerlich gesprochene Saetze auf Deutsch. "
+    "Keine Aufzaehlungen, keine Formatierung, keine Emojis und keine "
+    "Regieanweisungen oder Emotions-Tags wie [froehlich] - der Text wird "
+    "woertlich vorgelesen. Verweise bei Bedarf darauf, dass die Details im "
+    "Chat stehen."
+)
+
 _CARDS_SEED_FILE = Path(__file__).resolve().parent / "data" / "default_card_layouts.json"
 
 
@@ -114,9 +126,15 @@ def _seed_admin_user(conn: sqlite3.Connection) -> None:
 
 
 def _seed_character(conn: sqlite3.Connection) -> None:
+    # INSERT OR IGNORE laeuft bei jedem Start - so bekommen auch bestehende
+    # Datenbanken neue Settings-Keys, ohne Admin-Aenderungen zu ueberschreiben.
     conn.execute(
         "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('character_prompt', ?)",
         (_DEFAULT_CHARACTER_PROMPT,),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('voice_summary_prompt', ?)",
+        (DEFAULT_VOICE_SUMMARY_PROMPT,),
     )
 
 

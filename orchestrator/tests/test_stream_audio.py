@@ -179,14 +179,17 @@ def test_long_answer_is_summarized_for_speech(client, monkeypatch):
     long_text = "Sehr ausfuehrliche Antwort. " * 30  # > voice_summary_max_chars
     spoken: dict = {}
 
+    from orchestrator import repos
+    repos.set_setting("voice_summary_prompt", "MEIN EIGENER KURZFASSUNGS-PROMPT")
+
     call_count = {"n": 0}
 
     async def fake_chat(messages, tools=None):
         call_count["n"] += 1
         if call_count["n"] == 1:
             return {"role": "assistant", "content": long_text}
-        # zweiter Call = Kurzfassungs-Prompt
-        assert "Sprachausgabe" in messages[0]["content"]
+        # zweiter Call = Kurzfassung, mit dem Admin-definierten Prompt
+        assert messages[0]["content"] == "MEIN EIGENER KURZFASSUNGS-PROMPT"
         return {"role": "assistant", "content": "Kurz gesagt: alles gut. Details im Chat."}
 
     async def capture_xtts(text, voice_id, language=None):

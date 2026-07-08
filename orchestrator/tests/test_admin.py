@@ -74,10 +74,28 @@ def test_last_admin_cannot_be_deleted(client, admin_headers):
 
 
 def test_character_global_and_override(client, admin_headers):
-    client.put("/v1/admin/character", json={"prompt": "Du bist Jarvis."}, headers=admin_headers)
-    assert client.get("/v1/admin/character", headers=admin_headers).json() == {"prompt": "Du bist Jarvis."}
+    client.put(
+        "/v1/admin/character",
+        json={"prompt": "Du bist Jarvis.", "voice_summary_prompt": "Fasse als Jarvis zusammen."},
+        headers=admin_headers,
+    )
+    body = client.get("/v1/admin/character", headers=admin_headers).json()
+    assert body == {"prompt": "Du bist Jarvis.",
+                    "voice_summary_prompt": "Fasse als Jarvis zusammen."}
     # Ohne Override greift der globale Prompt
     assert repos.effective_system_prompt(None) == "Du bist Jarvis."
+    assert repos.voice_summary_prompt() == "Fasse als Jarvis zusammen."
+
+
+def test_empty_voice_summary_prompt_falls_back_to_default(client, admin_headers):
+    client.put(
+        "/v1/admin/character",
+        json={"prompt": "Egal.", "voice_summary_prompt": ""},
+        headers=admin_headers,
+    )
+    # Leer gespeichert -> eingebauter Default greift (inkl. Verbot von
+    # Emotions-Tags, die XTTS woertlich vorlesen wuerde)
+    assert "[froehlich]" in repos.voice_summary_prompt()
 
 
 # ---- Stimmen --------------------------------------------------------------------

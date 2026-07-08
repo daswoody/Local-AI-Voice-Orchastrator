@@ -93,17 +93,27 @@ def delete_user(user_id: int) -> None:
 
 class CharacterPayload(BaseModel):
     prompt: str
+    # Prompt fuer die Sprach-Kurzfassung (Audio-Zusammenfassung); leer ->
+    # eingebauter Default greift wieder.
+    voice_summary_prompt: str = ""
 
 
 @router.get("/character")
 def get_character() -> dict:
-    return {"prompt": repos.get_setting("character_prompt") or ""}
+    return {
+        "prompt": repos.get_setting("character_prompt") or "",
+        "voice_summary_prompt": repos.get_setting("voice_summary_prompt") or "",
+    }
 
 
 @router.put("/character")
 def set_character(payload: CharacterPayload) -> dict:
     repos.set_setting("character_prompt", payload.prompt)
-    return {"prompt": payload.prompt}
+    repos.set_setting("voice_summary_prompt", payload.voice_summary_prompt)
+    return {
+        "prompt": payload.prompt,
+        "voice_summary_prompt": payload.voice_summary_prompt,
+    }
 
 
 # ---- Stimmen --------------------------------------------------------------------

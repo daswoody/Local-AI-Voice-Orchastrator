@@ -110,6 +110,13 @@ def effective_system_prompt(username: str | None) -> str:
     return get_setting("character_prompt") or "Du bist eine hilfreiche, deutschsprachige Heim-Assistenz."
 
 
+def voice_summary_prompt() -> str:
+    """System-Prompt fuer die Sprach-Kurzfassung (Admin > Charakter)."""
+    from .db import DEFAULT_VOICE_SUMMARY_PROMPT
+
+    return get_setting("voice_summary_prompt") or DEFAULT_VOICE_SUMMARY_PROMPT
+
+
 # ---- Voices --------------------------------------------------------------------
 
 

@@ -254,15 +254,9 @@ class StreamSession:
         try:
             summary = await litellm_client.chat(
                 [
-                    {
-                        "role": "system",
-                        "content": (
-                            "Fasse die folgende Assistenz-Antwort fuer eine Sprachausgabe "
-                            "zusammen: maximal zwei kurze, natuerlich gesprochene Saetze, "
-                            "keine Aufzaehlungen, keine Formatierung, Deutsch. Schliesse "
-                            "sinnvoll ab, z. B. mit einem Verweis auf die Details im Chat."
-                        ),
-                    },
+                    # Prompt kommt aus Admin > Charakter (app_settings) -
+                    # dort z. B. auch Tonalitaet der Kurzfassung steuerbar.
+                    {"role": "system", "content": repos.voice_summary_prompt()},
                     {"role": "user", "content": response_text},
                 ]
             )

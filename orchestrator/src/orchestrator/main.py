@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .db import init_db
@@ -17,6 +18,16 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Heim-AI Voice-Orchestrator", lifespan=lifespan)
+
+# CORS: die Bootstrap-Seite der Windows-Shell laeuft unter tauri://localhost
+# und prueft von dort /v1/health + /app/version.json. Auth laeuft ueber
+# explizite Bearer-Header (keine Cookies), daher ist "*" hier vertretbar.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/")

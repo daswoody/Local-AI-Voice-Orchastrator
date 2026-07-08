@@ -7,8 +7,10 @@
 services:
   orchestrator:
     build:
-      context: ./orchestrator
-      dockerfile: Dockerfile
+      # Repo-Root als Context: das Image baut auch die User-Web-UI aus
+      # frontend/ mit (Multi-Stage, siehe orchestrator/Dockerfile).
+      context: .
+      dockerfile: orchestrator/Dockerfile
     container_name: heimai-orchestrator
     restart: unless-stopped
     env_file:

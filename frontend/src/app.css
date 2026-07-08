@@ -1,0 +1,92 @@
+/* Heim-AI User-UI - dunkles, ruhiges Grundthema. Eine Datei, bewusst ohne
+   Framework: die UI ist klein genug. */
+
+:root {
+  --bg: #101418;
+  --bg-raised: #1a2027;
+  --bg-input: #232b34;
+  --border: #2e3844;
+  --text: #e8edf2;
+  --text-muted: #94a3b3;
+  --primary: #4da3ff;
+  --primary-dim: #2b5f9e;
+  --danger: #ff6b6b;
+  --ok: #51cf8a;
+  --radius: 12px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 15px;
+}
+
+#app {
+  height: 100%;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 14px;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: var(--primary-dim);
+}
+
+button.primary {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #0b1016;
+  font-weight: 600;
+}
+
+button.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-muted);
+}
+
+button.ghost:hover {
+  color: var(--text);
+}
+
+input,
+select {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 9px 12px;
+  width: 100%;
+}
+
+input:focus,
+select:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+label {
+  display: block;
+  color: var(--text-muted);
+  font-size: 13px;
+  margin: 14px 0 4px;
+}

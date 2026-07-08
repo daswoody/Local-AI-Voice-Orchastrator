@@ -1,0 +1,18 @@
+{
+  "name": "heimai-app-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Zentrale User-Web-UI des Heim-AI-Orchestrators (Phase 2.5). Wird unter /app ausgeliefert; die Windows-Shell und jeder Browser laden sie live vom Server.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.0.3",
+    "svelte": "^5.28.1",
+    "typescript": "~5.8.3",
+    "vite": "^6.3.5"
+  }
+}

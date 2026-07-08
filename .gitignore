@@ -3,3 +3,9 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .env
+
+# Frontend (User-Web-UI, Phase 2.5)
+frontend/node_modules/
+# Build-Output: entsteht im Docker-Build (Multi-Stage) bzw. lokal via
+# `npm run build`; wird nicht eingecheckt.
+orchestrator/src/orchestrator/static/app/

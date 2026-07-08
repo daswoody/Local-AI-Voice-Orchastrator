@@ -23,13 +23,24 @@ html,
 body {
   margin: 0;
   height: 100%;
+  background: var(--bg);
+  color-scheme: dark;
 }
 
 body {
-  background: var(--bg);
   color: var(--text);
   font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
   font-size: 15px;
+}
+
+/* Overlay-Fenster der Windows-Shell (#/indicator, #/popup): transparenter
+   Grund, damit nur die abgerundete Kapsel sichtbar ist. Als Body-Klasse
+   statt :global(body) in den Komponenten - Svelte buendelt Komponenten-
+   Styles global, eine dortige body-Regel wuerde ALLE Ansichten treffen. */
+html:has(body.overlay-window),
+body.overlay-window {
+  background: transparent;
+  overflow: hidden;
 }
 
 #app {

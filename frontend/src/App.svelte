@@ -13,6 +13,12 @@
 
   window.addEventListener("hashchange", () => (route = location.hash));
   window.addEventListener("heimai:logout", () => (loggedIn = false));
+
+  // Transparenter Fenstergrund NUR fuer die Overlay-Fenster der Shell.
+  $effect(() => {
+    const overlay = route.startsWith("#/indicator") || route.startsWith("#/popup");
+    document.body.classList.toggle("overlay-window", overlay);
+  });
 </script>
 
 {#if route.startsWith("#/indicator")}

@@ -59,9 +59,13 @@ export const getPopupPayload = (id: string) =>
 export const closePopup = (id: string) => invoke("close_popup", { id });
 export const pinPopup = (id: string) => invoke("pin_popup", { id });
 
-/** Desktop-Screenshot (PNG, Base64) - Phase 2.5 Screenshot-Flow. */
-export const captureScreenshot = () =>
-  invoke<{ b64: string; mime: string }>("capture_screenshot");
+/** Desktop-Screenshot (PNG, Base64) - Phase 2.5 Screenshot-Flow.
+ *  Wirft bei Fehlern (statt still null zu liefern), damit die echte
+ *  Ursache - z. B. eine IPC-Ablehnung - beim Nutzer ankommt. */
+export async function captureScreenshot(): Promise<{ b64: string; mime: string }> {
+  if (!tauri) throw new Error("Screenshot ist nur in der Windows-App verfuegbar");
+  return (await tauri.core.invoke("capture_screenshot")) as { b64: string; mime: string };
+}
 
 /** Globale Hotkeys registrieren; Aktionen kommen als "hotkey"-Event zurueck. */
 export const setHotkeys = (hotkeys: { chat: string; talk: string; screenshot: string }) =>

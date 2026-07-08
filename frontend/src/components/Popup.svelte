@@ -66,10 +66,7 @@
 </div>
 
 <style>
-  :global(body) {
-    background: transparent !important;
-    overflow: hidden;
-  }
+  /* Fenstergrund-Transparenz steuert App.svelte ueber body.overlay-window */
   .popup {
     margin: 4px;
     background: rgba(20, 25, 31, 0.97);

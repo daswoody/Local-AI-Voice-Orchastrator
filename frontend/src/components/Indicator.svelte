@@ -22,10 +22,7 @@
 </div>
 
 <style>
-  :global(body) {
-    background: transparent !important;
-    overflow: hidden;
-  }
+  /* Fenstergrund-Transparenz steuert App.svelte ueber body.overlay-window */
   .indicator {
     display: flex;
     align-items: center;

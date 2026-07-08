@@ -111,12 +111,12 @@ async function handleToolCall(
   _args: Record<string, unknown>,
 ): Promise<void> {
   if (name === "capture_screenshot") {
-    const shot = await shell.captureScreenshot();
-    if (shot) {
+    try {
+      const shot = await shell.captureScreenshot();
       // Konvention der Bild-Tool-Ergebnisse (Server: _extract_image_data_url)
       session?.sendToolResult(callId, true, { image_b64: shot.b64, mime: shot.mime });
-    } else {
-      session?.sendToolResult(callId, false, "Screenshot fehlgeschlagen");
+    } catch (error) {
+      session?.sendToolResult(callId, false, `Screenshot fehlgeschlagen: ${error}`);
     }
     return;
   }
@@ -299,9 +299,11 @@ export async function toggleRealtime(): Promise<void> {
 /** Screenshot-Flow auf Kommando (Hotkey/Button): Bild aufnehmen und mit
  *  optionaler Frage als image_input schicken. */
 export async function sendScreenshot(question: string): Promise<void> {
-  const shot = await shell.captureScreenshot();
-  if (!shot) {
-    app.error = "Screenshot nur in der Windows-App verfuegbar";
+  let shot: { b64: string; mime: string };
+  try {
+    shot = await shell.captureScreenshot();
+  } catch (error) {
+    app.error = error instanceof Error ? error.message : String(error);
     return;
   }
   await ensureSession();

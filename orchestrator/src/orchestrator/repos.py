@@ -3,11 +3,18 @@
 Eine Funktion = eine Query; Rueckgaben sind dicts (JSON-nah), damit die
 Router sie direkt ausliefern koennen."""
 
+import datetime as dt
 import json
 import sqlite3
+import uuid
 from typing import Any
 
 from .db import db_session
+
+
+def _utc_now() -> str:
+    # UTC-First (4.10): ISO 8601 mit Z-Suffix, sekundengenau reicht.
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 # ---- Users -------------------------------------------------------------------
 
@@ -247,6 +254,106 @@ def delete_filler(filler_id: int) -> bool:
         cursor = conn.execute("DELETE FROM fillers WHERE id = ?", (filler_id,))
         conn.commit()
         return cursor.rowcount > 0
+
+
+# ---- Conversations (zentrale Chat-Historie, Phase 2.5) ---------------------------
+
+
+def create_conversation(username: str | None, device_name: str, title: str) -> dict:
+    now = _utc_now()
+    conversation = {
+        "id": uuid.uuid4().hex,
+        "username": username,
+        "device_name": device_name,
+        "title": title[:80],
+        "created_at": now,
+        "updated_at": now,
+    }
+    with db_session() as conn:
+        conn.execute(
+            "INSERT INTO conversations (id, username, device_name, title, created_at, updated_at)"
+            " VALUES (:id, :username, :device_name, :title, :created_at, :updated_at)",
+            conversation,
+        )
+        conn.commit()
+    return conversation
+
+
+def get_conversation(conversation_id: str) -> dict | None:
+    with db_session() as conn:
+        row = conn.execute(
+            "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def list_conversations(username: str) -> list[dict]:
+    """Nur eigene Gespraeche: Historie ist privat (4.4), auch Tier 3 sieht
+    hier nicht die Gespraeche anderer User."""
+    with db_session() as conn:
+        rows = conn.execute(
+            "SELECT c.*, COUNT(m.id) AS message_count FROM conversations c"
+            " LEFT JOIN messages m ON m.conversation_id = c.id"
+            " WHERE c.username = ? GROUP BY c.id ORDER BY c.updated_at DESC",
+            (username,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def delete_conversation(conversation_id: str) -> bool:
+    with db_session() as conn:
+        # ON DELETE CASCADE raeumt die messages mit ab.
+        cursor = conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def append_message(
+    conversation_id: str,
+    role: str,
+    content: str,
+    cards: list[dict] | None = None,
+    has_image: bool = False,
+) -> dict:
+    now = _utc_now()
+    with db_session() as conn:
+        cursor = conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, cards_json, has_image, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                conversation_id,
+                role,
+                content,
+                json.dumps(cards, ensure_ascii=False) if cards else None,
+                int(has_image),
+                now,
+            ),
+        )
+        conn.execute(
+            "UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conversation_id)
+        )
+        conn.commit()
+        message_id = cursor.lastrowid
+    return {"id": message_id, "role": role, "content": content,
+            "cards": cards or [], "has_image": has_image, "created_at": now}
+
+
+def list_messages(conversation_id: str) -> list[dict]:
+    with db_session() as conn:
+        rows = conn.execute(
+            "SELECT * FROM messages WHERE conversation_id = ? ORDER BY id", (conversation_id,)
+        ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "role": r["role"],
+                "content": r["content"],
+                "cards": json.loads(r["cards_json"]) if r["cards_json"] else [],
+                "has_image": bool(r["has_image"]),
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ]
 
 
 # ---- Card-Layouts ----------------------------------------------------------------

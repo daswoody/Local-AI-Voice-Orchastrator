@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     # ~5 Minuten PCM16/16k; schuetzt vor unbegrenzt wachsendem Puffer.
     max_audio_buffer_bytes: int = 10 * 1024 * 1024
 
+    # Obergrenze fuer image_input (Base64-Laenge): 4K-PNG-Screenshots
+    # liegen deutlich darunter; schuetzt vor Speicherfressern.
+    max_image_b64_bytes: int = 12 * 1024 * 1024
+
     default_voice_id: str = "default-de-female"
 
     # SQLite (1.7b) + Ablagen fuer Voice-Samples und vorgenerierte Filler

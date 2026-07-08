@@ -17,6 +17,15 @@ def _open(ws) -> None:
     assert ws.receive_json()["type"] == "session"
 
 
+def _next_frame(ws) -> dict:
+    """Naechstes inhaltliches Frame; ueberspringt das conversation-Frame
+    der zentralen Historie (Phase 2.5)."""
+    frame = ws.receive_json()
+    if frame["type"] == "conversation":
+        frame = ws.receive_json()
+    return frame
+
+
 def _tool_call(name: str, arguments: dict, call_id: str = "call_1") -> dict:
     return {
         "role": "assistant",
@@ -104,7 +113,7 @@ def test_device_tool_roundtrip_over_websocket(client, monkeypatch):
         })
         ws.send_json({"type": "text_input", "text": "Weck mich um 7:30"})
 
-        tool_call = ws.receive_json()
+        tool_call = _next_frame(ws)
         assert tool_call["type"] == "tool_call"
         assert tool_call["name"] == "set_alarm"
         assert tool_call["arguments"] == {"time": "07:30"}
@@ -130,7 +139,7 @@ def test_device_tool_error_result_is_passed_to_llm(client, monkeypatch):
         ws.send_json({"type": "hello", "mode": "chat",
                       "tools": [{"name": "open_app", "description": "Oeffnet eine App"}]})
         ws.send_json({"type": "text_input", "text": "Mach Spotify an"})
-        tool_call = ws.receive_json()
+        tool_call = _next_frame(ws)
         ws.send_json({"type": "tool_result", "call_id": tool_call["call_id"],
                       "ok": False, "result": "App nicht installiert"})
         _collect_until_done(ws)
@@ -260,7 +269,7 @@ def test_device_tool_timeout_becomes_tool_error(client, monkeypatch):
             "tools": [{"name": "open_app", "description": "Oeffnet eine App"}],
         })
         ws.send_json({"type": "text_input", "text": "Mach Spotify an"})
-        tool_call = ws.receive_json()
+        tool_call = _next_frame(ws)
         assert tool_call["type"] == "tool_call"
         # Bewusst KEIN tool_result senden -> Timeout
         frames = _collect_until_done(ws)

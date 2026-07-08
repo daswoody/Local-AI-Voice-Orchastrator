@@ -17,9 +17,13 @@ def test_text_input_roundtrip_over_websocket(client, monkeypatch):
         ws.send_json({"type": "hello", "mode": "chat"})
         ws.send_json({"type": "text_input", "text": "Hallo"})
 
+        # Historie (Phase 2.5): der Server legt das Gespraech an und teilt
+        # die ID mit, bevor die Antwort kommt.
+        conversation = ws.receive_json()
         assistant_text = ws.receive_json()
         done = ws.receive_json()
 
     assert session["type"] == "session" and session["session_id"]
+    assert conversation["type"] == "conversation" and conversation["conversation_id"]
     assert assistant_text == {"type": "assistant_text", "text": "Hallo zurueck!", "final": True}
     assert done == {"type": "done"}

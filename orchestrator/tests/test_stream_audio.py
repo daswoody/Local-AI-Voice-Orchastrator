@@ -87,7 +87,8 @@ def test_text_input_is_always_text_only(client, monkeypatch):
             ws.send_json({"type": "text_input", "text": "Hallo"})
             frames = _collect_until_done(ws)
 
-        assert [f["type"] for f in frames] == ["assistant_text", "done"], f"mode={mode}"
+        # conversation = Historien-Frame (Phase 2.5), danach reiner Text.
+        assert [f["type"] for f in frames] == ["conversation", "assistant_text", "done"], f"mode={mode}"
 
 
 def test_audio_input_gets_audio_answer_even_in_chat_mode(client, monkeypatch):
@@ -142,10 +143,12 @@ def test_interrupt_cancels_running_response(client, monkeypatch):
         ws.send_json({"type": "hello", "mode": "chat"})
         ws.send_json({"type": "text_input", "text": "Langsame Frage"})
         ws.send_json({"type": "interrupt"})
-        frame = ws.receive_json()
+        frames = _collect_until_done(ws)
 
-    # Barge-in: sofort done, kein assistant_text der abgebrochenen Antwort
-    assert frame == {"type": "done"}
+    # Barge-in: sofort done, kein assistant_text der abgebrochenen Antwort.
+    # (Ein conversation-Frame darf vorher kommen, falls die Persistenz des
+    # User-Inputs schneller war als der Abbruch.)
+    assert all(f["type"] in ("conversation", "done") for f in frames)
 
 
 def test_stt_failure_reports_error_and_closes_turn(client, monkeypatch):

@@ -56,6 +56,13 @@ class StreamSession:
         # Hoechstens ein Filler pro Turn (thinking ODER tool) - sonst
         # stapeln sich bei mehreren Tool-Calls die Phrasen.
         self._filler_played = False
+        # Zentrale Chat-Historie (Phase 2.5): das Gespraech wird lazy beim
+        # ersten Input angelegt (keine leeren Gespraeche durch blosses
+        # Verbinden); Karten des laufenden Turns sammeln sich fuer die
+        # Persistenz der Assistant-Message.
+        self.conversation_id: str | None = None
+        self.device_name = ""
+        self._turn_cards: list[dict] = []
 
         self.tier, self.username = _resolve_identity(websocket)
         self.system_prompt = repos.effective_system_prompt(self.username)
@@ -76,6 +83,16 @@ class StreamSession:
                 self.voice_id = frame["voice_id"]
             # Manifest-Feld laut docs/PROTOCOL.md: "tools".
             self.device_tools = _parse_device_tools(frame.get("tools") or [])
+            self.device_name = str((frame.get("device") or {}).get("name") or "")
+            # Historie fortsetzen (Protokoll-Erweiterung 2.5): optionales
+            # conversation_id im hello. Nur eigene Gespraeche - Gaeste
+            # ohne Login koennen keine Fortsetzung beanspruchen.
+            requested = frame.get("conversation_id")
+            if requested and self.username:
+                conversation = repos.get_conversation(str(requested))
+                if conversation and conversation["username"] == self.username:
+                    self.conversation_id = conversation["id"]
+                    await self._send_conversation_frame()
             return
 
         if frame_type == "tool_result":
@@ -105,6 +122,25 @@ class StreamSession:
 
         if frame_type == "audio_end":
             await self.finish_audio_input()
+            return
+
+        if frame_type == "image_input":
+            # Screenshot-/Bild-Analyse (Phase 2.5/3): Base64-Bild + optionale
+            # Frage. speak=true fuer sprachgetriebene Flows (Antwort kommt
+            # dann wie bei Audio-Eingaben auch als TTS-Stream).
+            data = frame.get("data", "")
+            if not data:
+                await self.ws.send_json({"type": "error", "message": "image_input ohne Bilddaten"})
+                return
+            if len(data) > settings.max_image_b64_bytes:
+                await self.ws.send_json({"type": "error", "message": "Bild zu gross"})
+                return
+            mime = frame.get("mime") or "image/png"
+            await self.start_response(
+                frame.get("text", ""),
+                want_audio=bool(frame.get("speak")),
+                image_data_url=f"data:{mime};base64,{data}",
+            )
             return
 
         if frame_type == "interrupt":
@@ -140,12 +176,55 @@ class StreamSession:
         # Gesprochene Frage -> gesprochene Antwort (+ Details im Chat).
         await self.start_response(text, want_audio=True)
 
+    # ---- Zentrale Chat-Historie (Phase 2.5) ---------------------------------
+
+    async def _send_conversation_frame(self) -> None:
+        # Teilt dem Client die Gespraechs-ID mit (neu angelegt oder im hello
+        # bestaetigt) - damit kann er den Turn spaeter ueber
+        # GET /v1/conversations/{id} wiederfinden bzw. fortsetzen.
+        await self.ws.send_json(
+            {"type": "conversation", "conversation_id": self.conversation_id}
+        )
+
+    async def _ensure_conversation(self, first_text: str) -> None:
+        if self.conversation_id is not None:
+            return
+        conversation = repos.create_conversation(
+            self.username, self.device_name, title=first_text.strip() or "Neues Gespraech"
+        )
+        self.conversation_id = conversation["id"]
+        await self._send_conversation_frame()
+
+    async def _persist_user_message(self, text: str, has_image: bool) -> None:
+        # Persistenz ist Komfort, kein Muss: ein DB-Fehler darf den Turn
+        # nicht killen (gleiches Prinzip wie Filler/TTS-Ausfaelle).
+        try:
+            await self._ensure_conversation(text if not has_image else (text or "Bildanfrage"))
+            content = text.strip() or ("[Bild]" if has_image else "")
+            repos.append_message(self.conversation_id, "user", content, has_image=has_image)
+        except Exception:
+            logger.exception("Konnte User-Message nicht persistieren")
+
+    async def _persist_assistant_message(self, text: str) -> None:
+        if self.conversation_id is None:
+            return
+        try:
+            repos.append_message(
+                self.conversation_id, "assistant", text, cards=self._turn_cards or None
+            )
+        except Exception:
+            logger.exception("Konnte Assistant-Message nicht persistieren")
+
     # ---- Antwort-Pipeline --------------------------------------------------
 
-    async def start_response(self, text: str, want_audio: bool) -> None:
+    async def start_response(
+        self, text: str, want_audio: bool, image_data_url: str = ""
+    ) -> None:
         # Neuer Input waehrend eine Antwort laeuft = implizites Barge-in.
         await self.cancel_active(notify=False)
-        self.active_task = asyncio.create_task(self._respond(text, want_audio))
+        self.active_task = asyncio.create_task(
+            self._respond(text, want_audio, image_data_url)
+        )
 
     async def cancel_active(self, notify: bool) -> None:
         task = self.active_task
@@ -158,13 +237,17 @@ class StreamSession:
             # done schliesst den abgebrochenen Turn app-seitig sauber ab.
             await self.ws.send_json({"type": "done"})
 
-    async def _respond(self, text: str, want_audio: bool) -> None:
+    async def _respond(self, text: str, want_audio: bool, image_data_url: str = "") -> None:
         try:
             self._filler_played = False
+            self._turn_cards = []
+            await self._persist_user_message(text, has_image=bool(image_data_url))
             executor = self._make_executor(want_audio)
             llm_task = asyncio.create_task(
                 orchestrator_graph.ainvoke(
-                    initial_state(text, self.tier, self.system_prompt, executor)
+                    initial_state(
+                        text, self.tier, self.system_prompt, executor, image_data_url
+                    )
                 )
             )
 
@@ -178,6 +261,7 @@ class StreamSession:
             response_text = result["response"]
 
             await self.ws.send_json({"type": "assistant_text", "text": response_text, "final": True})
+            await self._persist_assistant_message(response_text)
 
             if want_audio:
                 # Kurze Sprachantwort, Details im Chat: lange Antworten
@@ -203,8 +287,10 @@ class StreamSession:
         Verbindung."""
 
         async def card_push(envelope: dict) -> None:
-            # Frame-Format gegen docs/PROTOCOL.md im App-Repo verifizieren
-            # (war aus dieser Umgebung nicht abrufbar).
+            # Frame-Format laut docs/PROTOCOL.md (App-Repo): {type, card}.
+            # Karten des Turns wandern zusaetzlich in die Historie, damit
+            # sie beim spaeteren Oeffnen des Gespraechs wieder erscheinen.
+            self._turn_cards.append(envelope)
             await self.ws.send_json({"type": "card", "card": envelope})
 
         async def on_tool_start(tool_name: str) -> None:

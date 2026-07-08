@@ -59,3 +59,15 @@ def require_admin(credentials: HTTPAuthorizationCredentials | None = Depends(_be
     if int(payload.get("tier", 1)) < 3:
         raise HTTPException(status_code=403, detail="Tier 3 (Admin) erforderlich")
     return payload
+
+
+def require_user(credentials: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> dict:
+    """Dependency fuer user-gebundene Routen (z. B. Chat-Historie): jedes
+    gueltige Login-Token reicht, unabhaengig vom Tier. Gaeste ohne Token
+    haben keine abrufbare Historie."""
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="Token fehlt")
+    try:
+        return decode_access_token(credentials.credentials)
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Token ungueltig oder abgelaufen")

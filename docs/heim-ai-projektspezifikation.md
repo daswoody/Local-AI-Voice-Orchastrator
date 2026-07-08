@@ -338,6 +338,16 @@ Verbindlicher Vertrag in `docs/PROTOCOL.md` (App-Repo). **Die App ist fertig geb
 
 **Auth & Sicherheit:** Alle `/v1/admin/*`-Routen erfordern Tier 3 — dieselbe Middleware wie in 4.4 beschrieben, keine Sonderlogik.
 
+### 4.15 Windows-App & zentrale User-UI (NEU in v1.11 — Architektur "voll zentral")
+
+**Entscheidung (ersetzt die offene Wahl aus 4.11/2.5):** Die Windows-App ist eine **dünne native Shell (Tauri 2, Rust)** um eine **zentrale User-Web-UI**, die der Orchestrator selbst ausliefert. Kein separater UI-Codebestand pro Plattform mehr nötig:
+
+- **User-Web-UI** (`frontend/`, Vite + Svelte 5, ~27 kB gzip) wird unter `GET /app` ausgeliefert (Multi-Stage-Dockerfile baut sie mit; Muster wie `/admin`). Windows-Shell UND jeder Browser laden dieselbe UI **live vom Server** — ein Deploy aktualisiert alle Clients ("UI deployen = App updaten", konsequente Fortführung von 4.12). Enthält: Login, Chat mit PTT + Realtime Talk (WebAudio 16k, Energie-VAD, Barge-in), TTS-Streaming-Player, Karten-Renderer (CARDS.md-Layout-JSON, dritte Implementierung neben Compose), Einstellungen.
+- **Zentrale Chat-Historie:** Der Server besitzt die Gespräche (SQLite: `conversations`/`messages` inkl. Karten des Turns); REST `GET/DELETE /v1/conversations[/{id}]`, WebSocket-Frame `conversation` + `hello.conversation_id` zum Fortsetzen. Alle Geräte sehen dieselbe Historie; Gast-/Satelliten-Sessions werden persistiert (Phase 5: nachträgliche Sprecher-Zuordnung), sind aber nicht abrufbar. Android stellt später additiv um (Room wird Cache statt Quelle).
+- **Windows-Shell** (Repo `Windows-AI-Assistant-App`) liefert nur, was ein Browser nicht kann: System-Tray/Autostart, globale Hotkeys, **anpinnbare Antwort-Popups über allen Anwendungen** (rahmenlose Topmost-Fenster mit dem Web-Karten-Renderer — Windows-Toasts wären nicht anpinnbar), schwebender Voice-Indikator oben mittig, Desktop-Screenshot, Wake Word (openWakeWord-ONNX-Port der Android-Engine, cpal + ort). Gebündelt ist nur eine Bootstrap-Seite (Server-Auswahl + Versions-Check).
+- **Versionierung Shell↔UI:** `GET /app/version.json` deklariert `shell_api_version`; eine ältere Shell bleibt bei Mismatch auf der Bootstrap-Seite ("App-Update nötig") statt eine inkompatible UI zu laden. Befehls-/Event-Vertrag: `docs/protocol-additions-2.5.md`.
+- **Screenshot-Flow (zieht 3.2 vor):** Neues `image_input`-Frame (Base64 + optionale Frage, optional `speak`) geht multimodal an LiteLLM (Gemma 4 E4B kann Vision); zusätzlich meldet die Shell `capture_screenshot` als Geräte-Tool an — Tool-Ergebnisse mit `{image_b64, mime}` reicht der Orchestrator als multimodale user-Message in den Agent-Loop ("Hey AI, hilf mir hier" → LLM macht selbst den Screenshot).
+
 ---
 
 ## 5. Phasen-Roadmap mit Mikro-Phasen
@@ -473,9 +483,12 @@ Verbindlicher Vertrag in `docs/PROTOCOL.md` (App-Repo). **Die App ist fertig geb
 - Vorbereitet: `ActionPlanner`-Interface für ein On-Device-Action-Modell (z. B. Gemma-3-270M-Finetune via MediaPipe LLM Inference) für lokale Gerätesteuerung ohne Server-Roundtrip — Integration als offener Punkt
 - ⏳ **End-to-End-Test offen** (wie 2.2)
 
-#### Mikro-Phase 2.5: Windows-App MVP
-- Analog zu Android, aber Desktop; System-Tray-Integration
-- Konsumiert dasselbe Protokoll (`docs/PROTOCOL.md`) und dieselben Karten-Layouts (4.12)
+#### ✅ Mikro-Phase 2.5: Windows-App MVP – CODE-SEITIG FERTIG (v1.11)
+- **Umgesetzt als Architektur "voll zentral" (4.15):** Tauri-2-Shell (Repo `Windows-AI-Assistant-App`, Branch `claude/exciting-wozniak-cdz75s`) + zentrale User-Web-UI und Chat-Historie im Orchestrator (Branch `claude/windows-app-central-ui`)
+- Tray, Hotkeys, anpinnbare Antwort-Popups, Voice-Indikator, Screenshot (inkl. `image_input`/Geräte-Tool), Wake Word (openWakeWord/ONNX) — alles drin; Umfang "alles komplett" wie entschieden
+- Konsumiert dasselbe Protokoll (`docs/PROTOCOL.md` + additive Erweiterungen in `docs/protocol-additions-2.5.md`) und dieselben Karten-Layouts (4.12)
+- CI baut den NSIS-Installer als Actions-Artifact (`heimai-windows-installer`)
+- ⏳ **End-to-End-Test offen:** Deploy des Orchestrator-Branches + Windows-Installer auf echtem PC (Wake-Word-Modelle nach `%APPDATA%\de.heimai.windows\openwakeword\`)
 - **Erfolg:** Wake Word und Modal auch am PC.
 
 ---
@@ -665,9 +678,10 @@ Verbindlicher Vertrag in `docs/PROTOCOL.md` (App-Repo). **Die App ist fertig geb
 
 ---
 
-**Version:** 1.10
-**Stand:** 2026-07-04
+**Version:** 1.11
+**Stand:** 2026-07-08
 **Changelog:**
+- v1.11 (2026-07-08): **Mikro-Phase 2.5 (Windows-App) code-seitig umgesetzt — Architektur-Entscheidung "voll zentral" (neue Sektion 4.15):** Der Orchestrator liefert die User-Web-UI selbst aus (`/app`, Vite + Svelte 5 in `frontend/`, Multi-Stage-Dockerfile) und besitzt die **zentrale Chat-Historie** (`conversations`/`messages` in SQLite, REST `GET/DELETE /v1/conversations[/{id}]`, neues WebSocket-Frame `conversation`, `hello.conversation_id` zum Fortsetzen — alle Geräte sehen dieselben Gespräche). Neues `image_input`-Frame + Bild-Konvention der Geräte-Tool-Bridge (`{image_b64, mime}` → multimodale user-Message; zieht 3.2 client-seitig vor, Gemma 4 E4B ist multimodal). Windows-Repo enthält nur noch die **Tauri-2-Shell**: Tray/Autostart, globale Hotkeys, anpinnbare Antwort-Popups + Voice-Indikator als Topmost-Fenster (rendern die zentrale Karten-UI unter `#/popup`/`#/indicator`), Screenshot (xcap), Wake Word als openWakeWord-ONNX-Port der Android-Engine (cpal + ort), Bootstrap-Seite mit `shell_api_version`-Guard. CORS-Middleware für die Bootstrap-Origin. Alle Protokoll-Erweiterungen additiv und abwärtskompatibel zur Android-App (verifiziert: unbekannte Frames werden ignoriert), dokumentiert in `docs/protocol-additions-2.5.md`. 51 Orchestrator-Tests grün; Shell per cargo check validiert, Windows-Installer via GitHub Actions. **Offen:** E2E-Test auf echtem PC, Einpflegen der Erweiterungen in `docs/PROTOCOL.md` (App-Repo), Android-Umstellung auf zentrale Historie (additiv, später).
 - v1.10 (2026-07-04): **Protokoll-Abgleich mit der echten App** (`docs/PROTOCOL.md` war nun einsehbar): Audio-Frames nutzen `data`, Tool-Frames `call_id`/`ok`/`result`, Geräte-Manifest im hello-Feld `tools`, neues `session`-Frame nach Connect, WebSocket-Auth per `Authorization`-Header, `/v1/health`/`/v1/voices`/`/v1/cards/layouts` in den App-Formaten. **Neue Antwort-Modalitäten:** Text rein → Text raus; Audio rein → Sprachantwort + Details im Chat, mit LLM-Kurzfassung für die Sprachausgabe bei langen Antworten (4.13). Beides live gegen Fake-Backends validiert; 42 Tests grün.
 - v1.9.5 (2026-07-03): Dritter XTTS-Abhängigkeits-Fix: `coqui-tts[codec]` (torchcodec — ab PyTorch 2.9 Pflicht für torchaudio-Audio-I/O) + `ffmpeg` im Image.
 - v1.9.4 (2026-07-03): Zweiter XTTS-Abhängigkeits-Fix: `transformers<5` gepinnt (coqui-tts nutzt `isin_mps_friendly` aus der 4.x-API, in v5 entfernt; Lock jetzt 4.57.6, Vorhandensein der Funktion im Wheel verifiziert).
@@ -684,4 +698,4 @@ Verbindlicher Vertrag in `docs/PROTOCOL.md` (App-Repo). **Die App ist fertig geb
 - v1.2 (2026-05-11): Mikro-Phase 1.4 abgeschlossen. LiteLLM als zentrales MCP-Gateway. mcp-time deployed.
 - v1.1 (2026-04-29): Headscale als "noch nicht installiert" markiert.
 
-**Nächster Schritt:** Redeploy auf der VM, dann der große Praxis-Test: Admin-Panel (Passwort ändern, Stimme + Sample anlegen, Filler generieren), Voice-Loop per Skript, „Wie spät ist es?" als erster echter Tool-Call über mcp-time, Karten-Check aus der App sobald HTTPS steht. Beim App-Test die Frame-Feldnamen (`tool_call`/`tool_result`/`card`) gegen `docs/PROTOCOL.md` abgleichen. Code-seitig danach: 1.5c (Retention-Workflow), 1.6 (Web-Search — aktiviert die `search`-Trigger), 1.13 (eigene MCP-Server: Kalender/Notes/Paperless).
+**Nächster Schritt:** Branch `claude/windows-app-central-ui` mergen/deployen (Redeploy baut die `/app`-UI mit), dann der große Praxis-Test: Admin-Panel, Voice-Loop, erster Tool-Call — und neu: **Windows-Installer aus den Actions-Artifacts installieren, Server verbinden, Chat/PTT/Realtime/Popups/Hotkeys/Screenshot/Wake Word durchspielen** (Wake-Word-Modelle nach `%APPDATA%\de.heimai.windows\openwakeword\`). Die zentrale Historie auch aus dem Browser gegenprüfen (`https://<server>/app`). Danach: Protokoll-Erweiterungen in `docs/PROTOCOL.md` (App-Repo) einpflegen; code-seitig 1.5c (Retention), 1.6 (Web-Search), 1.13 (eigene MCP-Server).

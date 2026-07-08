@@ -39,9 +39,11 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
 
 export const shellInfo = () => invoke<ShellInfo>("get_shell_info");
 
-/** Schwebender Voice-Indikator oben mittig (eigenes Topmost-Fenster). */
+/** Schwebender Voice-Indikator oben mittig (eigenes Topmost-Fenster).
+ *  Key indicatorState: Tauri mappt camelCase-Args auf snake_case-Parameter
+ *  (indicator_state in commands.rs). */
 export const setIndicator = (state: IndicatorState) =>
-  invoke("set_indicator", { state });
+  invoke("set_indicator", { indicatorState: state });
 
 /** Antwort-Popup ueber allen Anwendungen, anpinnbar (eigenes Fenster,
  *  rendert dieselbe Karten-UI unter #/popup). */

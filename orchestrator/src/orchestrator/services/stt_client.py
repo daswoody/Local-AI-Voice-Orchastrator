@@ -14,7 +14,10 @@ class SttClient:
                 content=pcm16,
                 headers={"content-type": "application/octet-stream"},
             )
-            response.raise_for_status()
+            if response.status_code >= 400:
+                # Fehlertext des STT-Services (z. B. CUDA-OOM-Detail) in die
+                # Exception heben, damit er im Orchestrator-Log lesbar ist.
+                raise RuntimeError(f"STT-Fehler {response.status_code}: {response.text[:300]}")
             return response.json()["text"]
 
 

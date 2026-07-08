@@ -610,6 +610,11 @@ Verbindlicher Vertrag in `docs/PROTOCOL.md` (App-Repo). **Die App ist fertig geb
 ### e5-base hat Hochbias bei Certainty-Werten
 **Status:** Verstanden, dokumentiert in 4.9. Nur relative Reihenfolge nutzen, keine absoluten Schwellwerte.
 
+### Spracherkennung fällt aus, sobald ein lokales LLM geladen ist (NEU in v1.11.1)
+**Symptom:** Mit Cloud-LLM (Mistral via LiteLLM) funktioniert die Spracherkennung; nach Wechsel auf ein lokales LLM (LiteLLM → LM Studio) schlägt sie fehl. Text-Chat funktioniert weiter.
+**Ursache:** VRAM-Verdrängung auf der 11-GB-Karte (Budget 4.2): Whisper läuft auf CUDA und braucht seine ~1,5–3 GB beim (Nach-)Laden. Ist das lokale LLM (5 GB+) plus ggf. XTTS (~3 GB) resident, scheitert Whispers CUDA-Init mit Out-of-Memory — mit Cloud-LLM ist die GPU frei, daher der scheinbare Zusammenhang mit dem LLM-Anbieter.
+**Status:** Behoben (v1.11.1) durch **automatischen CPU-Fallback** im STT-Service: Schlägt CUDA beim Laden ODER bei der Inferenz fehl, wechselt Whisper dauerhaft auf CPU (int8) statt den Turn sterben zu lassen — langsamer, aber funktionsfähig; das genutzte Device steht in der Transcribe-Antwort (`device`) und im Log. STT-Fehler tragen jetzt außerdem Klartext-Details bis ins Orchestrator-Log. **Hinweis:** Whisper *Medium* auf CPU ist träge — wenn der CPU-Fallback zum Dauerzustand wird, `WHISPER_MODEL=small` setzen oder das VRAM-Budget neu verteilen (kleineres LLM-Quant).
+
 ### Android: Mic-FGS-Restriktionen ab Android 15
 **Symptom:** Wake-Word-Service startet nach einem Reboot nicht automatisch.
 **Ursache:** Microphone-Foreground-Services dürfen ab Android 15 nicht mehr aus `BOOT_COMPLETED` heraus starten.
@@ -678,9 +683,10 @@ Verbindlicher Vertrag in `docs/PROTOCOL.md` (App-Repo). **Die App ist fertig geb
 
 ---
 
-**Version:** 1.11
+**Version:** 1.11.1
 **Stand:** 2026-07-08
 **Changelog:**
+- v1.11.1 (2026-07-08): **Spracherkennungs-Ausfall bei lokalem LLM behoben** (VRAM-Verdrängung, siehe Bekannte Probleme): STT-Service mit automatischem CPU-Fallback bei CUDA-Fehlern (Laden UND Inferenz), genutztes Device in der Antwort, Klartext-Fehler bis ins Orchestrator-Log.
 - v1.11 (2026-07-08): **Mikro-Phase 2.5 (Windows-App) code-seitig umgesetzt — Architektur-Entscheidung "voll zentral" (neue Sektion 4.15):** Der Orchestrator liefert die User-Web-UI selbst aus (`/app`, Vite + Svelte 5 in `frontend/`, Multi-Stage-Dockerfile) und besitzt die **zentrale Chat-Historie** (`conversations`/`messages` in SQLite, REST `GET/DELETE /v1/conversations[/{id}]`, neues WebSocket-Frame `conversation`, `hello.conversation_id` zum Fortsetzen — alle Geräte sehen dieselben Gespräche). Neues `image_input`-Frame + Bild-Konvention der Geräte-Tool-Bridge (`{image_b64, mime}` → multimodale user-Message; zieht 3.2 client-seitig vor, Gemma 4 E4B ist multimodal). Windows-Repo enthält nur noch die **Tauri-2-Shell**: Tray/Autostart, globale Hotkeys, anpinnbare Antwort-Popups + Voice-Indikator als Topmost-Fenster (rendern die zentrale Karten-UI unter `#/popup`/`#/indicator`), Screenshot (xcap), Wake Word als openWakeWord-ONNX-Port der Android-Engine (cpal + ort), Bootstrap-Seite mit `shell_api_version`-Guard. CORS-Middleware für die Bootstrap-Origin. Alle Protokoll-Erweiterungen additiv und abwärtskompatibel zur Android-App (verifiziert: unbekannte Frames werden ignoriert), dokumentiert in `docs/protocol-additions-2.5.md`. 51 Orchestrator-Tests grün; Shell per cargo check validiert, Windows-Installer via GitHub Actions. **Offen:** E2E-Test auf echtem PC, Einpflegen der Erweiterungen in `docs/PROTOCOL.md` (App-Repo), Android-Umstellung auf zentrale Historie (additiv, später).
 - v1.10 (2026-07-04): **Protokoll-Abgleich mit der echten App** (`docs/PROTOCOL.md` war nun einsehbar): Audio-Frames nutzen `data`, Tool-Frames `call_id`/`ok`/`result`, Geräte-Manifest im hello-Feld `tools`, neues `session`-Frame nach Connect, WebSocket-Auth per `Authorization`-Header, `/v1/health`/`/v1/voices`/`/v1/cards/layouts` in den App-Formaten. **Neue Antwort-Modalitäten:** Text rein → Text raus; Audio rein → Sprachantwort + Details im Chat, mit LLM-Kurzfassung für die Sprachausgabe bei langen Antworten (4.13). Beides live gegen Fake-Backends validiert; 42 Tests grün.
 - v1.9.5 (2026-07-03): Dritter XTTS-Abhängigkeits-Fix: `coqui-tts[codec]` (torchcodec — ab PyTorch 2.9 Pflicht für torchaudio-Audio-I/O) + `ffmpeg` im Image.

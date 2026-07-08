@@ -1,7 +1,10 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
+
+logger = logging.getLogger(__name__)
 
 from .audio import TARGET_RATE, resample_pcm16, wav_to_pcm16
 from .config import settings
@@ -52,4 +55,10 @@ async def transcribe(request: Request, sample_rate: int = TARGET_RATE) -> dict:
 
     # Whisper-Inferenz ist CPU-/GPU-gebunden und blockierend -> Threadpool,
     # damit der Event-Loop (Healthchecks, parallele Requests) frei bleibt.
-    return await run_in_threadpool(engine_module.engine.transcribe, pcm)
+    try:
+        return await run_in_threadpool(engine_module.engine.transcribe, pcm)
+    except Exception as exc:
+        # Klartext statt anonymem 500: der Orchestrator loggt das Detail,
+        # und `docker logs heimai-stt` hat den vollen Traceback.
+        logger.exception("Transkription fehlgeschlagen")
+        raise HTTPException(status_code=500, detail=f"Transkription fehlgeschlagen: {str(exc)[:300]}")

@@ -51,6 +51,14 @@ def _patch_base(monkeypatch, chat):
     monkeypatch.setattr(stream_module.xtts_client, "stream", _fake_xtts_stream)
 
 
+
+
+def _set_thinking_delays(ms: int) -> None:
+    """Delay aller Seed-Filler (thinking) fuer den Test setzen."""
+    from orchestrator import repos
+    for f in repos.fillers_for_kind("thinking"):
+        repos.update_filler(f["id"], f["title"], f["text"], f["trigger_id"], True, delay_ms=ms)
+
 async def _slow_chat(messages, tools=None):
     await asyncio.sleep(0.3)
     return {"role": "assistant", "content": "Antwort"}
@@ -58,7 +66,7 @@ async def _slow_chat(messages, tools=None):
 
 def test_cached_filler_is_used_instead_of_piper(client, monkeypatch):
     _patch_base(monkeypatch, _slow_chat)
-    monkeypatch.setattr(settings, "filler_delay_ms", 20)
+    _set_thinking_delays(20)
 
     piper_mock = AsyncMock(side_effect=RuntimeError("Piper darf nicht gebraucht werden"))
     monkeypatch.setattr(stream_module.piper_client, "synthesize", piper_mock)
@@ -81,7 +89,7 @@ def test_cached_filler_is_used_instead_of_piper(client, monkeypatch):
 
 def test_piper_fallback_when_no_cached_audio(client, monkeypatch):
     _patch_base(monkeypatch, _slow_chat)
-    monkeypatch.setattr(settings, "filler_delay_ms", 20)
+    _set_thinking_delays(20)
 
     piper_mock = AsyncMock(return_value=(b"\x05\x06" * 2205, 22050))
     monkeypatch.setattr(stream_module.piper_client, "synthesize", piper_mock)

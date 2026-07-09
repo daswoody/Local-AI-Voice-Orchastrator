@@ -9,6 +9,7 @@ Drei Tool-Quellen, eine Schnittstelle:
 Der Executor gehoert der jeweiligen Session (Geraete-Tools und Karten sind
 verbindungsspezifisch) und wird dem LangGraph-Flow per State mitgegeben."""
 
+import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -54,7 +55,10 @@ class ToolExecutor:
         device_tools: list[DeviceTool] | None = None,
         device_call: Callable[[str, dict], Awaitable[str]] | None = None,
         card_push: Callable[[dict], Awaitable[None]] | None = None,
-        on_tool_start: Callable[[str], Awaitable[None]] | None = None,
+        # Filler-Hook (1.7d): bekommt Tool-Namen UND den laufenden Tool-Task,
+        # damit die Session den Filler-Delay gegen das Tool rennen lassen
+        # kann (schnelles Tool -> kein Filler).
+        on_tool_start: Callable[[str, "asyncio.Task"], Awaitable[None]] | None = None,
     ) -> None:
         self._device_tools = {tool.name: tool for tool in (device_tools or [])}
         self._device_call = device_call
@@ -83,10 +87,17 @@ class ToolExecutor:
         """Fuehrt ein Tool aus und liefert IMMER einen String (auch bei
         Fehlern) - der Agent-Loop haengt das als tool-Message an, und das
         LLM kann dem Nutzer erklaeren, was schiefging."""
+        # Tool als Task starten, damit der Filler-Hook seinen Delay dagegen
+        # rennen lassen kann: schnelles Tool -> Filler entfaellt (1.7d).
+        pending = asyncio.create_task(self._dispatch(name, arguments))
         if self._on_tool_start is not None:
-            # Filler-Hook (4.3/1.7d): "Ich schaue kurz in den Kalender."
-            await self._on_tool_start(name)
+            # show_card ist rein visuell und quasi-instant - dafuer keinen
+            # gesprochenen Filler anstossen.
+            if name != _SHOW_CARD_NAME:
+                await self._on_tool_start(name, pending)
+        return await pending
 
+    async def _dispatch(self, name: str, arguments: dict) -> str:
         try:
             if name == _SHOW_CARD_NAME and self._card_push is not None:
                 return await self._execute_show_card(arguments)

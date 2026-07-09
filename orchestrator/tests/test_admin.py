@@ -286,3 +286,33 @@ def test_activate_model_switches_llm_calls(client, admin_headers, monkeypatch):
         "/v1/admin/models/activate", json={"model": "gibtsnicht"}, headers=admin_headers
     )
     assert bad.status_code == 404
+
+
+def test_filler_delay_ms_crud(client, admin_headers):
+    trigger_id = client.get("/v1/admin/triggers", headers=admin_headers).json()[0]["id"]
+
+    created = client.post(
+        "/v1/admin/fillers",
+        json={"title": "Schnell", "text": "Moment.", "trigger_id": trigger_id, "delay_ms": 300},
+        headers=admin_headers,
+    ).json()
+    assert created["delay_ms"] == 300
+
+    updated = client.put(
+        f"/v1/admin/fillers/{created['id']}",
+        json={"title": "Schnell", "text": "Moment.", "trigger_id": trigger_id,
+              "enabled": True, "delay_ms": 2500},
+        headers=admin_headers,
+    ).json()
+    assert updated["delay_ms"] == 2500
+
+    listed = client.get("/v1/admin/fillers", headers=admin_headers).json()
+    assert next(f for f in listed if f["id"] == created["id"])["delay_ms"] == 2500
+
+    # Negativer Delay wird abgelehnt
+    bad = client.post(
+        "/v1/admin/fillers",
+        json={"title": "X", "text": "Y", "trigger_id": trigger_id, "delay_ms": -5},
+        headers=admin_headers,
+    )
+    assert bad.status_code == 422

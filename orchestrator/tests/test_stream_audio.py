@@ -52,6 +52,14 @@ def _patch_pipeline(monkeypatch, llm_response="Antwort", llm_delay=0.0):
     monkeypatch.setattr(stream_module.xtts_client, "stream", _fake_xtts_stream)
 
 
+
+
+def _set_thinking_delays(ms: int) -> None:
+    """Delay aller Seed-Filler (thinking) fuer den Test setzen."""
+    from orchestrator import repos
+    for f in repos.fillers_for_kind("thinking"):
+        repos.update_filler(f["id"], f["title"], f["text"], f["trigger_id"], True, delay_ms=ms)
+
 def test_audio_roundtrip(client, monkeypatch):
     """Kern von 1.11: Audio rein -> transcript, assistant_text, Audio raus."""
     _patch_pipeline(monkeypatch)
@@ -106,7 +114,7 @@ def test_audio_input_gets_audio_answer_even_in_chat_mode(client, monkeypatch):
 
 def test_filler_plays_when_llm_is_slow(client, monkeypatch):
     _patch_pipeline(monkeypatch, llm_delay=0.5)
-    monkeypatch.setattr(settings, "filler_delay_ms", 20)
+    _set_thinking_delays(20)
 
     with client.websocket_connect("/v1/assistant/stream") as ws:
         _open(ws)
@@ -121,8 +129,9 @@ def test_filler_plays_when_llm_is_slow(client, monkeypatch):
 
 
 def test_no_filler_when_llm_is_fast(client, monkeypatch):
+    """Kern der per-Filler-Delays: schnelle Antwort -> Filler entfaellt."""
     _patch_pipeline(monkeypatch, llm_delay=0.0)
-    monkeypatch.setattr(settings, "filler_delay_ms", 500)
+    _set_thinking_delays(500)
 
     with client.websocket_connect("/v1/assistant/stream") as ws:
         _open(ws)

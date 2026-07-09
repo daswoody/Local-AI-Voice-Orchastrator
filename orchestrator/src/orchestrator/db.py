@@ -49,7 +49,11 @@ CREATE TABLE IF NOT EXISTS fillers (
     title TEXT NOT NULL,
     text TEXT NOT NULL,
     trigger_id INTEGER NOT NULL REFERENCES filler_triggers(id) ON DELETE CASCADE,
-    enabled INTEGER NOT NULL DEFAULT 1
+    enabled INTEGER NOT NULL DEFAULT 1,
+    -- Wartezeit, bevor DIESER Filler spielen darf: Ist die Antwort (bzw.
+    -- das Tool) vorher fertig, entfaellt er - so blockieren Filler keine
+    -- schnellen Antworten. 0 = sofort spielen.
+    delay_ms INTEGER NOT NULL DEFAULT 1200
 );
 
 CREATE TABLE IF NOT EXISTS card_layouts (
@@ -131,6 +135,7 @@ def init_db() -> None:
     conn = connect()
     try:
         conn.executescript(_SCHEMA)
+        _migrate(conn)
         _seed_admin_user(conn)
         _seed_character(conn)
         _seed_voices(conn)
@@ -139,6 +144,14 @@ def init_db() -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Additive Schema-Migrationen fuer bestehende Datenbanken (CREATE IF
+    NOT EXISTS greift nur bei neuen Tabellen, nicht bei neuen Spalten)."""
+    filler_columns = {row[1] for row in conn.execute("PRAGMA table_info(fillers)")}
+    if "delay_ms" not in filler_columns:
+        conn.execute("ALTER TABLE fillers ADD COLUMN delay_ms INTEGER NOT NULL DEFAULT 1200")
 
 
 def _seed_admin_user(conn: sqlite3.Connection) -> None:

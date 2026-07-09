@@ -252,10 +252,10 @@ class StreamSession:
             )
 
             if want_audio and settings.filler_enabled:
-                done, _ = await asyncio.wait({llm_task}, timeout=settings.filler_delay_ms / 1000)
-                if not done and not self._filler_played:
-                    self._filler_played = True
-                    await self._stream_filler(kind="thinking")
+                # Filler ZUERST waehlen - sein delay_ms bestimmt, wie lange
+                # die Antwort Zeit hat, bevor er spielen darf. Schnelle
+                # Antworten blockiert so kein Filler mehr.
+                await self._race_filler(llm_task, kind="thinking")
 
             result = await llm_task
             response_text = result["response"]
@@ -293,12 +293,13 @@ class StreamSession:
             self._turn_cards.append(envelope)
             await self.ws.send_json({"type": "card", "card": envelope})
 
-        async def on_tool_start(tool_name: str) -> None:
+        async def on_tool_start(tool_name: str, pending: asyncio.Task) -> None:
             # Tool-Trigger aus dem Admin-Panel (1.7d): "Ich schaue kurz in
-            # den Kalender." - nur im Audio-Modus, hoechstens einmal pro Turn.
-            if want_audio and settings.filler_enabled and not self._filler_played:
-                self._filler_played = True
-                await self._stream_filler(kind="tool", tool_name=tool_name)
+            # den Kalender." - nur im Audio-Modus, hoechstens einmal pro
+            # Turn. Das delay_ms des Fillers laesst schnellen Tools den
+            # Vortritt: Ist das Tool vorher fertig, entfaellt der Filler.
+            if want_audio and settings.filler_enabled:
+                await self._race_filler(pending, kind="tool", tool_name=tool_name)
 
         return ToolExecutor(
             device_tools=self.device_tools,
@@ -351,15 +352,34 @@ class StreamSession:
             logger.warning("Sprach-Kurzfassung fehlgeschlagen - spreche den vollen Text")
             return response_text
 
-    async def _stream_filler(self, kind: str, tool_name: str | None = None) -> None:
-        """Filler nach 4.3/4.14: bevorzugt vorgeneriertes XTTS-Audio in der
-        Session-Stimme (1.7d), Fallback Piper-Live-Synthese mit dem
-        Filler-Text. Fuer die App transparent Teil desselben
-        audio_chunk-Streams, daher Resampling auf die Stream-Rate."""
+    async def _race_filler(self, pending: asyncio.Task, kind: str, tool_name: str | None = None) -> None:
+        """Filler gegen die laufende Arbeit rennen lassen: Der ausgewaehlte
+        Filler bestimmt per delay_ms selbst, wie lange gewartet wird, bevor
+        er spielen darf. Ist die Arbeit (LLM-Antwort bzw. Tool) vorher
+        fertig, entfaellt er - schnelle Antworten werden nicht blockiert.
+        delay_ms = 0 heisst: sofort spielen."""
+        if self._filler_played:
+            return
         filler = filler_service.select_filler(kind, self.voice_id, tool_name)
         if filler is None:
             return
 
+        delay_ms = filler.get("delay_ms")
+        if delay_ms is None:
+            delay_ms = settings.filler_delay_ms
+        if delay_ms > 0:
+            done, _ = await asyncio.wait({pending}, timeout=delay_ms / 1000)
+            if done or self._filler_played:
+                return
+
+        self._filler_played = True
+        await self._play_filler(filler)
+
+    async def _play_filler(self, filler: dict) -> None:
+        """Filler nach 4.3/4.14: bevorzugt vorgeneriertes XTTS-Audio in der
+        Session-Stimme (1.7d), Fallback Piper-Live-Synthese mit dem
+        Filler-Text. Fuer die App transparent Teil desselben
+        audio_chunk-Streams, daher Resampling auf die Stream-Rate."""
         try:
             if filler["path"] is not None:
                 pcm, rate = filler_service.load_audio(filler["path"])

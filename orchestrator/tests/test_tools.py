@@ -191,12 +191,13 @@ def test_tool_filler_with_specific_pattern_plays_before_tool(client, monkeypatch
     monkeypatch.setattr(stream_module.xtts_client, "stream", fake_xtts)
     piper_mock = AsyncMock(side_effect=RuntimeError("kein Piper noetig"))
     monkeypatch.setattr(stream_module.piper_client, "synthesize", piper_mock)
-    # thinking-Filler durch hohen Delay ausschalten - wir wollen den Tool-Pfad sehen
-    monkeypatch.setattr(settings, "filler_delay_ms", 5000)
 
+    # delay_ms=0: Tool-Filler darf sofort spielen (der Mock-Tool-Call ist
+    # instant - mit Delay wuerde er per Design entfallen). Die thinking-
+    # Filler behalten ihren Seed-Delay (1200ms) und feuern hier nie.
     trigger = repos.create_trigger("Kalender", "tool", "Calendar-*")
     filler = repos.create_filler("Kalender-Blick", "Ich schaue kurz in den Kalender.",
-                                 trigger["id"], True)
+                                 trigger["id"], True, delay_ms=0)
     import wave
     path = filler_service.audio_path(filler["id"], settings.default_voice_id)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -277,3 +278,39 @@ def test_device_tool_timeout_becomes_tool_error(client, monkeypatch):
     assert {"type": "assistant_text", "text": "Das hat leider nicht geklappt.", "final": True} in frames
     tool_messages = [m for m in transcript[1]["messages"] if m["role"] == "tool"]
     assert "Tool-Fehler" in tool_messages[0]["content"]
+
+
+def test_tool_filler_skipped_when_tool_is_fast(client, monkeypatch):
+    """Per-Filler-Delay beim Tool-Pfad: Ist das Tool vor Ablauf des Delays
+    fertig, entfaellt der Filler - schnelle Tools werden nicht blockiert."""
+    _scripted_llm(monkeypatch, [
+        _tool_call("Calendar-list_events", {}),
+        {"role": "assistant", "content": "Nichts los morgen."},
+    ])
+    monkeypatch.setattr(mcp_gateway_module.mcp_gateway, "call_tool", AsyncMock(return_value="leer"))
+    monkeypatch.setattr(
+        stream_module.stt_client, "transcribe", AsyncMock(return_value="Was steht morgen an?")
+    )
+
+    async def fake_xtts(text, voice_id, language=None):
+        yield 24000, b"\x01\x02" * 600
+
+    monkeypatch.setattr(stream_module.xtts_client, "stream", fake_xtts)
+    piper_mock = AsyncMock(return_value=(b"\x05\x06" * 2205, 22050))
+    monkeypatch.setattr(stream_module.piper_client, "synthesize", piper_mock)
+
+    trigger = repos.create_trigger("Kalender", "tool", "Calendar-*")
+    repos.create_filler("Kalender-Blick", "Ich schaue kurz in den Kalender.",
+                        trigger["id"], True, delay_ms=500)
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "talk"})
+        ws.send_json({"type": "audio_chunk", "data": pcm_to_b64(b"\x00\x00" * 1600)})
+        ws.send_json({"type": "audio_end"})
+        frames = _collect_until_done(ws)
+
+    types = [f["type"] for f in frames]
+    # Kein Filler vor der Antwort: erstes Audio kommt NACH assistant_text
+    assert types.index("assistant_text") < types.index("audio_chunk")
+    piper_mock.assert_not_called()

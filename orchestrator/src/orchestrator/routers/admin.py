@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .. import repos
 from ..config import settings
@@ -224,6 +224,9 @@ class FillerPayload(BaseModel):
     text: str
     trigger_id: int
     enabled: bool = True
+    # Wartezeit, bevor dieser Filler spielen darf (0 = sofort): Ist die
+    # Antwort bzw. das Tool vorher fertig, entfaellt der Filler.
+    delay_ms: int = Field(default=1200, ge=0, le=60_000)
 
 
 @router.get("/fillers")
@@ -243,7 +246,8 @@ def list_fillers() -> list[dict]:
 @router.post("/fillers", status_code=201)
 def create_filler(payload: FillerPayload) -> dict:
     try:
-        return repos.create_filler(payload.title, payload.text, payload.trigger_id, payload.enabled)
+        return repos.create_filler(payload.title, payload.text, payload.trigger_id,
+                                   payload.enabled, payload.delay_ms)
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=400, detail="trigger_id existiert nicht")
 
@@ -253,7 +257,8 @@ def update_filler(filler_id: int, payload: FillerPayload) -> dict:
     old = repos.get_filler(filler_id)
     if old is None:
         raise HTTPException(status_code=404, detail="Filler nicht gefunden")
-    updated = repos.update_filler(filler_id, payload.title, payload.text, payload.trigger_id, payload.enabled)
+    updated = repos.update_filler(filler_id, payload.title, payload.text, payload.trigger_id,
+                                  payload.enabled, payload.delay_ms)
     if old["text"] != payload.text:
         # Text geaendert -> gecachtes Audio passt nicht mehr.
         filler_service.delete_audio(filler_id)

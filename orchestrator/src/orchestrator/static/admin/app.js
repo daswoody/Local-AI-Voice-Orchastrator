@@ -137,7 +137,8 @@ function wireForms(root) {
   });
 }
 
-const NO_RERENDER = new Set(["editUser", "resetUserForm", "pickSample", "editCard"]);
+const NO_RERENDER = new Set(["editUser", "resetUserForm", "pickSample", "editCard",
+                             "editFiller", "resetFillerForm"]);
 
 // ---- View: Modelle -----------------------------------------------------------------
 
@@ -318,11 +319,13 @@ views.fillers = async () => {
     <tr>
       <td>${esc(filler.title)}<br><small>"${esc(filler.text)}"</small></td>
       <td>${esc(filler.trigger_name)}</td>
+      <td>${filler.delay_ms} ms</td>
       <td>${filler.enabled ? '<span class="badge ok">aktiv</span>' : '<span class="badge off">aus</span>'}</td>
       <td>${generated}/${audio.length} Stimmen
         ${generated < audio.length ? '<span class="badge warn">unvollstaendig</span>' : '<span class="badge ok">bereit</span>'}</td>
       <td class="actions">
         <button class="small" data-action="generateFiller" data-id="${filler.id}">Audio generieren</button>
+        <button class="small ghost" data-action="editFiller" data-id="${filler.id}">Bearbeiten</button>
         <button class="small danger" data-action="deleteFiller" data-id="${filler.id}">Loeschen</button>
       </td>
     </tr>`;
@@ -334,16 +337,23 @@ views.fillers = async () => {
     <section class="block">
       <h2>Filler</h2>
       <table>
-        <thead><tr><th>Filler</th><th>Trigger</th><th>Status</th><th>Audio</th><th></th></tr></thead>
-        <tbody>${fillerRows || "<tr><td colspan='5'>Noch keine Filler.</td></tr>"}</tbody>
+        <thead><tr><th>Filler</th><th>Trigger</th><th>Delay</th><th>Status</th><th>Audio</th><th></th></tr></thead>
+        <tbody>${fillerRows || "<tr><td colspan='6'>Noch keine Filler.</td></tr>"}</tbody>
       </table>
       <br>
-      <form class="grid" data-submit="createFiller">
+      <h2 id="filler-form-title">Neuen Filler anlegen</h2>
+      <form class="grid" data-submit="saveFiller" id="filler-form">
+        <input type="hidden" name="id">
         <label>Titel <input name="title" required></label>
         <label>Trigger <select name="trigger_id">${triggerOptions}</select></label>
+        <label>Delay (ms) - Wartezeit, bevor der Filler spielen darf; ist die Antwort/das Tool vorher fertig, entfaellt er. 0 = sofort
+          <input name="delay_ms" type="number" min="0" max="60000" step="100" value="1200" required>
+        </label>
         <label class="full">Gesprochener Text <input name="text" required placeholder="Ich schaue kurz in den Kalender."></label>
-        <div><button type="submit">Filler anlegen</button></div>
+        <div><button type="submit">Speichern</button>
+        <button type="button" class="ghost" data-action="resetFillerForm">Neu</button></div>
       </form>
+      <script type="application/json" id="fillers-data">${JSON.stringify(fillers)}</script>
     </section>
     <section class="block">
       <h2>Trigger</h2>
@@ -441,12 +451,20 @@ const formActions = {
     tool_pattern: form.kind.value === "tool" ? (form.tool_pattern.value || "*") : null,
   }),
 
-  createFiller: (form) => api.post("/v1/admin/fillers", {
-    title: form.title.value,
-    text: form.text.value,
-    trigger_id: parseInt(form.trigger_id.value, 10),
-    enabled: true,
-  }),
+  async saveFiller(form) {
+    const payload = {
+      title: form.title.value,
+      text: form.text.value,
+      trigger_id: parseInt(form.trigger_id.value, 10),
+      delay_ms: parseInt(form.delay_ms.value, 10),
+      enabled: true,
+    };
+    if (form.id.value) {
+      await api.put(`/v1/admin/fillers/${form.id.value}`, payload);
+    } else {
+      await api.post("/v1/admin/fillers", payload);
+    }
+  },
 
   async saveCard(form) {
     let root;
@@ -514,6 +532,27 @@ const buttonActions = {
   async deleteTrigger(data) {
     if (!confirm(`Trigger "${data.name}" loeschen? Zugehoerige Filler werden mit geloescht.`)) return;
     await api.del(`/v1/admin/triggers/${data.id}`);
+  },
+
+  editFiller(data) {
+    const fillers = JSON.parse(document.getElementById("fillers-data").textContent);
+    const filler = fillers.find((f) => f.id === parseInt(data.id, 10));
+    const form = document.getElementById("filler-form");
+    form.id.value = filler.id;
+    form.title.value = filler.title;
+    form.text.value = filler.text;
+    form.trigger_id.value = filler.trigger_id;
+    form.delay_ms.value = filler.delay_ms;
+    document.getElementById("filler-form-title").textContent = `Filler bearbeiten: ${filler.title}`;
+    form.scrollIntoView({ behavior: "smooth" });
+  },
+
+  resetFillerForm() {
+    const form = document.getElementById("filler-form");
+    form.reset();
+    form.id.value = "";
+    form.delay_ms.value = 1200;
+    document.getElementById("filler-form-title").textContent = "Neuen Filler anlegen";
   },
 
   async generateFiller(data) {

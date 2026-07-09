@@ -314,3 +314,52 @@ def test_tool_filler_skipped_when_tool_is_fast(client, monkeypatch):
     # Kein Filler vor der Antwort: erstes Audio kommt NACH assistant_text
     assert types.index("assistant_text") < types.index("audio_chunk")
     piper_mock.assert_not_called()
+
+
+def test_tool_schemas_are_normalized_for_strict_validators(client, monkeypatch):
+    """LM Studio (Zod) verlangt am Parameter-Root "type": "object" - Schemas
+    aus MCP-Servern oder App-Manifesten ohne Root-type muessen normalisiert
+    werden, sonst lehnt es den GESAMTEN Request mit 400
+    invalid_union_discriminator ab (Ursache des Sprach-Turn-Fehlers)."""
+    import asyncio as aio
+
+    from orchestrator.schemas import DeviceTool
+    from orchestrator.services.tool_executor import ToolExecutor
+
+    # MCP-Tool ohne Root-type + mit $schema-Fremdschluessel
+    monkeypatch.setattr(
+        mcp_gateway_module.mcp_gateway, "list_openai_tools",
+        AsyncMock(return_value=[{
+            "type": "function",
+            "function": {
+                "name": "Time-current_time",
+                "description": "Zeit",
+                "parameters": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "properties": {"timezone": {"type": "string"}},
+                },
+            },
+        }]),
+    )
+
+    async def card_push(envelope):
+        pass
+
+    executor = ToolExecutor(
+        # Geraete-Tool mit kaputtem Schema (kein type, properties kein Dict)
+        device_tools=[DeviceTool(name="set_alarm", parameters={"properties": None})],
+        card_push=card_push,
+    )
+    tools = aio.get_event_loop_policy().new_event_loop().run_until_complete(
+        executor.list_openai_tools()
+    )
+
+    for tool in tools:
+        params = tool["function"]["parameters"]
+        assert params["type"] == "object", tool["function"]["name"]
+        assert isinstance(params["properties"], dict), tool["function"]["name"]
+        assert "$schema" not in params
+
+    # Inhalt bleibt erhalten (nur normalisiert, nicht plattgemacht)
+    mcp_tool = next(t for t in tools if t["function"]["name"] == "Time-current_time")
+    assert mcp_tool["function"]["parameters"]["properties"] == {"timezone": {"type": "string"}}

@@ -23,6 +23,21 @@ logger = logging.getLogger(__name__)
 _SHOW_CARD_NAME = "show_card"
 
 
+def _ensure_object_schema(schema) -> dict:
+    """Normalisiert ein Tool-Parameter-Schema auf die strikte
+    OpenAI-/LM-Studio-Erwartung: Root ist IMMER {"type": "object"} mit
+    properties-Dict. Fremdschluessel wie $schema fliegen raus - sie sind
+    fuer die Funktion bedeutungslos, koennen strikte Validatoren aber
+    stolpern lassen."""
+    if not isinstance(schema, dict):
+        return {"type": "object", "properties": {}}
+    normalized = {key: value for key, value in schema.items() if key != "$schema"}
+    normalized["type"] = "object"
+    if not isinstance(normalized.get("properties"), dict):
+        normalized["properties"] = {}
+    return normalized
+
+
 def _show_card_schema() -> dict:
     card_types = [entry["card_type"] for entry in repos.list_card_layouts(0)]
     return {
@@ -81,6 +96,15 @@ class ToolExecutor:
                 }
             )
         tools.extend(await mcp_gateway.list_openai_tools())
+        # Alle Parameter-Schemas normalisieren, egal aus welcher Quelle:
+        # LM Studio validiert Requests strikt (Zod) und verlangt am
+        # Schema-Root "type": "object" - MCP-Server lassen den Root-type
+        # gern weg, und schon lehnt LM Studio den GESAMTEN Request mit
+        # 400 invalid_union_discriminator ab (Cloud-Anbieter sind
+        # toleranter, daher fiel es erst beim lokalen Modell auf).
+        for tool in tools:
+            function = tool.get("function") or {}
+            function["parameters"] = _ensure_object_schema(function.get("parameters"))
         return tools
 
     async def execute(self, name: str, arguments: dict) -> str:

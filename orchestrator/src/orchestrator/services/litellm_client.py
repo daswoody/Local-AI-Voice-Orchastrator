@@ -46,7 +46,14 @@ class LiteLLMClient:
                 headers=self._headers(),
                 json=payload,
             )
-            response.raise_for_status()
+            if response.status_code >= 400:
+                # Fehlerbody von LiteLLM/LM Studio in die Exception heben
+                # (z. B. Template-/Tool-Fehler lokaler Modelle) - sonst
+                # steht im Log nur ein nichtssagender Statuscode.
+                raise RuntimeError(
+                    f"LLM-Fehler {response.status_code} (Modell {payload['model']}): "
+                    f"{response.text[:400]}"
+                )
             return response.json()["choices"][0]["message"]
 
     async def chat(self, messages: list[dict]) -> str:

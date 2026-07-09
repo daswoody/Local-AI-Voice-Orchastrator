@@ -163,3 +163,42 @@ def test_tts_failure_still_delivers_text(client, monkeypatch):
     assert "assistant_text" in types
     assert "audio_chunk" not in types
     assert "error" not in types
+
+
+def test_llm_error_detail_reaches_the_client(client, monkeypatch):
+    """Diagnose ohne VM-Zugriff: Der echte Fehlergrund (z. B. LiteLLM/
+    LM-Studio-Fehlerbody) steht im error-Frame, nicht nur im Server-Log."""
+    _patch_base(monkeypatch, AsyncMock(
+        side_effect=RuntimeError("LLM-Fehler 500 (Modell test): chat template error")
+    ))
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "talk"})
+        _send_audio_input(ws)
+        frames = _drain(ws)
+
+    error = next(f for f in frames if f["type"] == "error")
+    assert "LLM-Fehler 500" in error["message"]
+    assert "chat template error" in error["message"]
+
+
+def test_filler_path_failure_never_kills_the_turn(client, monkeypatch):
+    """Filler ist Komfort: selbst ein crashender Filler-Pfad (z. B. kaputte
+    DB-Zeile, defekte Cache-Datei) darf den Sprach-Turn nicht abbrechen."""
+    _patch_base(monkeypatch, _slow_chat)
+    monkeypatch.setattr(
+        stream_module.filler_service, "select_filler",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("kaputte Filler-Zeile")),
+    )
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "talk"})
+        _send_audio_input(ws)
+        frames = _drain(ws)
+
+    types = [f["type"] for f in frames]
+    assert "assistant_text" in types
+    assert "error" not in types
+    assert types[-1] == "done"

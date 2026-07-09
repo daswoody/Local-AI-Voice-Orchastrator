@@ -273,11 +273,18 @@ class StreamSession:
         except asyncio.CancelledError:
             # interrupt/Barge-in: cancel_active verschickt das done.
             raise
-        except Exception:
+        except Exception as exc:
             logger.exception("Antwort-Pipeline fehlgeschlagen")
+            # Die echte Ursache mitschicken statt sie zu verschlucken - im
+            # Heim-Setup ist der Nutzer der Admin, die Diagnose direkt am
+            # Geraet spart den Umweg ueber docker logs.
+            detail = f"{type(exc).__name__}: {str(exc)[:250]}"
             with contextlib.suppress(Exception):
                 await self.ws.send_json(
-                    {"type": "error", "message": "interner Fehler bei der Antwortgenerierung"}
+                    {
+                        "type": "error",
+                        "message": f"interner Fehler bei der Antwortgenerierung ({detail})",
+                    }
                 )
                 await self.ws.send_json({"type": "done"})
 
@@ -360,20 +367,27 @@ class StreamSession:
         delay_ms = 0 heisst: sofort spielen."""
         if self._filler_played:
             return
-        filler = filler_service.select_filler(kind, self.voice_id, tool_name)
-        if filler is None:
-            return
-
-        delay_ms = filler.get("delay_ms")
-        if delay_ms is None:
-            delay_ms = settings.filler_delay_ms
-        if delay_ms > 0:
-            done, _ = await asyncio.wait({pending}, timeout=delay_ms / 1000)
-            if done or self._filler_played:
+        try:
+            filler = filler_service.select_filler(kind, self.voice_id, tool_name)
+            if filler is None:
                 return
 
-        self._filler_played = True
-        await self._play_filler(filler)
+            delay_ms = filler.get("delay_ms")
+            if delay_ms is None:
+                delay_ms = settings.filler_delay_ms
+            if delay_ms > 0:
+                done, _ = await asyncio.wait({pending}, timeout=delay_ms / 1000)
+                if done or self._filler_played:
+                    return
+
+            self._filler_played = True
+            await self._play_filler(filler)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Filler ist Komfort, kein Muss - er darf den Turn unter keinen
+            # Umstaenden zum "internen Fehler" machen.
+            logger.exception("Filler-Pfad fehlgeschlagen - fahre ohne Filler fort")
 
     async def _play_filler(self, filler: dict) -> None:
         """Filler nach 4.3/4.14: bevorzugt vorgeneriertes XTTS-Audio in der
@@ -385,10 +399,10 @@ class StreamSession:
                 pcm, rate = filler_service.load_audio(filler["path"])
             else:
                 pcm, rate = await piper_client.synthesize(filler["text"])
-        except Exception:
+        except Exception as exc:
             # Filler ist Komfort, kein Muss: Wenn er klemmt, wartet der
             # Nutzer einfach still auf die Hauptantwort.
-            logger.warning("Filler-Audio fehlgeschlagen - fahre ohne Filler fort")
+            logger.warning("Filler-Audio fehlgeschlagen - fahre ohne Filler fort: %s", str(exc)[:200])
             return
 
         pcm = resample_pcm16(pcm, rate, settings.target_sample_rate)
@@ -418,7 +432,7 @@ class StreamSession:
             # TTS-Ausfall (z. B. Stimme ohne Sample) darf den Turn nicht
             # killen: Text ist schon raus, die App liest ihn laut
             # TTS-Fallback-Regel (4.13) selbst vor.
-            logger.warning("Haupt-TTS fehlgeschlagen - Antwort bleibt Text-only")
+            logger.exception("Haupt-TTS fehlgeschlagen - Antwort bleibt Text-only")
 
 
 def _parse_device_tools(raw: list) -> list[DeviceTool]:

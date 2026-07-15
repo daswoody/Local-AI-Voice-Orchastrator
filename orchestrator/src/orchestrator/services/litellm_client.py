@@ -33,10 +33,12 @@ class LiteLLMClient:
             response.raise_for_status()
             return response.json().get("data", [])
 
-    async def chat_message(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
+    async def chat_message(self, messages: list[dict], tools: list[dict] | None = None,
+                           model: str | None = None) -> dict:
         """Liefert die komplette Assistant-Message (content UND tool_calls) -
-        der Agent-Loop (1.12) braucht beides."""
-        payload: dict = {"model": self.active_model(), "messages": messages}
+        der Agent-Loop (1.12) braucht beides. `model` ueberschreibt das
+        aktive Modell fuer diesen Call (Agenten 4.16 haben eigene Modelle)."""
+        payload: dict = {"model": model or self.active_model(), "messages": messages}
         if tools:
             payload["tools"] = tools
 

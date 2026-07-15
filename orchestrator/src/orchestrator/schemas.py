@@ -29,6 +29,10 @@ class CardLayout(BaseModel):
     card_type: str
     layout_version: int
     root: dict[str, Any]
+    # Additive Felder (4.12 v1.12): HTML-Layouts. Alt-Clients ignorieren
+    # unbekannte Felder und rendern das generic-Fallback in root.
+    format: Literal["json", "html"] = "json"
+    html: str | None = None
 
 
 class CardLayoutsResponse(BaseModel):

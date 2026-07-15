@@ -287,7 +287,20 @@ async def generate_filler(filler_id: int) -> dict:
 
 class CardPayload(BaseModel):
     card_type: str
-    root: dict
+    # format 'json': root ist das Layout-JSON. format 'html' (4.12 v1.12):
+    # html ist das Fragment mit {{data.*}}-Bindings, root wird serverseitig
+    # durch das generic-Fallback ersetzt (Alt-Clients).
+    root: dict = {}
+    format: Literal["json", "html"] = "json"
+    html: str | None = None
+
+
+def _validate_card_payload(payload: CardPayload) -> None:
+    if payload.format == "html":
+        if not (payload.html or "").strip():
+            raise HTTPException(status_code=400, detail="HTML-Layout ohne html-Inhalt")
+    elif not payload.root:
+        raise HTTPException(status_code=400, detail="JSON-Layout ohne root-Objekt")
 
 
 @router.get("/cards")
@@ -297,18 +310,69 @@ def list_cards() -> list[CardLayout]:
 
 @router.post("/cards", status_code=201)
 def create_card(payload: CardPayload) -> CardLayout:
-    return CardLayout(**repos.upsert_card_layout(payload.card_type.strip(), payload.root))
+    _validate_card_payload(payload)
+    return CardLayout(**repos.upsert_card_layout(
+        payload.card_type.strip(), payload.root, payload.format, payload.html))
 
 
 @router.put("/cards/{card_type}")
 def update_card(card_type: str, payload: CardPayload) -> CardLayout:
-    return CardLayout(**repos.upsert_card_layout(card_type, payload.root))
+    _validate_card_payload(payload)
+    return CardLayout(**repos.upsert_card_layout(
+        card_type, payload.root, payload.format, payload.html))
 
 
 @router.delete("/cards/{card_type}", status_code=204)
 def delete_card(card_type: str) -> None:
     if not repos.delete_card_layout(card_type):
         raise HTTPException(status_code=404, detail="Kartentyp nicht gefunden")
+
+
+# ---- Agenten (4.16) ----------------------------------------------------------------
+#
+# Spezialisierte LLM-Laeufe mit eigenem Modell (aus LiteLLM) und Prompt.
+# Jeder aktive Agent erscheint dem Haupt-LLM als Tool "agent-<slug>";
+# die Beschreibung entscheidet, wann das LLM ihn auswaehlt.
+
+
+class AgentPayload(BaseModel):
+    slug: str = Field(pattern=r"^[a-z0-9_-]{1,40}$")
+    name: str
+    description: str
+    system_prompt: str = ""
+    model: str
+    enabled: bool = True
+
+
+@router.get("/agents")
+def list_agents() -> list[dict]:
+    return repos.list_agents()
+
+
+@router.post("/agents", status_code=201)
+def create_agent(payload: AgentPayload) -> dict:
+    if not payload.name.strip() or not payload.description.strip() or not payload.model.strip():
+        raise HTTPException(status_code=400, detail="name, description und model sind Pflicht")
+    try:
+        return repos.create_agent(payload.slug, payload.name, payload.description,
+                                  payload.system_prompt, payload.model, payload.enabled)
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=409, detail="Agent-ID (slug) existiert bereits")
+
+
+@router.put("/agents/{slug}")
+def update_agent(slug: str, payload: AgentPayload) -> dict:
+    agent = repos.update_agent(slug, payload.name, payload.description,
+                               payload.system_prompt, payload.model, payload.enabled)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Agent nicht gefunden")
+    return agent
+
+
+@router.delete("/agents/{slug}", status_code=204)
+def delete_agent(slug: str) -> None:
+    if not repos.delete_agent(slug):
+        raise HTTPException(status_code=404, detail="Agent nicht gefunden")
 
 
 # ---- Modelle (ueber LiteLLM, 4.6/4.14) ----------------------------------------------

@@ -36,6 +36,10 @@ export interface CardLayout {
   card_type: string;
   layout_version: number;
   root: Record<string, unknown>;
+  // HTML-Layouts (4.12 v1.12): format "html" traegt das Fragment in html,
+  // root ist dann nur das generic-Fallback fuer Clients ohne HTML-Renderer.
+  format?: "json" | "html";
+  html?: string | null;
 }
 
 let authToken: string | null = localStorage.getItem("heimai.token");

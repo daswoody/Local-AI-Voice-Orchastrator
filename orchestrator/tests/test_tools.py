@@ -363,3 +363,54 @@ def test_tool_schemas_are_normalized_for_strict_validators(client, monkeypatch):
     # Inhalt bleibt erhalten (nur normalisiert, nicht plattgemacht)
     mcp_tool = next(t for t in tools if t["function"]["name"] == "Time-current_time")
     assert mcp_tool["function"]["parameters"]["properties"] == {"timezone": {"type": "string"}}
+
+
+def test_show_card_with_ai_written_html(client, monkeypatch):
+    """4.12 (v1.12): Findet das LLM kein passendes Layout, schreibt es selbst
+    eine HTML-Karte - das html-Argument wird zur Envelope {type: "html",
+    data.html}; Alt-Clients rendern dafuer die generic-Karte."""
+    html = "<div style='color:teal'><b>3 Termine</b> morgen</div>"
+    _scripted_llm(monkeypatch, [
+        _tool_call("show_card", {"card_type": "termin_uebersicht", "title": "Termine",
+                                 "data": {"headline": "3 Termine"}, "html": html}),
+        {"role": "assistant", "content": "Hier ist deine Uebersicht."},
+    ])
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "chat"})
+        ws.send_json({"type": "text_input", "text": "Zeig meine Termine huebsch an"})
+        frames = _collect_until_done(ws)
+
+    card_frames = [f for f in frames if f["type"] == "card"]
+    assert card_frames == [{
+        "type": "card",
+        "card": {"type": "html", "version": 1, "title": "Termine",
+                 "data": {"headline": "3 Termine", "html": html}},
+    }]
+
+
+def test_show_card_description_offers_html_and_coding_agent(client):
+    """Die Tool-Beschreibung fordert das LLM auf, bei fehlendem Layout selbst
+    HTML zu schreiben - und verweist auf den Coding-Agenten, wenn es einen
+    gibt."""
+    import asyncio as aio
+
+    from orchestrator.services.tool_executor import ToolExecutor
+
+    async def card_push(envelope):
+        pass
+
+    loop = aio.get_event_loop_policy().new_event_loop()
+
+    executor = ToolExecutor(card_push=card_push)
+    tools = loop.run_until_complete(executor.list_openai_tools())
+    show_card = next(t for t in tools if t["function"]["name"] == "show_card")
+    assert "html" in show_card["function"]["parameters"]["properties"]
+    assert "erstelle selbst ein Layout" in show_card["function"]["description"]
+    assert "agent-coding" not in show_card["function"]["description"]
+
+    repos.create_agent("coding", "Coding", "Schreibt Code und HTML.", "", "cloud/code")
+    tools = loop.run_until_complete(executor.list_openai_tools())
+    show_card = next(t for t in tools if t["function"]["name"] == "show_card")
+    assert "agent-coding" in show_card["function"]["description"]

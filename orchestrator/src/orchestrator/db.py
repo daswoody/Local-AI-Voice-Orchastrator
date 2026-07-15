@@ -59,7 +59,25 @@ CREATE TABLE IF NOT EXISTS fillers (
 CREATE TABLE IF NOT EXISTS card_layouts (
     card_type TEXT PRIMARY KEY,
     layout_version INTEGER NOT NULL,
-    root_json TEXT NOT NULL
+    root_json TEXT NOT NULL,
+    -- 4.12 (v1.12): 'json' = Layout-Baum in root_json (Standard),
+    -- 'html' = HTML-Fragment in html mit {{data.*}}-Bindings; root_json
+    -- traegt dann das generic-Fallback fuer Clients ohne HTML-Renderer.
+    format TEXT NOT NULL DEFAULT 'json' CHECK (format IN ('json', 'html')),
+    html TEXT
+);
+
+-- Agenten (4.16): spezialisierte LLM-Laeufe mit eigenem Modell und Prompt,
+-- die das Haupt-LLM als Tools (agent-<slug>) aufrufen kann. Motivation:
+-- unpersoenliche Aufgaben (Websuche, Coding) an Cloud-Modelle delegieren,
+-- die Heim-KI bleibt lokal.
+CREATE TABLE IF NOT EXISTS agents (
+    slug TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    system_prompt TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1
 );
 
 -- Zentrale Chat-Historie (Phase 2.5): der Server besitzt die Gespraeche,
@@ -152,6 +170,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     filler_columns = {row[1] for row in conn.execute("PRAGMA table_info(fillers)")}
     if "delay_ms" not in filler_columns:
         conn.execute("ALTER TABLE fillers ADD COLUMN delay_ms INTEGER NOT NULL DEFAULT 1200")
+    card_columns = {row[1] for row in conn.execute("PRAGMA table_info(card_layouts)")}
+    if "format" not in card_columns:
+        conn.execute("ALTER TABLE card_layouts ADD COLUMN format TEXT NOT NULL DEFAULT 'json'")
+        conn.execute("ALTER TABLE card_layouts ADD COLUMN html TEXT")
 
 
 def _seed_admin_user(conn: sqlite3.Connection) -> None:

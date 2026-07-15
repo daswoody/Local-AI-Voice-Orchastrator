@@ -369,6 +369,18 @@ def cards_current_version() -> int:
         return row["v"] or 0
 
 
+# Fallback-Baum fuer HTML-Layouts (4.12 v1.12): Clients ohne HTML-Renderer
+# (Android, bis der WebView-Renderer nachzieht) bekommen als root das
+# generic-Layout und rendern data.headline/data.body statt kaputtzugehen.
+HTML_LAYOUT_FALLBACK_ROOT = {
+    "component": "column",
+    "children": [
+        {"component": "text", "text": "{{data.headline}}", "style": "title"},
+        {"component": "text", "text": "{{data.body}}", "style": "body"},
+    ],
+}
+
+
 def list_card_layouts(since_version: int = 0) -> list[dict]:
     with db_session() as conn:
         rows = conn.execute(
@@ -377,28 +389,85 @@ def list_card_layouts(since_version: int = 0) -> list[dict]:
         ).fetchall()
         return [
             {"card_type": r["card_type"], "layout_version": r["layout_version"],
-             "root": json.loads(r["root_json"])}
+             "root": json.loads(r["root_json"]),
+             "format": r["format"], "html": r["html"]}
             for r in rows
         ]
 
 
-def upsert_card_layout(card_type: str, root: dict) -> dict:
+def upsert_card_layout(card_type: str, root: dict | None, format: str = "json",
+                       html: str | None = None) -> dict:
+    if format == "html":
+        root = HTML_LAYOUT_FALLBACK_ROOT
     with db_session() as conn:
         # Globale Versionsnummer (4.12): jede Aenderung zaehlt hoch und
         # stempelt das Template - Grundlage fuer den since_version-Poll.
         version = (conn.execute("SELECT MAX(layout_version) AS v FROM card_layouts").fetchone()["v"] or 0) + 1
         conn.execute(
-            "INSERT INTO card_layouts (card_type, layout_version, root_json) VALUES (?, ?, ?)"
+            "INSERT INTO card_layouts (card_type, layout_version, root_json, format, html)"
+            " VALUES (?, ?, ?, ?, ?)"
             " ON CONFLICT(card_type) DO UPDATE SET layout_version = excluded.layout_version,"
-            " root_json = excluded.root_json",
-            (card_type, version, json.dumps(root)),
+            " root_json = excluded.root_json, format = excluded.format, html = excluded.html",
+            (card_type, version, json.dumps(root or {}), format, html),
         )
         conn.commit()
-        return {"card_type": card_type, "layout_version": version, "root": root}
+        return {"card_type": card_type, "layout_version": version, "root": root or {},
+                "format": format, "html": html}
 
 
 def delete_card_layout(card_type: str) -> bool:
     with db_session() as conn:
         cursor = conn.execute("DELETE FROM card_layouts WHERE card_type = ?", (card_type,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+# ---- Agenten (4.16) ---------------------------------------------------------------
+
+
+def list_agents(enabled_only: bool = False) -> list[dict]:
+    query = "SELECT * FROM agents"
+    if enabled_only:
+        query += " WHERE enabled = 1"
+    with db_session() as conn:
+        rows = conn.execute(query + " ORDER BY slug").fetchall()
+        return [{**dict(r), "enabled": bool(r["enabled"])} for r in rows]
+
+
+def get_agent(slug: str) -> dict | None:
+    with db_session() as conn:
+        row = conn.execute("SELECT * FROM agents WHERE slug = ?", (slug,)).fetchone()
+        return {**dict(row), "enabled": bool(row["enabled"])} if row else None
+
+
+def create_agent(slug: str, name: str, description: str, system_prompt: str,
+                 model: str, enabled: bool = True) -> dict:
+    with db_session() as conn:
+        conn.execute(
+            "INSERT INTO agents (slug, name, description, system_prompt, model, enabled)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (slug, name, description, system_prompt, model, int(enabled)),
+        )
+        conn.commit()
+    return get_agent(slug)
+
+
+def update_agent(slug: str, name: str, description: str, system_prompt: str,
+                 model: str, enabled: bool) -> dict | None:
+    with db_session() as conn:
+        cursor = conn.execute(
+            "UPDATE agents SET name = ?, description = ?, system_prompt = ?,"
+            " model = ?, enabled = ? WHERE slug = ?",
+            (name, description, system_prompt, model, int(enabled), slug),
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            return None
+    return get_agent(slug)
+
+
+def delete_agent(slug: str) -> bool:
+    with db_session() as conn:
+        cursor = conn.execute("DELETE FROM agents WHERE slug = ?", (slug,))
         conn.commit()
         return cursor.rowcount > 0

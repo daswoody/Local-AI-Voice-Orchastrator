@@ -292,6 +292,13 @@ Karten ("Skills") sind zweischichtig getrennt:
 
 **Verwaltungs-UI (NEU in v1.6):** Bisher war die "zentrale Verwaltung" nur als Server-Endpunkt gedacht (Templates von Hand als JSON gepflegt). Das Admin-Frontend (4.14) ergänzt einen CRUD-Editor darüber: `POST/PUT/DELETE /v1/admin/cards/layouts`, JSON-Paste-Eingabe, Bearbeiten, Löschen. Das Verhalten des Read-Pfads (Versionierung, Fallback) bleibt unverändert.
 
+**HTML-Karten (NEU in v1.12):** Neben den Layout-JSON-Templates gibt es Karten als **HTML** — in zwei Formen:
+
+1. **Gespeicherte HTML-Layouts:** Im Karten-Editor wählbar (Format „JSON" oder „HTML"). Ein HTML-Layout ist ein HTML-Fragment mit denselben `{{data.*}}`-Bindings wie die JSON-Templates; der Client löst die Bindings auf und rendert das Ergebnis **sandboxed** (Web-UI: `<iframe sandbox>` ohne same-origin — kein Zugriff auf Token/Session). Die Verteilung läuft unverändert über `GET /v1/cards/layouts` (additive Felder `format` + `html`; für Alt-Clients wird als `root` das generic-Fallback-Layout mitgeliefert, sie rendern also `data.headline`/`data.body` statt kaputtzugehen).
+2. **KI-geschriebene Ad-hoc-Karten:** Das `show_card`-Tool akzeptiert ein neues Feld `html`. Findet das LLM keinen passenden Kartentyp, **schreibt es selbst eine HTML-Karte** — die Tool-Beschreibung fordert es dazu auf und verweist auf den Coding-Agenten (4.16) als Layout-Autor. Die Envelope ist dann `{type: "html", data: {html: "..."}}`; die Web-UI rendert sie sandboxed, die Android-App fällt protokollkonform auf die generic-Karte zurück, bis sie einen HTML-Renderer (WebView) nachzieht.
+
+Sicherheitsrahmen: HTML kommt nur aus zwei Quellen — Admin (Tier 3, Editor) oder dem eigenen LLM zur Laufzeit. Die Sandbox (kein same-origin, kein Zugriff auf `localStorage`/Cookies) ist die eigentliche Grenze; Scripts im HTML sind erlaubt (kleine Interaktivität), laufen aber isoliert.
+
 ### 4.13 App ↔ Orchestrator-Protokoll
 
 Verbindlicher Vertrag in `docs/PROTOCOL.md` (App-Repo). **Die App ist fertig gebaut — der Orchestrator implementiert diese Schnittstelle nach.** Kurzfassung:
@@ -349,6 +356,18 @@ Verbindlicher Vertrag in `docs/PROTOCOL.md` (App-Repo). **Die App ist fertig geb
 - **Windows-Shell** (Repo `Windows-AI-Assistant-App`) liefert nur, was ein Browser nicht kann: System-Tray/Autostart, globale Hotkeys, **anpinnbare Antwort-Popups über allen Anwendungen** (rahmenlose Topmost-Fenster mit dem Web-Karten-Renderer — Windows-Toasts wären nicht anpinnbar), schwebender Voice-Indikator oben mittig, Desktop-Screenshot, Wake Word (openWakeWord-ONNX-Port der Android-Engine, cpal + ort). Gebündelt ist nur eine Bootstrap-Seite (Server-Auswahl + Versions-Check).
 - **Versionierung Shell↔UI:** `GET /app/version.json` deklariert `shell_api_version`; eine ältere Shell bleibt bei Mismatch auf der Bootstrap-Seite ("App-Update nötig") statt eine inkompatible UI zu laden. Befehls-/Event-Vertrag: `docs/protocol-additions-2.5.md`.
 - **Screenshot-Flow (zieht 3.2 vor):** Neues `image_input`-Frame (Base64 + optionale Frage, optional `speak`) geht multimodal an LiteLLM (Gemma 4 E4B kann Vision); zusätzlich meldet die Shell `capture_screenshot` als Geräte-Tool an — Tool-Ergebnisse mit `{image_b64, mime}` reicht der Orchestrator als multimodale user-Message in den Agent-Loop ("Hey AI, hilf mir hier" → LLM macht selbst den Screenshot).
+
+### 4.16 Agenten-System (NEU in v1.12)
+
+**Zweck:** Admin-definierbare **Agenten** sind spezialisierte LLM-Läufe mit eigenem Namen, eigener ID, eigener Beschreibung, eigenem System-Prompt und **eigenem Modell** (aus LiteLLM, wie beim Haupt-Modell 4.6). Der Orchestrator (das Haupt-LLM) delegiert Teilaufgaben an sie. Kernmotivation: **Lastverteilung** — für weniger persönliche Aufgaben (z. B. Websuche, Coding) kann ein Cloud-Modell mit gezieltem Prompt arbeiten, während die persönliche Heim-KI lokal bleibt; das entlastet die 11-GB-Karte.
+
+**Datenmodell:** Tabelle `agents` (`slug` = ID für das LLM, `name`, `description`, `system_prompt`, `model`, `enabled`). CRUD über `GET/POST/PUT/DELETE /v1/admin/agents` + Admin-Panel-View „Agenten" (Modell-Dropdown aus LiteLLM, wie 4.14 Modell-Wechsel).
+
+**Anbindung an den Agent-Loop:** Jeder aktive Agent erscheint dem Haupt-LLM als **Tool** `agent-<slug>` mit der Admin-Beschreibung als Tool-Beschreibung und einem einzigen Parameter `task` (die Aufgabenstellung in eigenen Worten). Das Haupt-LLM wählt den Agenten also genau wie jedes andere Tool anhand der Beschreibung — keine Sonderlogik, kein zusätzliches Routing. Damit greifen automatisch auch die bestehenden Mechanismen: Tool-Filler (`agent-*` als fnmatch-Muster möglich, 4.14), Iterations-Obergrenze, Fehler-als-Tool-Ergebnis.
+
+**Ausführung:** Ein Agenten-Aufruf ist ein eigener, in sich geschlossener LLM-Lauf **über LiteLLM** (nie direkt, 4.6) mit dem Modell und System-Prompt des Agenten. Der Agent bekommt dabei die **Server-Tools** (MCP-Gateway) angeboten und darf sie in einer eigenen kleinen Tool-Schleife nutzen (gleiche Iterations-Obergrenze) — so kann ein Websuche-Agent ein Such-MCP-Tool aufrufen, sobald eines registriert ist (1.6). **Keine** Geräte-Tools und kein `show_card` im Agenten-Lauf: die sind session-gebunden und bleiben Sache des Haupt-LLMs, das die Agent-Antwort als Tool-Ergebnis erhält und selbst entscheidet, was es dem Nutzer zeigt (z. B. der Coding-Agent liefert HTML, das Haupt-LLM zeigt es per `show_card` an, 4.12).
+
+**Abgrenzung zu Skills (4.14):** Skills sind Ablauf-Definitionen im Orchestrator-Code; Agenten sind delegierte LLM-Läufe mit eigener Konfiguration. Ein Skill kann perspektivisch Agenten nutzen.
 
 ---
 
@@ -691,9 +710,10 @@ Verbindlicher Vertrag in `docs/PROTOCOL.md` (App-Repo). **Die App ist fertig geb
 
 ---
 
-**Version:** 1.11.4
-**Stand:** 2026-07-09
+**Version:** 1.12
+**Stand:** 2026-07-15
 **Changelog:**
+- v1.12 (2026-07-15): **Agenten-System (neue Sektion 4.16) + HTML-Karten (4.12 erweitert).** Agenten = admin-definierbare, spezialisierte LLM-Läufe (Name, ID/Slug, Beschreibung, System-Prompt, eigenes LiteLLM-Modell) — Lastverteilung: unpersönliche Aufgaben (Websuche, Coding) an Cloud-Modelle delegieren, Heim-KI bleibt lokal. Jeder aktive Agent erscheint dem Haupt-LLM als Tool `agent-<slug>`; Ausführung als eigener LiteLLM-Lauf mit MCP-Server-Tools (keine Geräte-Tools/Karten — session-gebunden). Admin-Panel-View „Agenten" + `/v1/admin/agents`-CRUD. Karten: neben Layout-JSON jetzt **HTML-Layouts** (Editor mit Format-Auswahl, `{{data.*}}`-Bindings, sandboxed iframe in der Web-UI, generic-Fallback für Alt-Clients) und **KI-geschriebene Ad-hoc-HTML-Karten** über das neue `show_card`-Feld `html` (kein passendes Layout → LLM schreibt selbst eins, z. B. via Coding-Agent).
 - v1.11.4 (2026-07-09): **Audio-Zweig-Fehler gelöst** — die v1.11.3-Transparenz lieferte die echte Ursache: LM Studio validiert Tool-Definitionen strikt (Zod) und verlangt `"type": "object"` am Root des Parameter-Schemas; ein MCP-Gateway-Tool ohne Root-type ließ LM Studio den gesamten Request mit 400 `invalid_union_discriminator` ablehnen (Cloud-Modelle tolerant, daher nur lokal sichtbar). Fix: ToolExecutor normalisiert jedes Tool-Schema vor dem LLM-Call (Root-type object, properties-Dict, `$schema` entfernt), quellenunabhängig. 56 Tests grün.
 - v1.11.3 (2026-07-09): **Fehlerdiagnose im Audio-Zweig** (Nutzer-Report: "interner Fehler bei der Antwortgenerierung" nur bei Sprache, Text funktioniert). Der Sammel-except reicht jetzt Exception-Typ + Kurztext an den Client durch; LiteLLM-Client hebt HTTP-Fehlerbody in die Exception (Chat-Template-/Tool-Fehler lokaler Modelle werden sichtbar); Filler-Pfad vollstaendig gekapselt (Komfort-Feature kann den Turn nicht mehr abbrechen). 55 Tests gruen. Eigentliche Ursache wird aus der jetzt sichtbaren Meldung beim naechsten Test bestimmt.
 - v1.11.2 (2026-07-09): **Per-Filler-Delay** (Nutzer-Feedback: Filler blockierten schnelle Antworten): jeder Filler traegt ein eigenes `delay_ms` (DB-Migration additiv, Admin-Panel mit Delay-Spalte, Formularfeld und neuer Bearbeiten-Funktion). Abspiel-Logik als Rennen Delay vs. LLM-Antwort/Tool - schnelle Arbeit gewinnt, Filler entfaellt; 0 = sofort. Gilt fuer thinking- UND tool-Trigger (Tool laeuft dafuer als Task). 53 Tests gruen.

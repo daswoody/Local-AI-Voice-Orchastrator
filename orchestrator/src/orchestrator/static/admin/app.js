@@ -123,6 +123,11 @@ function wireForms(root) {
       }
     });
   });
+  root.querySelectorAll("[data-action-change]").forEach((element) => {
+    element.addEventListener("change", () => {
+      buttonActions[element.dataset.actionChange]?.(element.dataset);
+    });
+  });
   root.querySelectorAll("[data-action]").forEach((button) => {
     button.addEventListener("click", async () => {
       try {
@@ -138,7 +143,8 @@ function wireForms(root) {
 }
 
 const NO_RERENDER = new Set(["editUser", "resetUserForm", "pickSample", "editCard",
-                             "editFiller", "resetFillerForm"]);
+                             "editFiller", "resetFillerForm", "editAgent",
+                             "resetAgentForm", "switchCardFormat"]);
 
 // ---- View: Modelle -----------------------------------------------------------------
 
@@ -377,6 +383,67 @@ views.fillers = async () => {
     </section>`;
 };
 
+// ---- View: Agenten -----------------------------------------------------------------------
+
+views.agents = async () => {
+  const agents = await api.get("/v1/admin/agents");
+  let modelOptions = "";
+  let modelNotice = "";
+  try {
+    const data = await api.get("/v1/admin/models");
+    modelOptions = data.models.map((m) =>
+      `<option value="${esc(m.id || "")}">${esc(m.id || "")}</option>`).join("");
+  } catch (err) {
+    modelNotice = `<div class="notice error">LiteLLM nicht erreichbar - Modell bitte von Hand eintragen: ${esc(err.message)}</div>`;
+  }
+
+  const rows = agents.map((agent) => `
+    <tr>
+      <td><code>agent-${esc(agent.slug)}</code><br><small>${esc(agent.name)}</small></td>
+      <td>${esc(agent.description)}</td>
+      <td>${esc(agent.model)}</td>
+      <td>${agent.enabled ? '<span class="badge ok">aktiv</span>' : '<span class="badge off">aus</span>'}</td>
+      <td class="actions">
+        <button class="small ghost" data-action="editAgent" data-id="${esc(agent.slug)}">Bearbeiten</button>
+        <button class="small danger" data-action="deleteAgent" data-id="${esc(agent.slug)}">Loeschen</button>
+      </td>
+    </tr>`).join("");
+
+  return `
+    <h1>Agenten</h1>
+    <p class="hint">Spezialisierte Helfer mit eigenem Modell und Prompt (4.16). Jeder aktive Agent erscheint der Haupt-KI als Tool <code>agent-&lt;id&gt;</code> - sie waehlt ihn anhand der Beschreibung aus. Damit lassen sich unpersoenliche Aufgaben (Websuche, Coding) gezielt an Cloud-Modelle delegieren und die Heim-KI entlasten. Agenten duerfen die Server-Tools (MCP) nutzen, aber keine Geraete-Tools oder Karten.</p>
+    ${modelNotice}
+    <section class="block">
+      <table>
+        <thead><tr><th>Agent</th><th>Beschreibung</th><th>Modell</th><th>Status</th><th></th></tr></thead>
+        <tbody>${rows || "<tr><td colspan='5'>Noch keine Agenten.</td></tr>"}</tbody>
+      </table>
+    </section>
+    <section class="block">
+      <h2 id="agent-form-title">Neuen Agenten anlegen</h2>
+      <form class="grid" data-submit="saveAgent" id="agent-form">
+        <input type="hidden" name="editing">
+        <label>ID (fuer die KI, z. B. "websuche" oder "coding") <input name="slug" required pattern="[a-z0-9_\\-]{1,40}"></label>
+        <label>Name <input name="name" required placeholder="Websuche-Agent"></label>
+        <label>Modell ${modelOptions
+          ? `<select name="model">${modelOptions}</select>`
+          : `<input name="model" required placeholder="mistral/mistral-large-latest">`}</label>
+        <label>Aktiv
+          <select name="enabled"><option value="1">Ja</option><option value="0">Nein</option></select>
+        </label>
+        <label class="full">Beschreibung (danach waehlt die Haupt-KI den Agenten aus)
+          <textarea name="description" rows="2" required placeholder="Recherchiert aktuelle Informationen im Web und liefert eine Zusammenfassung mit Quellen."></textarea>
+        </label>
+        <label class="full">System-Prompt des Agenten
+          <textarea name="system_prompt" rows="6" placeholder="Du bist ein Recherche-Agent. Antworte sachlich, nenne Quellen..."></textarea>
+        </label>
+        <div><button type="submit">Speichern</button>
+        <button type="button" class="ghost" data-action="resetAgentForm">Neu</button></div>
+      </form>
+    </section>
+    <script type="application/json" id="agents-data">${JSON.stringify(agents)}</script>`;
+};
+
 // ---- View: Karten ------------------------------------------------------------------------
 
 views.cards = async () => {
@@ -384,6 +451,7 @@ views.cards = async () => {
   const rows = cards.map((card) => `
     <tr>
       <td>${esc(card.card_type)}</td>
+      <td>${card.format === "html" ? '<span class="badge ok">HTML</span>' : "JSON"}</td>
       <td>v${card.layout_version}</td>
       <td class="actions">
         <button class="small ghost" data-action="editCard" data-type="${esc(card.card_type)}">Bearbeiten</button>
@@ -393,10 +461,10 @@ views.cards = async () => {
 
   return `
     <h1>Karten</h1>
-    <p class="hint">Plattformneutrale Layout-Templates (4.12). Speichern erhoeht die globale Version - die Apps holen sich Aenderungen beim naechsten Start, ohne App-Update.</p>
+    <p class="hint">Plattformneutrale Layout-Templates (4.12). Speichern erhoeht die globale Version - die Apps holen sich Aenderungen beim naechsten Start, ohne App-Update. Neben Layout-JSON gehen jetzt auch <strong>HTML-Karten</strong>: ein HTML-Fragment mit {{data.*}}-Platzhaltern, gerendert in einer Sandbox (Web-UI/Windows; die Android-App zeigt bis zu ihrem Update die generic-Karte). Findet die KI keinen passenden Kartentyp, schreibt sie selbst eine HTML-Karte - z. B. ueber den Coding-Agenten.</p>
     <section class="block">
       <table>
-        <thead><tr><th>Kartentyp</th><th>Version</th><th></th></tr></thead>
+        <thead><tr><th>Kartentyp</th><th>Format</th><th>Version</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </section>
@@ -404,8 +472,17 @@ views.cards = async () => {
       <h2 id="card-form-title">Neue Karte / Layout einfuegen</h2>
       <form class="grid" data-submit="saveCard" id="card-form">
         <label>Kartentyp <input name="card_type" required pattern="[a-z0-9_]+" placeholder="shopping_list"></label>
-        <label class="full">Layout-JSON (das "root"-Objekt, siehe docs/CARDS.md im App-Repo)
-          <textarea name="root" rows="14" required placeholder='{"type": "column", "children": [...]}'></textarea>
+        <label>Format
+          <select name="format" data-action-change="switchCardFormat">
+            <option value="json">JSON (Layout-Baum)</option>
+            <option value="html">HTML (Fragment mit {{data.*}})</option>
+          </select>
+        </label>
+        <label class="full" id="card-root-label">Layout-JSON (das "root"-Objekt, siehe docs/CARDS.md im App-Repo)
+          <textarea name="root" rows="14" placeholder='{"type": "column", "children": [...]}'></textarea>
+        </label>
+        <label class="full hidden" id="card-html-label">HTML-Fragment (Platzhalter wie {{data.headline}} werden clientseitig ersetzt; Inline-CSS erlaubt)
+          <textarea name="html" rows="14" placeholder='&lt;div style="font-family:sans-serif"&gt;&lt;h3&gt;{{data.headline}}&lt;/h3&gt;&lt;p&gt;{{data.body}}&lt;/p&gt;&lt;/div&gt;'></textarea>
         </label>
         <div><button type="submit">Speichern</button></div>
       </form>
@@ -467,13 +544,36 @@ const formActions = {
   },
 
   async saveCard(form) {
-    let root;
-    try {
-      root = JSON.parse(form.root.value);
-    } catch (_) {
-      throw new Error("Layout-JSON ist kein gueltiges JSON.");
+    const format = form.format.value;
+    const payload = { card_type: form.card_type.value, format };
+    if (format === "html") {
+      if (!form.html.value.trim()) throw new Error("HTML-Inhalt fehlt.");
+      payload.html = form.html.value;
+      payload.root = {};
+    } else {
+      try {
+        payload.root = JSON.parse(form.root.value);
+      } catch (_) {
+        throw new Error("Layout-JSON ist kein gueltiges JSON.");
+      }
     }
-    await api.post("/v1/admin/cards", { card_type: form.card_type.value, root });
+    await api.post("/v1/admin/cards", payload);
+  },
+
+  async saveAgent(form) {
+    const payload = {
+      slug: form.slug.value,
+      name: form.name.value,
+      description: form.description.value,
+      system_prompt: form.system_prompt.value,
+      model: form.model.value,
+      enabled: form.enabled.value === "1",
+    };
+    if (form.editing.value) {
+      await api.put(`/v1/admin/agents/${encodeURIComponent(payload.slug)}`, payload);
+    } else {
+      await api.post("/v1/admin/agents", payload);
+    }
   },
 };
 
@@ -568,14 +668,53 @@ const buttonActions = {
     await api.del(`/v1/admin/fillers/${data.id}`);
   },
 
+  switchCardFormat() {
+    const form = document.getElementById("card-form");
+    const isHtml = form.format.value === "html";
+    document.getElementById("card-root-label").classList.toggle("hidden", isHtml);
+    document.getElementById("card-html-label").classList.toggle("hidden", !isHtml);
+  },
+
   editCard(data) {
     const cards = JSON.parse(document.getElementById("cards-data").textContent);
     const card = cards.find((c) => c.card_type === data.type);
     const form = document.getElementById("card-form");
     form.card_type.value = card.card_type;
+    form.format.value = card.format || "json";
     form.root.value = JSON.stringify(card.root, null, 2);
+    form.html.value = card.html || "";
+    buttonActions.switchCardFormat();
     document.getElementById("card-form-title").textContent = `Layout bearbeiten: ${card.card_type}`;
     form.scrollIntoView({ behavior: "smooth" });
+  },
+
+  editAgent(data) {
+    const agents = JSON.parse(document.getElementById("agents-data").textContent);
+    const agent = agents.find((a) => a.slug === data.id);
+    const form = document.getElementById("agent-form");
+    form.editing.value = "1";
+    form.slug.value = agent.slug;
+    form.slug.readOnly = true;
+    form.name.value = agent.name;
+    form.description.value = agent.description;
+    form.system_prompt.value = agent.system_prompt;
+    form.model.value = agent.model;
+    form.enabled.value = agent.enabled ? "1" : "0";
+    document.getElementById("agent-form-title").textContent = `Agent bearbeiten: ${agent.name}`;
+    form.scrollIntoView({ behavior: "smooth" });
+  },
+
+  resetAgentForm() {
+    const form = document.getElementById("agent-form");
+    form.reset();
+    form.editing.value = "";
+    form.slug.readOnly = false;
+    document.getElementById("agent-form-title").textContent = "Neuen Agenten anlegen";
+  },
+
+  async deleteAgent(data) {
+    if (!confirm(`Agent "${data.id}" loeschen?`)) return;
+    await api.del(`/v1/admin/agents/${encodeURIComponent(data.id)}`);
   },
 
   async deleteCard(data) {

@@ -56,6 +56,29 @@ export function layoutFor(cardType: string): Record<string, unknown> {
   );
 }
 
+/** HTML einer Karte (4.12 v1.12): Ad-hoc-HTML der KI (envelope.data.html
+ *  bei type "html") oder ein gespeichertes HTML-Layout mit aufgeloesten
+ *  {{data.*}}-Bindings. null -> normale JSON-Layout-Karte. */
+export function htmlFor(envelope: CardEnvelope): string | null {
+  if (envelope.type === "html" && typeof envelope.data?.html === "string") {
+    return envelope.data.html;
+  }
+  const layout = cache.layouts[envelope.type];
+  if (layout?.format === "html" && layout.html) {
+    // Bindings HTML-escaped einsetzen: Datenwerte sind Inhalt, kein Markup.
+    return layout.html.replace(/\{\{([^}]+)\}\}/g, (_, path: string) => {
+      const value = resolvePath(path.trim(), envelope);
+      if (value === undefined || value === null) return "";
+      return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    });
+  }
+  return null;
+}
+
 /** {{pfad}}-Bindings gegen die Envelope aufloesen ({type,title,data});
  *  in list-item_template relativ zum Listeneintrag (scope). */
 export function resolveBindings(

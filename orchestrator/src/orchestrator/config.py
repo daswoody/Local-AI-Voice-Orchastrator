@@ -44,11 +44,20 @@ class Settings(BaseSettings):
     filler_enabled: bool = True
     filler_delay_ms: int = 1200
 
-    # Kurze Sprachantwort, Details im Chat: Antworten ueber dieser Laenge
-    # werden fuer die Sprachausgabe per zweitem LLM-Call zusammengefasst
-    # (der volle Text steht als assistant_text im Chat).
+    # Sicherheitsnetz im Voice-First-Modell (v1.13): Eigentlich soll das
+    # LLM bei Spracheingaben direkt kurz antworten (Sprachmodus-Prompt) und
+    # Umfangreiches in Karten auslagern. Faellt die Antwort trotzdem
+    # laenger aus, wird sie fuer die Sprachausgabe per zweitem LLM-Call
+    # zusammengefasst (der volle Text steht als assistant_text im Chat).
     voice_summary_enabled: bool = True
     voice_summary_max_chars: int = 280
+
+    # Gespraechsgedaechtnis (v1.13): so viele letzte Nachrichten der
+    # Konversation (inkl. Karten-Daten) bekommt das LLM als Kontext -
+    # damit "die Karte von eben" in der naechsten Frage bekannt ist.
+    history_max_messages: int = 12
+    # Lange Einzelnachrichten im Verlauf einkuerzen (Kontextbudget).
+    history_max_chars_per_message: int = 1500
 
     # ~5 Minuten PCM16/16k; schuetzt vor unbegrenzt wachsendem Puffer.
     max_audio_buffer_bytes: int = 10 * 1024 * 1024

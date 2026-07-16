@@ -19,6 +19,14 @@ class OrchestratorState(TypedDict):
     # Effektiver Charakter-Prompt (4.14: global, pro User ueberschreibbar);
     # leer -> Fallback auf den Default oben.
     system_prompt: str
+    # Voice-First (v1.13): True = Eingabe kam per Sprache, die Antwort wird
+    # gesprochen -> das LLM soll direkt KURZ antworten und Umfangreiches
+    # als Karte zeigen (Sprachmodus-Anweisung im System-Prompt).
+    voice_mode: bool
+    # Gespraechsgedaechtnis (v1.13): letzte Turns der Konversation inkl.
+    # Karten-Daten als fertige OpenAI-Messages (user/assistant), werden
+    # zwischen System-Prompt und aktueller Frage eingeschoben.
+    history: list[dict]
     # Bild-Eingabe (Phase 2.5/3: Screenshot-Analyse) als data-URL
     # ("data:image/png;base64,..."); leer = reiner Text-Turn. Geht als
     # multimodaler content-Teil an LiteLLM (OpenAI-Format), das Modell
@@ -132,6 +140,21 @@ def _route_after_agent(state: OrchestratorState) -> str:
     return END
 
 
+# Voice-First-Anweisung (v1.13): Bei Spracheingaben ist die LLM-Antwort
+# direkt die Sprachantwort - kurz, natuerlich, ohne Formatierung; alles
+# Umfangreiche gehoert in eine Karte. Die Kurzfassung per zweitem LLM-Call
+# (4.13) bleibt nur als Sicherheitsnetz fuer zu lang geratene Antworten.
+_VOICE_MODE_PROMPT = (
+    "Sprachmodus: Der Nutzer spricht per Sprache mit dir und deine Antwort "
+    "wird woertlich vorgelesen. Antworte deshalb KURZ und natuerlich "
+    "gesprochen (ein bis drei Saetze) - ohne Formatierung, Listen, "
+    "Tabellen, Emojis oder Sonderzeichen. Umfangreiche Inhalte (Listen, "
+    "Termine, Tabellen, Details, Rechercheergebnisse) gibst du NICHT in "
+    "der Antwort aus, sondern zeigst sie als Karte (show_card) und "
+    "verweist mit einem kurzen Satz darauf."
+)
+
+
 def _initial_messages(state: OrchestratorState) -> list[dict]:
     system_prompt = state.get("system_prompt") or _SYSTEM_PROMPT
     # Faehigkeiten gehoeren in den System-Prompt (v1.12.6): kleine Modelle
@@ -143,6 +166,8 @@ def _initial_messages(state: OrchestratorState) -> list[dict]:
         hint = executor.system_hint()
         if hint:
             system_prompt += f"\n\n{hint}"
+    if state.get("voice_mode"):
+        system_prompt += f"\n\n{_VOICE_MODE_PROMPT}"
     if state["context_chunks"]:
         context = "\n".join(f"- {chunk}" for chunk in state["context_chunks"])
         system_prompt += f"\n\nRelevanter Kontext:\n{context}"
@@ -159,6 +184,9 @@ def _initial_messages(state: OrchestratorState) -> list[dict]:
 
     return [
         {"role": "system", "content": system_prompt},
+        # Gespraechsgedaechtnis (v1.13): vorherige Turns inkl. Karten-Daten,
+        # damit "die Karte von eben" Kontext der naechsten Frage ist.
+        *(state.get("history") or []),
         {"role": "user", "content": user_content},
     ]
 
@@ -169,11 +197,15 @@ def initial_state(
     system_prompt: str = "",
     executor: Any = None,
     image_data_url: str = "",
+    voice_mode: bool = False,
+    history: list[dict] | None = None,
 ) -> OrchestratorState:
     return {
         "text": text,
         "tier": tier,
         "system_prompt": system_prompt,
+        "voice_mode": voice_mode,
+        "history": history or [],
         "image_data_url": image_data_url,
         "context_chunks": [],
         "messages": [],

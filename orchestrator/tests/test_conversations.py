@@ -138,3 +138,91 @@ def test_extract_image_data_url_from_tool_result():
     assert _extract_image_data_url(result) == "data:image/jpeg;base64,QUJD"
     assert _extract_image_data_url("kein bild") is None
     assert _extract_image_data_url('{"image_b64": ""}') is None
+
+
+# ---- Voice-First + Gespraechsgedaechtnis (v1.13) ------------------------------------
+
+
+def test_voice_turn_gets_voice_mode_prompt_text_turn_does_not(client, monkeypatch):
+    """Voice-First: gesprochene Frage -> Sprachmodus-Anweisung im
+    System-Prompt (kurz antworten, Umfang in Karten); getippte Frage nicht."""
+    from unittest.mock import AsyncMock as AM
+
+    from orchestrator.audio import pcm_to_b64
+    from orchestrator.routers import stream as stream_module
+
+    captured = []
+
+    async def capture_chat(messages, tools=None, model=None):
+        captured.append(messages[0]["content"])
+        return {"role": "assistant", "content": "Kurz und knapp."}
+
+    monkeypatch.setattr(graph_module.weaviate_client, "search", AM(return_value=[]))
+    monkeypatch.setattr(graph_module.litellm_client, "chat_message", capture_chat)
+    monkeypatch.setattr(stream_module.stt_client, "transcribe", AM(return_value="Frage"))
+
+    async def fake_xtts(text, voice_id, language=None):
+        yield 24000, b"\x01\x02" * 100
+
+    monkeypatch.setattr(stream_module.xtts_client, "stream", fake_xtts)
+    monkeypatch.setattr(settings, "filler_enabled", False)
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        ws.receive_json()  # session
+        ws.send_json({"type": "hello", "mode": "chat"})
+        ws.send_json({"type": "text_input", "text": "Getippte Frage"})
+        while ws.receive_json()["type"] != "done":
+            pass
+        ws.send_json({"type": "audio_chunk", "data": pcm_to_b64(b"\x00\x00" * 1600)})
+        ws.send_json({"type": "audio_end"})
+        while ws.receive_json()["type"] != "done":
+            pass
+
+    assert "Sprachmodus" not in captured[0]
+    assert "Sprachmodus" in captured[1]
+    assert "show_card" in captured[1]
+
+
+def test_history_with_card_data_reaches_the_llm(client, monkeypatch):
+    """Use-Case 'Karte gepusht -> naechste Frage kennt die Karten-Infos':
+    vorherige Turns inkl. Karten-DATEN (ohne Layout-HTML) stehen im
+    LLM-Kontext des Folge-Turns, die aktuelle Frage genau einmal am Ende."""
+    from unittest.mock import AsyncMock as AM
+
+    headers = _admin_ws_headers(client)
+    conversation = repos.create_conversation(settings.admin_username, "Test-PC", "Fluege")
+    repos.append_message(conversation["id"], "user", "Zeig mir Fluege nach Schweden")
+    repos.append_message(
+        conversation["id"], "assistant", "Hier ist deine Flugsuche-Karte.",
+        cards=[{"type": "html", "title": "Flugsuche",
+                "data": {"ziel": "Stockholm", "html": "<form>...</form>"}}],
+    )
+
+    captured = {}
+
+    async def capture_chat(messages, tools=None, model=None):
+        captured["messages"] = [dict(m) for m in messages]
+        return {"role": "assistant", "content": "Klar, Goeteborg geht auch."}
+
+    monkeypatch.setattr(graph_module.weaviate_client, "search", AM(return_value=[]))
+    monkeypatch.setattr(graph_module.litellm_client, "chat_message", capture_chat)
+
+    with client.websocket_connect("/v1/assistant/stream", headers=headers) as ws:
+        ws.receive_json()  # session
+        ws.send_json({"type": "hello", "mode": "chat", "conversation_id": conversation["id"]})
+        assert ws.receive_json()["type"] == "conversation"
+        ws.send_json({"type": "text_input", "text": "Aendere das Ziel auf Goeteborg"})
+        while ws.receive_json()["type"] != "done":
+            pass
+
+    messages = captured["messages"]
+    assert messages[0]["role"] == "system"
+    assert messages[1] == {"role": "user", "content": "Zeig mir Fluege nach Schweden"}
+    assert messages[2]["role"] == "assistant"
+    # Karten-Daten sind drin, das Layout-HTML nicht
+    assert "Stockholm" in messages[2]["content"]
+    assert "Flugsuche" in messages[2]["content"]
+    assert "<form>" not in messages[2]["content"]
+    # Aktuelle Frage genau einmal, als letzte Message
+    assert messages[-1] == {"role": "user", "content": "Aendere das Ziel auf Goeteborg"}
+    assert sum(1 for m in messages if m["content"] == "Aendere das Ziel auf Goeteborg") == 1

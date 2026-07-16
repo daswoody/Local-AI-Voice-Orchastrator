@@ -209,6 +209,39 @@ class StreamSession:
         except Exception:
             logger.exception("Konnte User-Message nicht persistieren")
 
+    def _conversation_history(self) -> list[dict]:
+        """Letzte Turns der Konversation als LLM-Messages (v1.13).
+        Karten des Turns werden mit ihren DATEN (ohne Layout-HTML) an die
+        Assistant-Message angehaengt - so kennt das LLM 'die Karte von
+        eben' und kann kontextbezogen weitermachen. Verlauf ist Komfort:
+        ein Ladefehler darf den Turn nicht kosten."""
+        if self.conversation_id is None:
+            return []
+        try:
+            messages = repos.list_messages(self.conversation_id)
+        except Exception:
+            logger.exception("Konnte Gespraechsverlauf nicht laden")
+            return []
+        history: list[dict] = []
+        for message in messages[-settings.history_max_messages:]:
+            content = (message["content"] or "").strip()
+            for card in message.get("cards") or []:
+                # Layout-HTML ist Kontext-Ballast; die Werte stecken in den
+                # restlichen data-Feldern (code-card bekommt sie ja auch so).
+                data = {k: v for k, v in (card.get("data") or {}).items() if k != "html"}
+                label = card.get("title") or card.get("type", "Karte")
+                note = f"[Karte angezeigt: {label}"
+                if data:
+                    note += f" - Daten: {json.dumps(data, ensure_ascii=False)}"
+                note += "]"
+                content = f"{content}\n{note}".strip()
+            if not content:
+                continue
+            if len(content) > settings.history_max_chars_per_message:
+                content = content[: settings.history_max_chars_per_message] + " …"
+            history.append({"role": message["role"], "content": content})
+        return history
+
     async def _persist_assistant_message(self, text: str) -> None:
         if self.conversation_id is None:
             return
@@ -247,12 +280,20 @@ class StreamSession:
             self._filler_played = False
             self._turn_cards = []
             self._turn_tools = []
+            # Gespraechsgedaechtnis (v1.13) VOR dem Persistieren des
+            # aktuellen Turns laden - sonst stuende die aktuelle Frage
+            # doppelt im Kontext.
+            history = self._conversation_history()
             await self._persist_user_message(text, has_image=bool(image_data_url))
             executor = self._make_executor(want_audio)
             llm_task = asyncio.create_task(
                 orchestrator_graph.ainvoke(
                     initial_state(
-                        text, self.tier, self.system_prompt, executor, image_data_url
+                        text, self.tier, self.system_prompt, executor, image_data_url,
+                        # Voice-First (v1.13): gesprochene Frage -> das LLM
+                        # antwortet direkt kurz, Umfangreiches als Karte.
+                        voice_mode=want_audio,
+                        history=history,
                     )
                 )
             )

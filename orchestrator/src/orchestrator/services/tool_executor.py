@@ -149,10 +149,12 @@ class ToolExecutor:
         self._card_push = card_push
         self._on_tool_start = on_tool_start
         self._on_activity = on_activity
-        # Ein Executor lebt genau einen Turn: bereits gepushte Karten merken,
-        # damit Modell-Wiederholungen (dasselbe show_card 2-3x) nicht den
-        # Chat mit identischen Karten fluten.
-        self._pushed_cards: list[str] = []
+        # Ein Executor lebt genau einen Turn: bereits gesehene show_card-
+        # Anfragen merken, damit Modell-Wiederholungen (dasselbe show_card
+        # 2-4x) weder den Chat mit Karten fluten noch den code-card-Agenten
+        # mehrfach fuer denselben Inhalt bezahlen lassen.
+        self._card_requests: set[str] = set()
+        self._card_generations = 0
 
     async def list_openai_tools(self) -> list[dict]:
         tools: list[dict] = []
@@ -228,7 +230,25 @@ class ToolExecutor:
             logger.exception("Tool %s fehlgeschlagen", name)
             return f"Tool-Fehler bei {name}: {str(exc)[:200]}"
 
+    # Obergrenze fuer code-card-Generierungen pro Turn: schuetzt vor
+    # Modellen, die show_card in Serie aufrufen (jede Generierung ist ein
+    # eigener - ggf. bezahlter - LLM-Call).
+    _MAX_CARD_GENERATIONS_PER_TURN = 2
+
     async def _execute_show_card(self, arguments: dict) -> str:
+        # Wiederholte identische Anfrage? SOFORT abfangen - bevor Parsing
+        # oder gar eine code-card-Generierung Geld/Zeit kostet.
+        request_fingerprint = json.dumps(arguments, sort_keys=True, ensure_ascii=False,
+                                         default=str)
+        if request_fingerprint in self._card_requests:
+            return json.dumps({
+                "ok": True,
+                "hinweis": "Diese Karte wird bereits angezeigt. Rufe show_card "
+                           "NICHT erneut mit denselben Daten auf - antworte "
+                           "jetzt dem Nutzer.",
+            })
+        self._card_requests.add(request_fingerprint)
+
         # CardEnvelope nach 4.12: {type, version, title?, data}
         data = arguments.get("data") or {}
         card_type = str(arguments.get("card_type", "generic"))
@@ -252,30 +272,31 @@ class ToolExecutor:
         # sandboxed iframe).
         html = arguments.get("html") or data.get("html")
         if not html and self._card_needs_generated_html(card_type, data):
+            if not data:
+                return json.dumps({
+                    "ok": False,
+                    "fehler": "Fuer diese Karte fehlt jeder Inhalt: liefere "
+                              "die anzuzeigenden Werte in data oder ein "
+                              "html-Feld mit einem HTML-Fragment (NUR dort, "
+                              "nicht im Antworttext).",
+                })
             # Kein fertiges HTML da, aber ohne HTML gaebe es nur eine leere
             # Karte -> Layout vom Karten-Agenten (code-card) schreiben
             # lassen (v1.12.2). Das entlastet das Haupt-LLM: es liefert nur
             # Titel + Daten, der Agent (z. B. Cloud-Modell) baut das HTML.
-            html = await self._generate_card_html(card_type, title, data)
+            # Gedeckelt pro Turn (v1.12.4) - Modelle, die show_card in Serie
+            # aufrufen, sollen nicht Agent-Lauf um Agent-Lauf ausloesen.
+            if self._card_generations < self._MAX_CARD_GENERATIONS_PER_TURN:
+                self._card_generations += 1
+                html = await self._generate_card_html(card_type, title, data)
+                if html is not None and html.startswith("Tool-Fehler"):
+                    return html
             if html is None:
-                # Kein code-card-Agent: statt leerer Karte (oder Fehler-
-                # Pingpong mit dem Modell) die Daten selbst als generic-
-                # Karte aufbereiten - eine Karte kommt IMMER an (v1.12.3).
-                if not data:
-                    return json.dumps({
-                        "ok": False,
-                        "fehler": "Fuer diese Karte fehlt jeder Inhalt: "
-                                  "liefere die anzuzeigenden Werte in data "
-                                  "oder ein html-Feld mit einem HTML-Fragment "
-                                  "(NUR dort, nicht im Antworttext). Hinweis "
-                                  "fuer den Admin: Ein aktiver Agent "
-                                  "'code-card' wuerde Layouts automatisch "
-                                  "schreiben.",
-                    })
+                # Kein code-card-Agent (oder Limit erreicht): Daten selbst
+                # als generic-Karte aufbereiten - eine Karte kommt IMMER an
+                # (v1.12.3), nur eben schlichter.
                 card_type = "generic"
                 data = _synthesize_generic_data(title, data)
-            elif html.startswith("Tool-Fehler"):
-                return html
         if html:
             card_type = "html"
             data = {**data, "html": str(html)}
@@ -287,19 +308,15 @@ class ToolExecutor:
         if title:
             envelope["title"] = title
 
-        # Identische Karte in diesem Turn schon gezeigt? Nicht nochmal
-        # pushen - manche Modelle rufen show_card mehrfach hintereinander.
-        fingerprint = json.dumps(envelope, sort_keys=True, ensure_ascii=False)
-        if fingerprint in self._pushed_cards:
-            return json.dumps({
-                "ok": True,
-                "hinweis": "Diese Karte wird bereits angezeigt - show_card "
-                           "nicht erneut mit denselben Daten aufrufen.",
-            })
-        self._pushed_cards.append(fingerprint)
-
         await self._card_push(envelope)
-        return json.dumps({"ok": True, "angezeigt": envelope["type"]})
+        return json.dumps({
+            "ok": True,
+            "angezeigt": envelope["type"],
+            "hinweis": "Die Karte ist beim Nutzer sichtbar. Wiederhole ihren "
+                       "Inhalt NICHT in deiner Text-Antwort (keine Tabellen, "
+                       "keine Aufzaehlung derselben Werte) - ein kurzer Satz "
+                       "als Verweis genuegt.",
+        })
 
     @staticmethod
     def _card_needs_generated_html(card_type: str, data: dict) -> bool:

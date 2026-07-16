@@ -21,9 +21,11 @@
 
   // Hoehe an den Inhalt anpassen: Ohne same-origin kann der Parent nicht in
   // das iframe schauen - deshalb meldet ein injiziertes Mini-Script die
-  // Inhaltshoehe per postMessage (sandbox erlaubt allow-scripts).
+  // Inhaltshoehe per postMessage. Zuordnung ueber eine pro Karte eindeutige
+  // ID im Payload (robuster als contentWindow-Vergleiche, gerade bei
+  // mehreren Karten im Verlauf).
+  const frameId = `card-${Math.random().toString(36).slice(2)}`;
   let frameHeight = $state(60);
-  let frame: HTMLIFrameElement | undefined = $state();
 
   $effect(() => {
     const requested = Number(card.data?.height);
@@ -32,8 +34,9 @@
       return;
     }
     const onMessage = (event: MessageEvent) => {
-      if (event.source !== frame?.contentWindow) return;
-      const height = Number((event.data as { heimaiCardHeight?: unknown })?.heimaiCardHeight);
+      const data = event.data as { heimaiCard?: string; height?: unknown } | null;
+      if (data?.heimaiCard !== frameId) return;
+      const height = Number(data.height);
       if (Number.isFinite(height) && height > 0) {
         frameHeight = Math.min(Math.max(Math.ceil(height), 24), 800);
       }
@@ -42,18 +45,24 @@
     return () => window.removeEventListener("message", onMessage);
   });
 
-  // Wrapper um das Karten-HTML: transparenter Hintergrund + App-Textfarbe
-  // (die UI ist dunkel), dazu der Hoehen-Reporter.
+  // Wrapper um das Karten-HTML: transparenter Hintergrund, App-Textfarbe
+  // (dunkles UI), Breiten-Guards gegen zu breit geratene Layouts (feste
+  // Breiten schlagen sonst als Scrollbalken durch) und der Hoehen-Reporter.
   const srcdoc = $derived(
     html === null
       ? ""
       : `<!doctype html><meta charset="utf-8"><style>` +
-        `html,body{margin:0;background:transparent}` +
+        `html,body{margin:0;background:transparent;overflow-x:hidden}` +
         `body{font-family:system-ui,sans-serif;color:#e8edf2;line-height:1.45}` +
+        `*{box-sizing:border-box}` +
+        `body *{max-width:100% !important}` +
+        `table{width:100%;border-collapse:collapse}` +
         `img{max-width:100%}` +
         `</style>${html}<script>` +
-        `const send=()=>parent.postMessage({heimaiCardHeight:document.body.scrollHeight},"*");` +
-        `addEventListener("load",send);new ResizeObserver(send).observe(document.body);send();` +
+        `var send=function(){parent.postMessage({heimaiCard:"${frameId}",height:document.documentElement.scrollHeight},"*")};` +
+        `addEventListener("load",send);` +
+        `if(window.ResizeObserver){new ResizeObserver(send).observe(document.documentElement);}` +
+        `setTimeout(send,50);send();` +
         `<\/script>`,
   );
 </script>
@@ -62,7 +71,6 @@
   {#if card.title}<div class="title">{card.title}</div>{/if}
   {#if html !== null}
     <iframe
-      bind:this={frame}
       class="html-card"
       sandbox="allow-scripts"
       srcdoc={srcdoc}

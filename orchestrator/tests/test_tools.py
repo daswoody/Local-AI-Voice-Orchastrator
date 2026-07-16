@@ -771,3 +771,80 @@ def test_identical_card_is_pushed_only_once_per_turn(client, monkeypatch):
     assert len([f for f in frames if f["type"] == "card"]) == 1
     tool_messages = [m for m in transcript[2]["messages"] if m["role"] == "tool"]
     assert "bereits angezeigt" in tool_messages[-1]["content"]
+
+
+# ---- code-card-Aufruf-Disziplin (v1.12.4) -------------------------------------------
+
+
+def test_duplicate_request_triggers_no_second_generation(client, monkeypatch):
+    """Praxisfall: 4x 'Agent: code-card' fuer EINE Karte. Die identische
+    show_card-Anfrage wird jetzt VOR der Generierung abgefangen - der Agent
+    laeuft genau einmal."""
+    repos.create_agent("code-card", "Karten-Layouter", "Schreibt Karten-HTML.",
+                       "", "cloud/card")
+    agent_calls = []
+    arguments = {"card_type": "html", "title": "Uhrzeit", "data": {"zeit": "20:43"}}
+    _card_agent_llm(monkeypatch, [
+        _tool_call("show_card", arguments, call_id="call_1"),
+        _tool_call("show_card", arguments, call_id="call_2"),
+        _tool_call("show_card", arguments, call_id="call_3"),
+        {"role": "assistant", "content": "Fertig."},
+    ], agent_reply="<p>20:43</p>", agent_calls=agent_calls)
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "chat"})
+        ws.send_json({"type": "text_input", "text": "Uhrzeit als Karte"})
+        frames = _collect_until_done(ws)
+
+    assert len(agent_calls) == 1
+    assert len([f for f in frames if f["type"] == "card"]) == 1
+    agent_chips = [f for f in frames if f["type"] == "tool_activity"
+                   and f["tool"] == "agent-code-card"]
+    assert len(agent_chips) == 2  # genau EIN Lauf: running + done
+
+
+def test_generation_limit_falls_back_to_synthesized_generic(client, monkeypatch):
+    """Mehr als zwei VERSCHIEDENE Karten pro Turn: ab der dritten wird nicht
+    mehr generiert, sondern aus den Daten eine generic-Karte gebaut."""
+    repos.create_agent("code-card", "Karten-Layouter", "Schreibt Karten-HTML.",
+                       "", "cloud/card")
+    agent_calls = []
+    _card_agent_llm(monkeypatch, [
+        _tool_call("show_card", {"card_type": "html", "data": {"a": 1}}, "c1"),
+        _tool_call("show_card", {"card_type": "html", "data": {"b": 2}}, "c2"),
+        _tool_call("show_card", {"card_type": "html", "data": {"c": 3}}, "c3"),
+        {"role": "assistant", "content": "Fertig."},
+    ], agent_reply="<p>x</p>", agent_calls=agent_calls)
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "chat"})
+        ws.send_json({"type": "text_input", "text": "Karten"})
+        frames = _collect_until_done(ws)
+
+    assert len(agent_calls) == 2
+    cards = [f["card"] for f in frames if f["type"] == "card"]
+    assert len(cards) == 3
+    assert [c["type"] for c in cards] == ["html", "html", "generic"]
+    assert "c: 3" in cards[2]["data"]["body"]
+
+
+def test_show_card_success_result_warns_against_repeating_content(client, monkeypatch):
+    """Das Erfolgs-Ergebnis sagt dem Modell explizit, den Karteninhalt nicht
+    nochmal als Text/Tabelle auszugeben."""
+    transcript = []
+    _scripted_llm(monkeypatch, [
+        _tool_call("show_card", {"card_type": "generic",
+                                 "data": {"headline": "Hi", "body": "Welt"}}),
+        {"role": "assistant", "content": "Karte ist da."},
+    ], transcript)
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "chat"})
+        ws.send_json({"type": "text_input", "text": "Karte"})
+        _collect_until_done(ws)
+
+    tool_messages = [m for m in transcript[1]["messages"] if m["role"] == "tool"]
+    assert "Wiederhole" in tool_messages[0]["content"]

@@ -40,6 +40,23 @@
     {#each app.messages as message (message.id)}
       {#if message.role === "card" && message.card}
         <div class="bubble-row assistant"><Card card={message.card} /></div>
+      {:else if message.role === "tools" && message.tools}
+        <!-- Was tut die KI gerade? Tool-/Agenten-Aufrufe des Turns (v1.12.1) -->
+        <div class="bubble-row assistant">
+          <div class="tool-chips">
+            {#each message.tools as activity}
+              <span class="tool-chip {activity.status}">
+                <span class="tool-icon">{activity.tool.startsWith("agent-") ? "🤖" : "🔧"}</span>
+                {activity.tool.startsWith("agent-")
+                  ? `Agent: ${activity.tool.slice(6)}`
+                  : activity.tool}
+                <span class="tool-status">
+                  {activity.status === "running" ? "…" : activity.status === "error" ? "⚠" : "✓"}
+                </span>
+              </span>
+            {/each}
+          </div>
+        </div>
       {:else}
         <div class="bubble-row {message.role}">
           <div class="bubble {message.role}" class:pending={!message.final}>{message.text}</div>
@@ -130,6 +147,40 @@
   }
   .bubble.pending {
     opacity: 0.7;
+  }
+  .tool-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .tool-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    color: var(--text-muted);
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 3px 10px;
+  }
+  .tool-chip.running {
+    animation: chip-pulse 1.2s ease-in-out infinite;
+  }
+  .tool-chip.error {
+    border-color: var(--danger);
+    color: var(--danger);
+  }
+  .tool-icon {
+    font-size: 13px;
+  }
+  .tool-status {
+    opacity: 0.8;
+  }
+  @keyframes chip-pulse {
+    50% {
+      opacity: 0.55;
+    }
   }
   .error {
     margin: 0 20px;

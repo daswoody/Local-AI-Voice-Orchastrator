@@ -55,6 +55,9 @@ def _show_card_schema() -> dict:
                 "Passt kein vorhandener Kartentyp, erstelle selbst ein Layout: "
                 "card_type 'html' und im Feld html ein eigenstaendiges HTML-Fragment "
                 f"mit Inline-CSS{agent_hint}. "
+                "WICHTIG: Gib HTML ausschliesslich im html-Feld an und wiederhole "
+                "es NIE in deiner Text-Antwort - der Nutzer sieht die Karte direkt, "
+                "HTML im Antworttext wird als roher Code angezeigt. "
                 "Unbekannte Typen rendert die App als generic-Karte "
                 "(data.headline + data.body)."
             ),
@@ -107,11 +110,16 @@ class ToolExecutor:
         # damit die Session den Filler-Delay gegen das Tool rennen lassen
         # kann (schnelles Tool -> kein Filler).
         on_tool_start: Callable[[str, "asyncio.Task"], Awaitable[None]] | None = None,
+        # Aktivitaets-Hook (v1.12.1): meldet der Session Start/Ende jedes
+        # Tool-/Agenten-Aufrufs (status: running/done/error), damit der
+        # Client anzeigen kann, was die KI gerade tut.
+        on_activity: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> None:
         self._device_tools = {tool.name: tool for tool in (device_tools or [])}
         self._device_call = device_call
         self._card_push = card_push
         self._on_tool_start = on_tool_start
+        self._on_activity = on_activity
 
     async def list_openai_tools(self) -> list[dict]:
         tools: list[dict] = []
@@ -146,15 +154,29 @@ class ToolExecutor:
         """Fuehrt ein Tool aus und liefert IMMER einen String (auch bei
         Fehlern) - der Agent-Loop haengt das als tool-Message an, und das
         LLM kann dem Nutzer erklaeren, was schiefging."""
+        # show_card ist rein visuell und quasi-instant: weder Filler noch
+        # Aktivitaets-Anzeige - die Karte selbst IST die Anzeige.
+        visible = name != _SHOW_CARD_NAME
+        await self._notify_activity(visible, name, "running")
         # Tool als Task starten, damit der Filler-Hook seinen Delay dagegen
         # rennen lassen kann: schnelles Tool -> Filler entfaellt (1.7d).
         pending = asyncio.create_task(self._dispatch(name, arguments))
-        if self._on_tool_start is not None:
-            # show_card ist rein visuell und quasi-instant - dafuer keinen
-            # gesprochenen Filler anstossen.
-            if name != _SHOW_CARD_NAME:
-                await self._on_tool_start(name, pending)
-        return await pending
+        if self._on_tool_start is not None and visible:
+            await self._on_tool_start(name, pending)
+        result = await pending
+        await self._notify_activity(
+            visible, name, "error" if result.startswith("Tool-Fehler") else "done"
+        )
+        return result
+
+    async def _notify_activity(self, visible: bool, name: str, status: str) -> None:
+        # Anzeige ist Komfort: ein kaputter Hook darf kein Tool-Ergebnis kosten.
+        if self._on_activity is None or not visible:
+            return
+        try:
+            await self._on_activity(name, status)
+        except Exception:
+            logger.exception("Aktivitaets-Hook fehlgeschlagen (Tool %s)", name)
 
     async def _dispatch(self, name: str, arguments: dict) -> str:
         try:
@@ -177,12 +199,36 @@ class ToolExecutor:
         # CardEnvelope nach 4.12: {type, version, title?, data}
         data = arguments.get("data") or {}
         card_type = str(arguments.get("card_type", "generic"))
-        # KI-geschriebene Ad-hoc-HTML-Karte (4.12 v1.12): html-Feld wandert
-        # in data.html, der Typ ist immer "html" (Alt-Clients rendern die
-        # generic-Karte, die Web-UI ein sandboxed iframe).
-        if arguments.get("html"):
+        # Modelle liefern data gern als JSON-String oder stopfen das HTML
+        # direkt hinein - tolerant einsammeln statt leere Karten pushen.
+        if isinstance(data, str):
+            try:
+                parsed = json.loads(data)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                data = parsed
+            elif "<" in data:
+                data = {"html": data}
+            else:
+                data = {"body": data}
+        # KI-geschriebene Ad-hoc-HTML-Karte (4.12 v1.12): HTML aus dem
+        # html-Feld ODER aus data.html; der Typ ist dann immer "html"
+        # (Alt-Clients rendern die generic-Karte, die Web-UI ein
+        # sandboxed iframe).
+        html = arguments.get("html") or data.get("html")
+        if html:
             card_type = "html"
-            data = {**data, "html": str(arguments["html"])}
+            data = {**data, "html": str(html)}
+        elif card_type == "html":
+            # Klares Feedback statt leerer Karte: das LLM kann den Aufruf
+            # in der naechsten Agent-Runde korrigieren.
+            return json.dumps({
+                "ok": False,
+                "fehler": "card_type 'html' braucht das html-Feld mit dem "
+                          "HTML-Fragment - bitte erneut aufrufen und das HTML "
+                          "NUR dort (nicht im Antworttext) angeben",
+            })
         envelope = {
             "type": card_type,
             "version": 1,

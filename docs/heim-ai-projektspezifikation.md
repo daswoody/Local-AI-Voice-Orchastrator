@@ -299,6 +299,8 @@ Karten ("Skills") sind zweischichtig getrennt:
 
 Sicherheitsrahmen: HTML kommt nur aus zwei Quellen — Admin (Tier 3, Editor) oder dem eigenen LLM zur Laufzeit. Die Sandbox (kein same-origin, kein Zugriff auf `localStorage`/Cookies) ist die eigentliche Grenze; Scripts im HTML sind erlaubt (kleine Interaktivität), laufen aber isoliert.
 
+**Robustheit (v1.12.1, nach erstem Praxistest):** Modelle halten sich nicht zuverlässig an das Argument-Schema — `show_card` sammelt das HTML deshalb tolerant ein (`html`-Feld, `data.html` oder `data` als String) und liefert bei `card_type: "html"` ohne HTML ein **korrigierbares Fehler-Ergebnis** an das LLM zurück, statt eine leere Karte zu pushen. Die Tool-Beschreibung verbietet zusätzlich ausdrücklich, das HTML im Antworttext zu wiederholen (dort erscheint es als roher Code).
+
 ### 4.13 App ↔ Orchestrator-Protokoll
 
 Verbindlicher Vertrag in `docs/PROTOCOL.md` (App-Repo). **Die App ist fertig gebaut — der Orchestrator implementiert diese Schnittstelle nach.** Kurzfassung:
@@ -320,6 +322,8 @@ Verbindlicher Vertrag in `docs/PROTOCOL.md` (App-Repo). **Die App ist fertig geb
 **Antwort-Modalitäten & Sprach-Kurzfassung (NEU in v1.10):** Der Orchestrator entscheidet die Ausgabe-Modalität nach der Eingabe-Modalität: **Text rein → Text raus** (kein Server-Audio, egal in welchem Modus — die Assistenz liest getippte Chats nicht ungefragt vor), **Audio rein → Sprachantwort + Details im Chat**. Bei langen Antworten (> `VOICE_SUMMARY_MAX_CHARS`, Default 280) wird für die Sprachausgabe per zweitem, kleinem LLM-Call eine **Kurzfassung** (max. zwei gesprochene Sätze) erzeugt; der vollständige Text steht parallel als `assistant_text` im Chat/Popup. Schlägt die Kurzfassung fehl, wird der volle Text gesprochen. Abschaltbar per `VOICE_SUMMARY_ENABLED`.
 
 **Protokoll-Verifikation (v1.10):** Die Frame- und REST-Formate des Orchestrators sind gegen das echte `docs/PROTOCOL.md` des App-Repos abgeglichen (Audio-Feld `data`, Tool-Frames mit `call_id`/`ok`/`result`, Geräte-Manifest im hello-Feld `tools` inkl. `sensitive`, `session`-Frame nach Connect, Auth per `Authorization`-Header auch am WebSocket, `/v1/voices` → `{voices: []}`, `/v1/cards/layouts` → `{version, layouts}`).
+
+**Tool-Aktivitäts-Anzeige (additiv, NEU in v1.12.1):** Neues Server→Client-Frame `tool_activity` `{tool, status: running|done|error}` meldet live, welches Tool bzw. welcher Agent (`agent-*`) gerade arbeitet; `show_card` bleibt bewusst still (die Karte ist die Anzeige). Der Endzustand des Turns wird als `tools`-Liste an der Assistant-Message persistiert (`GET /v1/conversations/{id}`), sodass Chat- UND Voice-Verlauf dieselben Aktivitäts-Chips zeigen wie der Live-Turn. Die Web-UI rendert Chips (🔧 Tool / 🤖 Agent, pulsierend solange running); die Android-App ignoriert das unbekannte Frame protokollkonform. Dokumentiert in `docs/protocol-additions-2.5.md` (Abschnitt 6).
 
 ### 4.14 Admin-Frontend & Charakter-/Rechte-Verwaltung (NEU in v1.6)
 
@@ -710,9 +714,10 @@ Verbindlicher Vertrag in `docs/PROTOCOL.md` (App-Repo). **Die App ist fertig geb
 
 ---
 
-**Version:** 1.12
-**Stand:** 2026-07-15
+**Version:** 1.12.1
+**Stand:** 2026-07-16
 **Changelog:**
+- v1.12.1 (2026-07-16): **HTML-Karten-Robustheit + Tool-Aktivitäts-Anzeige** (Nutzer-Report: Karte kam leer an, HTML stand als roher Code im Antworttext). `show_card` sammelt HTML jetzt tolerant ein (`html`-Feld, `data.html`, `data` als String) und gibt bei `card_type html` ohne Inhalt ein korrigierbares Fehler-Ergebnis ans LLM statt eine leere Karte zu pushen; Tool-Beschreibung verbietet HTML im Antworttext ausdrücklich. Neu: additives Frame `tool_activity` (running/done/error) + `tools`-Liste an der Assistant-Message — Chat- und Voice-Verlauf zeigen als Chips, welche Tools/Agenten die KI aufgerufen hat (Web-UI live und in der Historie; Android ignoriert das Frame). 75 Tests grün.
 - v1.12 (2026-07-15): **Agenten-System (neue Sektion 4.16) + HTML-Karten (4.12 erweitert).** Agenten = admin-definierbare, spezialisierte LLM-Läufe (Name, ID/Slug, Beschreibung, System-Prompt, eigenes LiteLLM-Modell) — Lastverteilung: unpersönliche Aufgaben (Websuche, Coding) an Cloud-Modelle delegieren, Heim-KI bleibt lokal. Jeder aktive Agent erscheint dem Haupt-LLM als Tool `agent-<slug>`; Ausführung als eigener LiteLLM-Lauf mit MCP-Server-Tools (keine Geräte-Tools/Karten — session-gebunden). Admin-Panel-View „Agenten" + `/v1/admin/agents`-CRUD. Karten: neben Layout-JSON jetzt **HTML-Layouts** (Editor mit Format-Auswahl, `{{data.*}}`-Bindings, sandboxed iframe in der Web-UI, generic-Fallback für Alt-Clients) und **KI-geschriebene Ad-hoc-HTML-Karten** über das neue `show_card`-Feld `html` (kein passendes Layout → LLM schreibt selbst eins, z. B. via Coding-Agent).
 - v1.11.4 (2026-07-09): **Audio-Zweig-Fehler gelöst** — die v1.11.3-Transparenz lieferte die echte Ursache: LM Studio validiert Tool-Definitionen strikt (Zod) und verlangt `"type": "object"` am Root des Parameter-Schemas; ein MCP-Gateway-Tool ohne Root-type ließ LM Studio den gesamten Request mit 400 `invalid_union_discriminator` ablehnen (Cloud-Modelle tolerant, daher nur lokal sichtbar). Fix: ToolExecutor normalisiert jedes Tool-Schema vor dem LLM-Call (Root-type object, properties-Dict, `$schema` entfernt), quellenunabhängig. 56 Tests grün.
 - v1.11.3 (2026-07-09): **Fehlerdiagnose im Audio-Zweig** (Nutzer-Report: "interner Fehler bei der Antwortgenerierung" nur bei Sprache, Text funktioniert). Der Sammel-except reicht jetzt Exception-Typ + Kurztext an den Client durch; LiteLLM-Client hebt HTTP-Fehlerbody in die Exception (Chat-Template-/Tool-Fehler lokaler Modelle werden sichtbar); Filler-Pfad vollstaendig gekapselt (Komfort-Feature kann den Turn nicht mehr abbrechen). 55 Tests gruen. Eigentliche Ursache wird aus der jetzt sichtbaren Meldung beim naechsten Test bestimmt.

@@ -91,3 +91,22 @@ UI ruft in der Windows-Shell auf: `get_shell_info`, `set_indicator`,
 `capture_screenshot`, `set_hotkeys`, `set_autostart`, `set_wake_word`,
 `show_main_window`. Events Shell→UI: `hotkey {action}`, `wake-word`,
 `indicator-state`. Versioniert über `shell_api_version` (aktuell 1).
+
+## 6. Tool-Aktivität (`tool_activity`, additiv — v1.12.1)
+
+Server → Client, rein informativ: zeigt an, welches Tool bzw. welcher
+Agent (Tool-Name-Präfix `agent-`) gerade läuft. Clients, die das Frame
+nicht kennen (aktuelle Android-App), ignorieren es folgenlos.
+
+```json
+{ "type": "tool_activity", "tool": "agent-websuche", "status": "running" }
+{ "type": "tool_activity", "tool": "agent-websuche", "status": "done" }
+```
+
+`status`: `running` → `done` | `error`. `show_card` erzeugt bewusst kein
+Aktivitäts-Frame (die Karte selbst ist die Anzeige).
+
+Persistenz: Der Endzustand des Turns hängt als `tools`-Liste
+(`[{tool, status}]`) an der Assistant-Message in
+`GET /v1/conversations/{id}` — der Verlauf zeigt damit dieselben Chips
+wie der Live-Turn.

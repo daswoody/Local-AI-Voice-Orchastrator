@@ -318,18 +318,20 @@ def append_message(
     content: str,
     cards: list[dict] | None = None,
     has_image: bool = False,
+    tools: list[dict] | None = None,
 ) -> dict:
     now = _utc_now()
     with db_session() as conn:
         cursor = conn.execute(
-            "INSERT INTO messages (conversation_id, role, content, cards_json, has_image, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO messages (conversation_id, role, content, cards_json, has_image,"
+            " tools_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 conversation_id,
                 role,
                 content,
                 json.dumps(cards, ensure_ascii=False) if cards else None,
                 int(has_image),
+                json.dumps(tools, ensure_ascii=False) if tools else None,
                 now,
             ),
         )
@@ -339,7 +341,8 @@ def append_message(
         conn.commit()
         message_id = cursor.lastrowid
     return {"id": message_id, "role": role, "content": content,
-            "cards": cards or [], "has_image": has_image, "created_at": now}
+            "cards": cards or [], "has_image": has_image,
+            "tools": tools or [], "created_at": now}
 
 
 def list_messages(conversation_id: str) -> list[dict]:
@@ -354,6 +357,7 @@ def list_messages(conversation_id: str) -> list[dict]:
                 "content": r["content"],
                 "cards": json.loads(r["cards_json"]) if r["cards_json"] else [],
                 "has_image": bool(r["has_image"]),
+                "tools": json.loads(r["tools_json"]) if r["tools_json"] else [],
                 "created_at": r["created_at"],
             }
             for r in rows

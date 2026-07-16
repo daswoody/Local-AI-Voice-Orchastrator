@@ -14,6 +14,9 @@ export interface SessionCallbacks {
   onAudioEnd?: () => void;
   onCard?: (card: CardEnvelope) => void;
   onToolCall?: (callId: string, name: string, args: Record<string, unknown>) => void;
+  /** Additives tool_activity-Frame (v1.12.1): welches Tool/welcher Agent
+   *  gerade laeuft bzw. fertig ist. */
+  onToolActivity?: (tool: string, status: "running" | "done" | "error") => void;
   onConversation?: (conversationId: string) => void;
   onDone?: () => void;
   onError?: (message: string) => void;
@@ -153,6 +156,9 @@ export class AssistantSession {
           frame["name"],
           (frame["arguments"] as Record<string, unknown>) ?? {},
         );
+        break;
+      case "tool_activity":
+        this.callbacks.onToolActivity?.(frame["tool"] ?? "", frame["status"] ?? "running");
         break;
       case "conversation":
         this.callbacks.onConversation?.(frame["conversation_id"]);

@@ -63,6 +63,10 @@ class StreamSession:
         self.conversation_id: str | None = None
         self.device_name = ""
         self._turn_cards: list[dict] = []
+        # Tool-/Agenten-Aufrufe des laufenden Turns (v1.12.1): live als
+        # tool_activity-Frame an den Client (additiv - die Android-App
+        # ignoriert unbekannte Frames) und am Turn-Ende in die Historie.
+        self._turn_tools: list[dict] = []
 
         self.tier, self.username = _resolve_identity(websocket)
         self.system_prompt = repos.effective_system_prompt(self.username)
@@ -210,7 +214,8 @@ class StreamSession:
             return
         try:
             repos.append_message(
-                self.conversation_id, "assistant", text, cards=self._turn_cards or None
+                self.conversation_id, "assistant", text,
+                cards=self._turn_cards or None, tools=self._turn_tools or None,
             )
         except Exception:
             logger.exception("Konnte Assistant-Message nicht persistieren")
@@ -241,6 +246,7 @@ class StreamSession:
         try:
             self._filler_played = False
             self._turn_cards = []
+            self._turn_tools = []
             await self._persist_user_message(text, has_image=bool(image_data_url))
             executor = self._make_executor(want_audio)
             llm_task = asyncio.create_task(
@@ -308,11 +314,28 @@ class StreamSession:
             if want_audio and settings.filler_enabled:
                 await self._race_filler(pending, kind="tool", tool_name=tool_name)
 
+        async def on_activity(tool_name: str, status: str) -> None:
+            # "Was tut die KI gerade?" fuer Chat- UND Voice-Verlauf: Live-
+            # Frame an den Client, Endzustand in die Turn-Liste fuer die
+            # Historie. running legt einen Eintrag an, done/error stempelt
+            # den letzten laufenden Eintrag desselben Tools.
+            if status == "running":
+                self._turn_tools.append({"tool": tool_name, "status": "running"})
+            else:
+                for entry in reversed(self._turn_tools):
+                    if entry["tool"] == tool_name and entry["status"] == "running":
+                        entry["status"] = status
+                        break
+            await self.ws.send_json(
+                {"type": "tool_activity", "tool": tool_name, "status": status}
+            )
+
         return ToolExecutor(
             device_tools=self.device_tools,
             device_call=self._call_device_tool,
             card_push=card_push,
             on_tool_start=on_tool_start,
+            on_activity=on_activity,
         )
 
     async def _call_device_tool(self, name: str, arguments: dict) -> str:

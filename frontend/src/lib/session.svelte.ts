@@ -2,7 +2,7 @@
 // Mikrofon (PTT/Realtime/Assist), Audio-Wiedergabe, Karten, Geraete-Tools
 // (capture_screenshot ueber die Shell) und Popups/Indikator der Shell.
 
-import type { CardEnvelope } from "./api";
+import type { CardEnvelope, ToolActivity } from "./api";
 import { storedUser } from "./api";
 import { MicCapture, StreamPlayer, VoiceActivity } from "./audio";
 import * as shell from "./shell";
@@ -11,9 +11,11 @@ import { AssistantSession, type DeviceToolSpec } from "./ws";
 
 export interface UiMessage {
   id: number;
-  role: "user" | "assistant" | "card";
+  role: "user" | "assistant" | "card" | "tools";
   text: string;
   card?: CardEnvelope;
+  // role "tools": Tool-/Agenten-Aufrufe des Turns als Chips (v1.12.1)
+  tools?: ToolActivity[];
   final: boolean;
 }
 
@@ -130,6 +132,25 @@ function pushMessage(message: Omit<UiMessage, "id">): number {
 }
 
 let assistantMsgId: number | null = null;
+let toolsMsgId: number | null = null;
+
+/** tool_activity-Frames des laufenden Turns in EINER Chips-Zeile sammeln:
+ *  running legt einen Chip an, done/error stempelt den laufenden Chip. */
+function onToolActivity(tool: string, status: ToolActivity["status"]): void {
+  if (toolsMsgId === null) {
+    toolsMsgId = pushMessage({ role: "tools", text: "", tools: [{ tool, status }], final: false });
+    return;
+  }
+  const msg = app.messages.find((m) => m.id === toolsMsgId);
+  if (!msg?.tools) return;
+  if (status === "running") {
+    msg.tools.push({ tool, status });
+  } else {
+    const entry = [...msg.tools].reverse().find((t) => t.tool === tool && t.status === "running");
+    if (entry) entry.status = status;
+    else msg.tools.push({ tool, status });
+  }
+}
 
 function onAssistantText(text: string, final: boolean): void {
   if (final) {
@@ -202,11 +223,24 @@ export async function ensureSession(): Promise<void> {
       notifyIfHidden(card.title || "Neue Karte", card);
     },
     onToolCall: (callId, name, args) => void handleToolCall(callId, name, args),
+    onToolActivity,
     onConversation: (conversationId) => {
       app.conversationId = conversationId;
     },
     onDone: () => {
       app.thinking = false;
+      // Turn zu Ende: Chips-Zeile abschliessen (noch laufende Eintraege
+      // gelten als erledigt - z. B. nach einem Barge-in).
+      if (toolsMsgId !== null) {
+        const msg = app.messages.find((m) => m.id === toolsMsgId);
+        if (msg) {
+          msg.final = true;
+          msg.tools?.forEach((t) => {
+            if (t.status === "running") t.status = "done";
+          });
+        }
+        toolsMsgId = null;
+      }
       ttsFallback();
       audioThisTurn = false;
       serverAudioThisTurn = false;
@@ -322,16 +356,22 @@ export function newChat(): void {
   app.conversationId = undefined;
   app.partialTranscript = "";
   app.error = "";
+  toolsMsgId = null;
 }
 
 export function loadIntoChat(
   conversationId: string,
-  history: { role: string; content: string; cards: CardEnvelope[] }[],
+  history: { role: string; content: string; cards: CardEnvelope[]; tools?: ToolActivity[] }[],
 ): void {
   closeSession();
   app.messages = [];
   app.conversationId = conversationId;
+  toolsMsgId = null;
   for (const message of history) {
+    if (message.tools?.length) {
+      // Tool-/Agenten-Chips des Turns VOR der Antwort, wie im Live-Verlauf.
+      pushMessage({ role: "tools", text: "", tools: message.tools, final: true });
+    }
     if (message.content) {
       pushMessage({
         role: message.role === "user" ? "user" : "assistant",

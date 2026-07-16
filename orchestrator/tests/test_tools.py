@@ -19,9 +19,9 @@ def _open(ws) -> None:
 
 def _next_frame(ws) -> dict:
     """Naechstes inhaltliches Frame; ueberspringt das conversation-Frame
-    der zentralen Historie (Phase 2.5)."""
+    der zentralen Historie (Phase 2.5) und tool_activity (v1.12.1)."""
     frame = ws.receive_json()
-    if frame["type"] == "conversation":
+    while frame["type"] in ("conversation", "tool_activity"):
         frame = ws.receive_json()
     return frame
 
@@ -414,3 +414,156 @@ def test_show_card_description_offers_html_and_coding_agent(client):
     tools = loop.run_until_complete(executor.list_openai_tools())
     show_card = next(t for t in tools if t["function"]["name"] == "show_card")
     assert "agent-coding" in show_card["function"]["description"]
+
+
+# ---- Tool-Aktivitaet im Verlauf (v1.12.1) ----------------------------------------
+
+
+def test_tool_activity_frames_running_and_done(client, monkeypatch):
+    """Der Client sieht live, was die KI tut: tool_activity running vor dem
+    Tool, done danach - und beides VOR der finalen Antwort."""
+    _scripted_llm(monkeypatch, [
+        _tool_call("Time-current_time", {}),
+        {"role": "assistant", "content": "Es ist 12:00 Uhr."},
+    ])
+    monkeypatch.setattr(mcp_gateway_module.mcp_gateway, "call_tool",
+                        AsyncMock(return_value="12:00"))
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "chat"})
+        ws.send_json({"type": "text_input", "text": "Wie spaet?"})
+        frames = _collect_until_done(ws)
+
+    activity = [f for f in frames if f["type"] == "tool_activity"]
+    assert activity == [
+        {"type": "tool_activity", "tool": "Time-current_time", "status": "running"},
+        {"type": "tool_activity", "tool": "Time-current_time", "status": "done"},
+    ]
+    types = [f["type"] for f in frames]
+    assert types.index("tool_activity") < types.index("assistant_text")
+
+
+def test_tool_activity_reports_error_status(client, monkeypatch):
+    _scripted_llm(monkeypatch, [
+        _tool_call("Time-current_time", {}),
+        {"role": "assistant", "content": "Das Tool klemmt gerade."},
+    ])
+    monkeypatch.setattr(mcp_gateway_module.mcp_gateway, "call_tool",
+                        AsyncMock(side_effect=RuntimeError("Gateway down")))
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "chat"})
+        ws.send_json({"type": "text_input", "text": "Wie spaet?"})
+        frames = _collect_until_done(ws)
+
+    statuses = [f["status"] for f in frames if f["type"] == "tool_activity"]
+    assert statuses == ["running", "error"]
+
+
+def test_show_card_emits_no_tool_activity(client, monkeypatch):
+    """show_card ist rein visuell - die Karte selbst IST die Anzeige."""
+    _scripted_llm(monkeypatch, [
+        _tool_call("show_card", {"card_type": "generic", "data": {"headline": "Hi"}}),
+        {"role": "assistant", "content": "Karte ist da."},
+    ])
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "chat"})
+        ws.send_json({"type": "text_input", "text": "Karte bitte"})
+        frames = _collect_until_done(ws)
+
+    assert [f for f in frames if f["type"] == "tool_activity"] == []
+
+
+def test_tool_activity_is_persisted_with_assistant_message(client, monkeypatch):
+    """Auch die Historie zeigt, was die KI getan hat: die Tool-Liste haengt
+    an der Assistant-Message (Endzustand, nicht die running-Zwischenschritte)."""
+    from orchestrator.config import settings as app_settings
+
+    _scripted_llm(monkeypatch, [
+        _tool_call("Time-current_time", {}),
+        {"role": "assistant", "content": "12:00 Uhr."},
+    ])
+    monkeypatch.setattr(mcp_gateway_module.mcp_gateway, "call_tool",
+                        AsyncMock(return_value="12:00"))
+
+    login = client.post("/v1/auth/login", json={
+        "username": app_settings.admin_username,
+        "password": app_settings.admin_password, "device_name": "t"})
+    headers = {"Authorization": f"Bearer {login.json()['token']}"}
+
+    with client.websocket_connect("/v1/assistant/stream", headers=headers) as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "chat"})
+        ws.send_json({"type": "text_input", "text": "Wie spaet?"})
+        frames = _collect_until_done(ws)
+
+    conversation_id = next(f for f in frames if f["type"] == "conversation")["conversation_id"]
+    detail = client.get(f"/v1/conversations/{conversation_id}", headers=headers).json()
+    assistant = next(m for m in detail["messages"] if m["role"] == "assistant")
+    assert assistant["tools"] == [{"tool": "Time-current_time", "status": "done"}]
+
+
+# ---- show_card-Robustheit (v1.12.1) -----------------------------------------------
+
+
+def test_show_card_accepts_html_inside_data(client, monkeypatch):
+    """Modelle legen das HTML gern in data.html statt ins html-Feld - beides
+    muss zur html-Envelope werden."""
+    _scripted_llm(monkeypatch, [
+        _tool_call("show_card", {"card_type": "uhrzeit", "title": "Uhrzeit",
+                                 "data": {"html": "<b>19:03</b>"}}),
+        {"role": "assistant", "content": "Bitte sehr."},
+    ])
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "chat"})
+        ws.send_json({"type": "text_input", "text": "Uhrzeit als Karte"})
+        frames = _collect_until_done(ws)
+
+    card = next(f for f in frames if f["type"] == "card")["card"]
+    assert card["type"] == "html"
+    assert card["data"]["html"] == "<b>19:03</b>"
+
+
+def test_show_card_accepts_data_as_string(client, monkeypatch):
+    """data als String (HTML oder JSON-String) statt Objekt - tolerant parsen."""
+    _scripted_llm(monkeypatch, [
+        _tool_call("show_card", {"card_type": "html", "data": "<p>Hallo</p>"}),
+        {"role": "assistant", "content": "Karte ist da."},
+    ])
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "chat"})
+        ws.send_json({"type": "text_input", "text": "Karte"})
+        frames = _collect_until_done(ws)
+
+    card = next(f for f in frames if f["type"] == "card")["card"]
+    assert card["type"] == "html"
+    assert card["data"]["html"] == "<p>Hallo</p>"
+
+
+def test_show_card_html_without_html_gives_llm_feedback(client, monkeypatch):
+    """card_type 'html' ohne HTML-Inhalt: keine leere Karte pushen, sondern
+    dem LLM ein korrigierbares Fehler-Ergebnis geben."""
+    transcript = []
+    _scripted_llm(monkeypatch, [
+        _tool_call("show_card", {"card_type": "html", "title": "Uhrzeit in Tokio",
+                                 "data": {}}),
+        {"role": "assistant", "content": "Da ist etwas schiefgelaufen."},
+    ], transcript)
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "chat"})
+        ws.send_json({"type": "text_input", "text": "Uhrzeit als Karte"})
+        frames = _collect_until_done(ws)
+
+    assert [f for f in frames if f["type"] == "card"] == []
+    tool_messages = [m for m in transcript[1]["messages"] if m["role"] == "tool"]
+    assert "html-Feld" in tool_messages[0]["content"]

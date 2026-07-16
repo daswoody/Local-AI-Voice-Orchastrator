@@ -16,12 +16,19 @@ export interface ConversationSummary {
   updated_at: string;
 }
 
+export interface ToolActivity {
+  tool: string;
+  status: "running" | "done" | "error";
+}
+
 export interface HistoryMessage {
   id: number;
   role: "user" | "assistant";
   content: string;
   cards: CardEnvelope[];
   has_image: boolean;
+  // Tool-/Agenten-Aufrufe des Turns (v1.12.1)
+  tools?: ToolActivity[];
   created_at: string;
 }
 

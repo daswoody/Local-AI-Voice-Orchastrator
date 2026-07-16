@@ -105,6 +105,9 @@ CREATE TABLE IF NOT EXISTS messages (
     -- Bild-Eingaben (Screenshots) werden aus Platzgruenden NICHT in der
     -- Historie gespeichert, nur markiert.
     has_image INTEGER NOT NULL DEFAULT 0,
+    -- Tool-/Agenten-Aufrufe des Turns (v1.12.1) als JSON-Liste
+    -- [{tool, status}], damit der Verlauf zeigt, was die KI getan hat.
+    tools_json TEXT,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, id);
@@ -174,6 +177,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "format" not in card_columns:
         conn.execute("ALTER TABLE card_layouts ADD COLUMN format TEXT NOT NULL DEFAULT 'json'")
         conn.execute("ALTER TABLE card_layouts ADD COLUMN html TEXT")
+    message_columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+    if "tools_json" not in message_columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN tools_json TEXT")
 
 
 def _seed_admin_user(conn: sqlite3.Connection) -> None:

@@ -921,3 +921,35 @@ def test_interactive_request_without_card_agent_gives_feedback(client, monkeypat
     assert [f for f in frames if f["type"] == "card"] == []
     tool_messages = [m for m in transcript[1]["messages"] if m["role"] == "tool"]
     assert "code-card" in tool_messages[0]["content"]
+
+
+def test_card_capability_is_anchored_in_system_prompt(client, monkeypatch):
+    """Kleine Modelle beantworten "kann ich das?" aus dem System-Prompt,
+    nicht aus den Tool-Beschreibungen - die Karten-Faehigkeit (inkl.
+    interaktiver Karten) und die Agenten stehen deshalb dort."""
+    repos.create_agent("websuche", "Websuche", "Recherchiert im Web.", "", "cloud/s")
+    repos.create_agent("code-card", "Layouter", "Schreibt Karten-HTML.", "", "cloud/c")
+
+    captured = {}
+
+    async def capture_chat(messages, tools=None, model=None):
+        captured["system"] = messages[0]["content"]
+        return {"role": "assistant", "content": "Ok."}
+
+    monkeypatch.setattr(graph_module.weaviate_client, "search", AsyncMock(return_value=[]))
+    monkeypatch.setattr(graph_module.litellm_client, "chat_message", capture_chat)
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "chat"})
+        ws.send_json({"type": "text_input", "text": "Karte fuer Fluege?"})
+        _collect_until_done(ws)
+
+    system = captured["system"]
+    assert "show_card" in system
+    assert "INTERAKTIVE" in system
+    assert "NIEMALS" in system
+    # Agenten stehen mit Beschreibung drin - code-card als interner
+    # Layouter aber nicht (den ruft der Orchestrator selbst)
+    assert "agent-websuche" in system
+    assert "agent-code-card" not in system

@@ -134,6 +134,15 @@ def _route_after_agent(state: OrchestratorState) -> str:
 
 def _initial_messages(state: OrchestratorState) -> list[dict]:
     system_prompt = state.get("system_prompt") or _SYSTEM_PROMPT
+    # Faehigkeiten gehoeren in den System-Prompt (v1.12.6): kleine Modelle
+    # beantworten "kann ich das?" aus ihrem Vorwissen und lesen die
+    # Tool-Beschreibungen dafuer nicht - sie lehnten z. B. interaktive
+    # Karten ab, obwohl show_card sie ausdruecklich anbietet.
+    executor = state.get("executor")
+    if executor is not None:
+        hint = executor.system_hint()
+        if hint:
+            system_prompt += f"\n\n{hint}"
     if state["context_chunks"]:
         context = "\n".join(f"- {chunk}" for chunk in state["context_chunks"])
         system_prompt += f"\n\nRelevanter Kontext:\n{context}"

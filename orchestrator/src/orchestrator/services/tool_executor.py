@@ -165,6 +165,37 @@ class ToolExecutor:
         self._card_requests: set[str] = set()
         self._card_generations = 0
 
+    def system_hint(self) -> str | None:
+        """Faehigkeiten-Absatz fuer den System-Prompt (v1.12.6). Kleine
+        Modelle beantworten "kann ich das?" aus ihrem Vorwissen ("ich habe
+        keine interaktive Oberflaeche") und schauen dafuer NICHT in die
+        Tool-Beschreibungen - deshalb steht die Karten-Faehigkeit zusaetzlich
+        im System-Prompt."""
+        if self._card_push is None:
+            return None
+        hint = (
+            "Deine Faehigkeiten in dieser App: Du kannst dem Nutzer mit dem "
+            "Tool show_card Karten anzeigen - auch INTERAKTIVE Mini-Tools "
+            "mit Formularen, Eingabefeldern, Buttons und Links (z. B. eine "
+            "Flugsuche-Karte, einen Rechner, eine Checkliste). Wuenscht der "
+            "Nutzer eine Karte, ein Widget oder ein kleines Werkzeug, rufe "
+            "show_card auf und beschreibe die gewuenschte Funktion im Feld "
+            "request - lehne solche Wuensche NIEMALS mit 'das kann ich "
+            "nicht' ab."
+        )
+        agents = repos.list_agents(enabled_only=True)
+        if agents:
+            agent_lines = ", ".join(
+                f"agent-{agent['slug']} ({agent['description']})" for agent in agents
+                if agent["slug"] != _CARD_AGENT_SLUG
+            )
+            if agent_lines:
+                hint += (
+                    " Fuer Spezialaufgaben stehen dir ausserdem diese "
+                    f"Agenten-Tools zur Verfuegung: {agent_lines}."
+                )
+        return hint
+
     async def list_openai_tools(self) -> list[dict]:
         tools: list[dict] = []
         if self._card_push is not None:

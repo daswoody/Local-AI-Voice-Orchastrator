@@ -8,6 +8,7 @@ Haupt-LLMs, das die Agent-Antwort als Tool-Ergebnis erhaelt."""
 
 import json
 import logging
+import re
 
 from ..config import settings
 from .litellm_client import litellm_client
@@ -20,13 +21,56 @@ async def run_agent(agent: dict, task: str) -> str:
     """Fuehrt die Aufgabe mit Modell/Prompt des Agenten aus und liefert die
     finale Text-Antwort. Fehler duerfen nach oben - der ToolExecutor packt
     sie in ein Tool-Ergebnis, das das Haupt-LLM dem Nutzer erklaeren kann."""
-    from .tool_executor import _ensure_object_schema
-
     messages: list[dict] = [
         {"role": "system", "content": agent["system_prompt"]
          or f"Du bist der Spezial-Agent '{agent['name']}'. Erledige die Aufgabe praezise."},
         {"role": "user", "content": task},
     ]
+
+    return await _run_loop(agent, messages)
+
+
+async def generate_card_html(agent: dict, card_type: str, title: str | None,
+                             data: dict) -> str:
+    """Layout-Auftrag an den Karten-Agenten (code-card, 4.12 v1.12.2):
+    show_card delegiert hierher, wenn das Haupt-LLM kein fertiges HTML
+    liefert. Liefert das reine HTML-Fragment (Markdown-Zaeune entfernt)
+    oder wirft, wenn der Agent kein brauchbares HTML produziert."""
+    task = (
+        "Schreibe ein eigenstaendiges HTML-Fragment fuer eine Chat-Karte "
+        "(kompakt, max. ca. 400px breit, Inline-CSS, lesbar auf dunklem UND "
+        "hellem Hintergrund).\n"
+        f"Gewuenschter Kartentyp/Kontext: {card_type}\n"
+        f"Titel: {title or '(keiner)'}\n"
+        f"Anzuzeigende Daten (JSON): {json.dumps(data, ensure_ascii=False)}\n"
+        "Stelle ALLE Daten huebsch dar. Antworte AUSSCHLIESSLICH mit dem "
+        "HTML-Fragment - keine Erklaerungen, kein Markdown, keine "
+        "<html>/<head>/<body>-Huelle."
+    )
+    messages = [
+        {"role": "system", "content": agent["system_prompt"]
+         or "Du bist ein praeziser HTML/CSS-Layouter fuer kleine UI-Karten."},
+        {"role": "user", "content": task},
+    ]
+    # Bewusst OHNE Tool-Schleife: Layout schreiben braucht keine Tools,
+    # und ohne Tools kann auch kein strikter Validator dazwischenfunken.
+    message = await litellm_client.chat_message(messages, model=agent["model"])
+    html = _strip_markdown_fences(message.get("content") or "")
+    if "<" not in html:
+        raise ValueError(f"Karten-Agent lieferte kein HTML: {html[:120]!r}")
+    return html
+
+
+def _strip_markdown_fences(text: str) -> str:
+    """Modelle packen Code trotz Verbot gern in ```html-Zaeune."""
+    match = re.search(r"```(?:html)?\s*(.*?)```", text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return text.strip()
+
+
+async def _run_loop(agent: dict, messages: list[dict]) -> str:
+    from .tool_executor import _ensure_object_schema
 
     for iteration in range(settings.tool_max_iterations + 1):
         tools = None

@@ -411,7 +411,7 @@ views.agents = async () => {
 
   return `
     <h1>Agenten</h1>
-    <p class="hint">Spezialisierte Helfer mit eigenem Modell und Prompt (4.16). Jeder aktive Agent erscheint der Haupt-KI als Tool <code>agent-&lt;id&gt;</code> - sie waehlt ihn anhand der Beschreibung aus. Damit lassen sich unpersoenliche Aufgaben (Websuche, Coding) gezielt an Cloud-Modelle delegieren und die Heim-KI entlasten. Agenten duerfen die Server-Tools (MCP) nutzen, aber keine Geraete-Tools oder Karten.</p>
+    <p class="hint">Spezialisierte Helfer mit eigenem Modell und Prompt (4.16). Jeder aktive Agent erscheint der Haupt-KI als Tool <code>agent-&lt;id&gt;</code> - sie waehlt ihn anhand der Beschreibung aus. Damit lassen sich unpersoenliche Aufgaben (Websuche, Coding) gezielt an Cloud-Modelle delegieren und die Heim-KI entlasten. Agenten duerfen die Server-Tools (MCP) nutzen, aber keine Geraete-Tools oder Karten. <strong>Reservierte ID <code>code-card</code>:</strong> Existiert ein aktiver Agent mit dieser ID, schreibt ER automatisch die HTML-Layouts fuer Karten ohne passendes Template - die Haupt-KI liefert nur Titel + Daten.</p>
     ${modelNotice}
     <section class="block">
       <table>
@@ -461,7 +461,7 @@ views.cards = async () => {
 
   return `
     <h1>Karten</h1>
-    <p class="hint">Plattformneutrale Layout-Templates (4.12). Speichern erhoeht die globale Version - die Apps holen sich Aenderungen beim naechsten Start, ohne App-Update. Neben Layout-JSON gehen jetzt auch <strong>HTML-Karten</strong>: ein HTML-Fragment mit {{data.*}}-Platzhaltern, gerendert in einer Sandbox (Web-UI/Windows; die Android-App zeigt bis zu ihrem Update die generic-Karte). Findet die KI keinen passenden Kartentyp, schreibt sie selbst eine HTML-Karte - z. B. ueber den Coding-Agenten.</p>
+    <p class="hint">Plattformneutrale Layout-Templates (4.12). Speichern erhoeht die globale Version - die Apps holen sich Aenderungen beim naechsten Start, ohne App-Update. Neben Layout-JSON gehen jetzt auch <strong>HTML-Karten</strong>: ein HTML-Fragment mit {{data.*}}-Platzhaltern, gerendert in einer Sandbox (Web-UI/Windows; die Android-App zeigt bis zu ihrem Update die generic-Karte). Findet die KI keinen passenden Kartentyp, uebernimmt der Agent <code>code-card</code> (unter "Agenten" anlegen) das Schreiben des HTML-Layouts automatisch.</p>
     <section class="block">
       <table>
         <thead><tr><th>Kartentyp</th><th>Format</th><th>Version</th><th></th></tr></thead>

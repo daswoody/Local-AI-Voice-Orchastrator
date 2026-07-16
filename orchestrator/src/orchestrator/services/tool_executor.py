@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 
 _SHOW_CARD_NAME = "show_card"
 _AGENT_PREFIX = "agent-"
+# Reservierter Agent-Slug (4.16/4.12): Existiert ein aktiver Agent
+# "code-card", schreibt ER die HTML-Layouts fuer Karten - show_card
+# delegiert automatisch, wenn das Haupt-LLM kein fertiges HTML liefert.
+# So muss ein kleines lokales Modell kein HTML in Tool-Argumente stopfen.
+_CARD_AGENT_SLUG = "code-card"
 
 
 def _ensure_object_schema(schema) -> dict:
@@ -39,11 +44,26 @@ def _ensure_object_schema(schema) -> dict:
     return normalized
 
 
+def _card_agent() -> dict | None:
+    agent = repos.get_agent(_CARD_AGENT_SLUG)
+    return agent if agent is not None and agent["enabled"] else None
+
+
 def _show_card_schema() -> dict:
     card_types = [entry["card_type"] for entry in repos.list_card_layouts(0)]
-    agent_hint = ""
-    if any(agent["slug"] == "coding" for agent in repos.list_agents(enabled_only=True)):
-        agent_hint = " (du kannst das HTML vom Tool agent-coding schreiben lassen)"
+    if _card_agent() is not None:
+        layout_hint = (
+            "Passt kein vorhandener Kartentyp, nutze card_type 'html' und "
+            "lege ALLE anzuzeigenden Werte in data - das eigentliche "
+            "HTML-Layout schreibt dann automatisch der Agent code-card, du "
+            "musst KEIN html-Feld liefern. "
+        )
+    else:
+        layout_hint = (
+            "Passt kein vorhandener Kartentyp, erstelle selbst ein Layout: "
+            "card_type 'html' und im Feld html ein eigenstaendiges "
+            "HTML-Fragment mit Inline-CSS. "
+        )
     return {
         "type": "function",
         "function": {
@@ -52,9 +72,7 @@ def _show_card_schema() -> dict:
                 "Zeigt dem Nutzer parallel zur Antwort eine Karte in der App an. "
                 "Nutze das fuer strukturierte Inhalte (Listen, Termine, Wetter, "
                 f"Zusammenfassungen). Verfuegbare Kartentypen: {', '.join(card_types)}. "
-                "Passt kein vorhandener Kartentyp, erstelle selbst ein Layout: "
-                "card_type 'html' und im Feld html ein eigenstaendiges HTML-Fragment "
-                f"mit Inline-CSS{agent_hint}. "
+                f"{layout_hint}"
                 "WICHTIG: Gib HTML ausschliesslich im html-Feld an und wiederhole "
                 "es NIE in deiner Text-Antwort - der Nutzer sieht die Karte direkt, "
                 "HTML im Antworttext wird als roher Code angezeigt. "
@@ -212,29 +230,72 @@ class ToolExecutor:
                 data = {"html": data}
             else:
                 data = {"body": data}
+        title = str(arguments["title"]) if arguments.get("title") else None
         # KI-geschriebene Ad-hoc-HTML-Karte (4.12 v1.12): HTML aus dem
         # html-Feld ODER aus data.html; der Typ ist dann immer "html"
         # (Alt-Clients rendern die generic-Karte, die Web-UI ein
         # sandboxed iframe).
         html = arguments.get("html") or data.get("html")
+        if not html and self._card_needs_generated_html(card_type, data):
+            # Kein fertiges HTML da, aber ohne HTML gaebe es nur eine leere
+            # Karte -> Layout vom Karten-Agenten (code-card) schreiben
+            # lassen (v1.12.2). Das entlastet das Haupt-LLM: es liefert nur
+            # Titel + Daten, der Agent (z. B. Cloud-Modell) baut das HTML.
+            html = await self._generate_card_html(card_type, title, data)
+            if html is None:
+                return json.dumps({
+                    "ok": False,
+                    "fehler": "Fuer diese Karte fehlt darstellbarer Inhalt: "
+                              "liefere das html-Feld mit einem HTML-Fragment "
+                              "(NUR dort, nicht im Antworttext) oder nutze "
+                              "data.headline/data.body. Hinweis fuer den "
+                              "Admin: Ein aktiver Agent 'code-card' wuerde "
+                              "solche Layouts automatisch schreiben.",
+                })
+            if html.startswith("Tool-Fehler"):
+                return html
         if html:
             card_type = "html"
             data = {**data, "html": str(html)}
-        elif card_type == "html":
-            # Klares Feedback statt leerer Karte: das LLM kann den Aufruf
-            # in der naechsten Agent-Runde korrigieren.
-            return json.dumps({
-                "ok": False,
-                "fehler": "card_type 'html' braucht das html-Feld mit dem "
-                          "HTML-Fragment - bitte erneut aufrufen und das HTML "
-                          "NUR dort (nicht im Antworttext) angeben",
-            })
         envelope = {
             "type": card_type,
             "version": 1,
             "data": data,
         }
-        if arguments.get("title"):
-            envelope["title"] = str(arguments["title"])
+        if title:
+            envelope["title"] = title
         await self._card_push(envelope)
         return json.dumps({"ok": True, "angezeigt": envelope["type"]})
+
+    @staticmethod
+    def _card_needs_generated_html(card_type: str, data: dict) -> bool:
+        """HTML muss erzeugt werden, wenn explizit 'html' angefordert wurde
+        oder der Kartentyp kein gespeichertes Layout hat UND die Daten auch
+        das generic-Fallback (headline/body) nicht fuellen wuerden."""
+        if card_type == "html":
+            return True
+        known_types = {entry["card_type"] for entry in repos.list_card_layouts(0)}
+        if card_type in known_types:
+            return False
+        return not (data.get("headline") or data.get("body"))
+
+    async def _generate_card_html(self, card_type: str, title: str | None,
+                                  data: dict) -> str | None:
+        """Laesst den Karten-Agenten (code-card) das HTML schreiben.
+        None -> kein Agent konfiguriert; "Tool-Fehler ..." -> Agent-Lauf
+        fehlgeschlagen (geht als korrigierbares Ergebnis ans Haupt-LLM)."""
+        agent = _card_agent()
+        if agent is None:
+            return None
+        from .agent_service import generate_card_html
+
+        agent_tool = f"{_AGENT_PREFIX}{agent['slug']}"
+        await self._notify_activity(True, agent_tool, "running")
+        try:
+            html = await generate_card_html(agent, card_type, title, data)
+        except Exception as exc:
+            logger.exception("Karten-Agent %s fehlgeschlagen", agent["slug"])
+            await self._notify_activity(True, agent_tool, "error")
+            return f"Tool-Fehler bei {agent_tool}: {str(exc)[:200]}"
+        await self._notify_activity(True, agent_tool, "done")
+        return html

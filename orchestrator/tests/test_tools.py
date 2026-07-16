@@ -390,10 +390,9 @@ def test_show_card_with_ai_written_html(client, monkeypatch):
     }]
 
 
-def test_show_card_description_offers_html_and_coding_agent(client):
-    """Die Tool-Beschreibung fordert das LLM auf, bei fehlendem Layout selbst
-    HTML zu schreiben - und verweist auf den Coding-Agenten, wenn es einen
-    gibt."""
+def test_show_card_description_adapts_to_card_agent(client):
+    """Ohne code-card-Agent soll das LLM selbst HTML liefern; mit Agent sagt
+    die Beschreibung: nur Daten liefern, das Layout schreibt code-card."""
     import asyncio as aio
 
     from orchestrator.services.tool_executor import ToolExecutor
@@ -408,12 +407,14 @@ def test_show_card_description_offers_html_and_coding_agent(client):
     show_card = next(t for t in tools if t["function"]["name"] == "show_card")
     assert "html" in show_card["function"]["parameters"]["properties"]
     assert "erstelle selbst ein Layout" in show_card["function"]["description"]
-    assert "agent-coding" not in show_card["function"]["description"]
+    assert "code-card" not in show_card["function"]["description"]
 
-    repos.create_agent("coding", "Coding", "Schreibt Code und HTML.", "", "cloud/code")
+    repos.create_agent("code-card", "Karten-Layouter", "Schreibt Karten-HTML.",
+                       "", "cloud/code")
     tools = loop.run_until_complete(executor.list_openai_tools())
     show_card = next(t for t in tools if t["function"]["name"] == "show_card")
-    assert "agent-coding" in show_card["function"]["description"]
+    assert "code-card" in show_card["function"]["description"]
+    assert "KEIN html-Feld" in show_card["function"]["description"]
 
 
 # ---- Tool-Aktivitaet im Verlauf (v1.12.1) ----------------------------------------
@@ -567,3 +568,135 @@ def test_show_card_html_without_html_gives_llm_feedback(client, monkeypatch):
     assert [f for f in frames if f["type"] == "card"] == []
     tool_messages = [m for m in transcript[1]["messages"] if m["role"] == "tool"]
     assert "html-Feld" in tool_messages[0]["content"]
+
+
+# ---- Karten-Agent code-card (v1.12.2) ----------------------------------------------
+
+
+def _card_agent_llm(monkeypatch, main_script: list[dict], agent_reply: str,
+                    agent_calls: list | None = None):
+    """Fake-LLM: Haupt-Modell (model=None) spielt das Skript, der
+    code-card-Agent (eigenes Modell) antwortet mit agent_reply."""
+    responses = list(main_script)
+
+    async def fake_chat(messages, tools=None, model=None):
+        if model == "cloud/card":
+            if agent_calls is not None:
+                agent_calls.append({"messages": [dict(m) for m in messages]})
+            return {"role": "assistant", "content": agent_reply}
+        return responses.pop(0)
+
+    monkeypatch.setattr(graph_module.weaviate_client, "search", AsyncMock(return_value=[]))
+    monkeypatch.setattr(graph_module.litellm_client, "chat_message", fake_chat)
+
+
+def test_card_agent_writes_html_when_llm_sends_only_data(client, monkeypatch):
+    """Der Praxisfall des Nutzers: kleines lokales Modell liefert nur Titel +
+    Daten (kein html-Feld) -> der code-card-Agent schreibt das Layout, die
+    Karte kommt fertig gerendert an (kein leerer Kasten mehr)."""
+    repos.create_agent("code-card", "Karten-Layouter", "Schreibt Karten-HTML.",
+                       "", "cloud/card")
+    agent_calls = []
+    _card_agent_llm(monkeypatch, [
+        _tool_call("show_card", {"card_type": "html", "title": "Uhrzeit Tokio",
+                                 "data": {"zeit": "19:03", "zone": "JST"}}),
+        {"role": "assistant", "content": "Hier ist deine Karte!"},
+    ], agent_reply="```html\n<div><b>19:03</b> JST</div>\n```", agent_calls=agent_calls)
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "chat"})
+        ws.send_json({"type": "text_input", "text": "Uhrzeit in Tokio als Karte"})
+        frames = _collect_until_done(ws)
+
+    card = next(f for f in frames if f["type"] == "card")["card"]
+    assert card["type"] == "html"
+    # Markdown-Zaeune sind entfernt, die Daten stecken im HTML
+    assert card["data"]["html"] == "<div><b>19:03</b> JST</div>"
+    assert card["title"] == "Uhrzeit Tokio"
+
+    # Der Agent hat Titel + Daten im Auftrag gesehen
+    task = agent_calls[0]["messages"][1]["content"]
+    assert "Uhrzeit Tokio" in task
+    assert "19:03" in task
+
+    # Der Nutzer sieht die Delegation als Aktivitaets-Chip
+    activity = [f for f in frames if f["type"] == "tool_activity"]
+    assert {"type": "tool_activity", "tool": "agent-code-card", "status": "running"} in activity
+    assert {"type": "tool_activity", "tool": "agent-code-card", "status": "done"} in activity
+
+
+def test_card_agent_kicks_in_for_unknown_type_without_generic_data(client, monkeypatch):
+    """Unbekannter Kartentyp ohne headline/body wuerde als leerer Kasten
+    enden -> auch dann schreibt code-card das Layout."""
+    repos.create_agent("code-card", "Karten-Layouter", "Schreibt Karten-HTML.",
+                       "", "cloud/card")
+    _card_agent_llm(monkeypatch, [
+        _tool_call("show_card", {"card_type": "uhrzeit_tokio",
+                                 "data": {"zeit": "19:03"}}),
+        {"role": "assistant", "content": "Bitte sehr."},
+    ], agent_reply="<p>19:03</p>")
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "chat"})
+        ws.send_json({"type": "text_input", "text": "Uhrzeit als Karte"})
+        frames = _collect_until_done(ws)
+
+    card = next(f for f in frames if f["type"] == "card")["card"]
+    assert card["type"] == "html"
+    assert card["data"]["html"] == "<p>19:03</p>"
+
+
+def test_unknown_type_with_generic_data_needs_no_agent(client, monkeypatch):
+    """Unbekannter Typ MIT headline/body rendert ueber das generic-Fallback -
+    keine Delegation, Karte geht unveraendert raus."""
+    repos.create_agent("code-card", "Karten-Layouter", "Schreibt Karten-HTML.",
+                       "", "cloud/card")
+    _card_agent_llm(monkeypatch, [
+        _tool_call("show_card", {"card_type": "hinweis",
+                                 "data": {"headline": "Info", "body": "Alles ok"}}),
+        {"role": "assistant", "content": "Bitte sehr."},
+    ], agent_reply="DARF NICHT GENUTZT WERDEN")
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "chat"})
+        ws.send_json({"type": "text_input", "text": "Karte"})
+        frames = _collect_until_done(ws)
+
+    card = next(f for f in frames if f["type"] == "card")["card"]
+    assert card["type"] == "hinweis"
+    assert "html" not in card["data"]
+
+
+def test_card_agent_failure_is_correctable_tool_error(client, monkeypatch):
+    """Liefert der Karten-Agent kein HTML (oder faellt aus), bekommt das
+    Haupt-LLM einen Tool-Fehler statt einer leeren Karte."""
+    repos.create_agent("code-card", "Karten-Layouter", "Schreibt Karten-HTML.",
+                       "", "cloud/card")
+    transcript = []
+
+    async def fake_chat(messages, tools=None, model=None):
+        if model == "cloud/card":
+            return {"role": "assistant", "content": "Ich kann gerade nicht."}
+        transcript.append([dict(m) for m in messages])
+        if len(transcript) == 1:
+            return _tool_call("show_card", {"card_type": "html", "data": {"x": 1}})
+        return {"role": "assistant", "content": "Karte klappt gerade nicht."}
+
+    monkeypatch.setattr(graph_module.weaviate_client, "search", AsyncMock(return_value=[]))
+    monkeypatch.setattr(graph_module.litellm_client, "chat_message", fake_chat)
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "chat"})
+        ws.send_json({"type": "text_input", "text": "Karte"})
+        frames = _collect_until_done(ws)
+
+    assert [f for f in frames if f["type"] == "card"] == []
+    tool_messages = [m for m in transcript[-1] if m["role"] == "tool"]
+    assert "Tool-Fehler bei agent-code-card" in tool_messages[0]["content"]
+    statuses = [f["status"] for f in frames if f["type"] == "tool_activity"
+                and f["tool"] == "agent-code-card"]
+    assert statuses == ["running", "error"]

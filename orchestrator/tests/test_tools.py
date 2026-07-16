@@ -700,3 +700,74 @@ def test_card_agent_failure_is_correctable_tool_error(client, monkeypatch):
     statuses = [f["status"] for f in frames if f["type"] == "tool_activity"
                 and f["tool"] == "agent-code-card"]
     assert statuses == ["running", "error"]
+
+
+# ---- Leere-Karten-Nachschlag + Karten-Spam (v1.12.3) --------------------------------
+
+
+def test_card_agent_kicks_in_for_generic_without_headline(client, monkeypatch):
+    """Praxisfall aus dem Chat-Screenshot: Modell waehlt card_type generic,
+    legt aber eigene Keys statt headline/body in data -> vorher leerer
+    Kasten, jetzt schreibt code-card das Layout."""
+    repos.create_agent("code-card", "Karten-Layouter", "Schreibt Karten-HTML.",
+                       "", "cloud/card")
+    _card_agent_llm(monkeypatch, [
+        _tool_call("show_card", {"card_type": "generic", "title": "Aktuelle Zeit in Tokio",
+                                 "data": {"zeit": "20:15", "zone": "Asia/Tokyo"}}),
+        {"role": "assistant", "content": "Bitte sehr."},
+    ], agent_reply="<p>20:15 (Asia/Tokyo)</p>")
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "chat"})
+        ws.send_json({"type": "text_input", "text": "Uhrzeit als Karte"})
+        frames = _collect_until_done(ws)
+
+    card = next(f for f in frames if f["type"] == "card")["card"]
+    assert card["type"] == "html"
+    assert card["data"]["html"] == "<p>20:15 (Asia/Tokyo)</p>"
+
+
+def test_without_card_agent_data_is_synthesized_into_generic(client, monkeypatch):
+    """Ohne code-card-Agent darf trotzdem keine leere Karte ankommen: die
+    data-Keys werden als headline/body aufbereitet."""
+    _scripted_llm(monkeypatch, [
+        _tool_call("show_card", {"card_type": "uhrzeit", "title": "Uhrzeit Tokio",
+                                 "data": {"zeit": "20:15", "zone": "Asia/Tokyo"}}),
+        {"role": "assistant", "content": "Bitte sehr."},
+    ])
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "chat"})
+        ws.send_json({"type": "text_input", "text": "Uhrzeit als Karte"})
+        frames = _collect_until_done(ws)
+
+    card = next(f for f in frames if f["type"] == "card")["card"]
+    assert card["type"] == "generic"
+    assert card["data"]["headline"] == "Uhrzeit Tokio"
+    assert "zeit: 20:15" in card["data"]["body"]
+    assert "zone: Asia/Tokyo" in card["data"]["body"]
+
+
+def test_identical_card_is_pushed_only_once_per_turn(client, monkeypatch):
+    """Praxisfall: Modelle rufen show_card gern 2-3x mit denselben Daten auf
+    -> nur die erste Karte geht raus, die Wiederholung bekommt einen Hinweis."""
+    arguments = {"card_type": "generic", "title": "Info",
+                 "data": {"headline": "Hallo", "body": "Welt"}}
+    transcript = []
+    _scripted_llm(monkeypatch, [
+        _tool_call("show_card", arguments, call_id="call_1"),
+        _tool_call("show_card", arguments, call_id="call_2"),
+        {"role": "assistant", "content": "Karte ist da."},
+    ], transcript)
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "chat"})
+        ws.send_json({"type": "text_input", "text": "Karte bitte"})
+        frames = _collect_until_done(ws)
+
+    assert len([f for f in frames if f["type"] == "card"]) == 1
+    tool_messages = [m for m in transcript[2]["messages"] if m["role"] == "tool"]
+    assert "bereits angezeigt" in tool_messages[-1]["content"]

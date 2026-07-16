@@ -18,14 +18,43 @@
 
   const html = $derived(htmlFor(card));
   const root = $derived(layoutFor(card.type));
-  const frameHeight = $derived.by(() => {
-    const raw = Number(card.data?.height);
-    return Number.isFinite(raw) && raw > 0 ? Math.min(raw, 800) : 320;
+
+  // Hoehe an den Inhalt anpassen: Ohne same-origin kann der Parent nicht in
+  // das iframe schauen - deshalb meldet ein injiziertes Mini-Script die
+  // Inhaltshoehe per postMessage (sandbox erlaubt allow-scripts).
+  let frameHeight = $state(60);
+  let frame: HTMLIFrameElement | undefined = $state();
+
+  $effect(() => {
+    const requested = Number(card.data?.height);
+    if (Number.isFinite(requested) && requested > 0) {
+      frameHeight = Math.min(requested, 800);
+      return;
+    }
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== frame?.contentWindow) return;
+      const height = Number((event.data as { heimaiCardHeight?: unknown })?.heimaiCardHeight);
+      if (Number.isFinite(height) && height > 0) {
+        frameHeight = Math.min(Math.max(Math.ceil(height), 24), 800);
+      }
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
   });
+
+  // Wrapper um das Karten-HTML: transparenter Hintergrund + App-Textfarbe
+  // (die UI ist dunkel), dazu der Hoehen-Reporter.
   const srcdoc = $derived(
     html === null
       ? ""
-      : `<!doctype html><meta charset="utf-8"><style>body{margin:0;font-family:system-ui,sans-serif;color-scheme:light dark}</style>${html}`,
+      : `<!doctype html><meta charset="utf-8"><style>` +
+        `html,body{margin:0;background:transparent}` +
+        `body{font-family:system-ui,sans-serif;color:#e8edf2;line-height:1.45}` +
+        `img{max-width:100%}` +
+        `</style>${html}<script>` +
+        `const send=()=>parent.postMessage({heimaiCardHeight:document.body.scrollHeight},"*");` +
+        `addEventListener("load",send);new ResizeObserver(send).observe(document.body);send();` +
+        `<\/script>`,
   );
 </script>
 
@@ -33,6 +62,7 @@
   {#if card.title}<div class="title">{card.title}</div>{/if}
   {#if html !== null}
     <iframe
+      bind:this={frame}
       class="html-card"
       sandbox="allow-scripts"
       srcdoc={srcdoc}
@@ -62,5 +92,6 @@
     width: 100%;
     display: block;
     background: transparent;
+    color-scheme: normal;
   }
 </style>

@@ -49,6 +49,17 @@ def _card_agent() -> dict | None:
     return agent if agent is not None and agent["enabled"] else None
 
 
+def _synthesize_generic_data(title: str | None, data: dict) -> dict:
+    """Letzte Verteidigungslinie ohne code-card-Agent: beliebige data-Keys
+    als headline/body aufbereiten, damit die generic-Karte nie leer ist."""
+    lines = []
+    for key, value in data.items():
+        if isinstance(value, (dict, list)):
+            value = json.dumps(value, ensure_ascii=False)
+        lines.append(f"{key}: {value}")
+    return {"headline": title or "Info", "body": "\n".join(lines)}
+
+
 def _show_card_schema() -> dict:
     card_types = [entry["card_type"] for entry in repos.list_card_layouts(0)]
     if _card_agent() is not None:
@@ -138,6 +149,10 @@ class ToolExecutor:
         self._card_push = card_push
         self._on_tool_start = on_tool_start
         self._on_activity = on_activity
+        # Ein Executor lebt genau einen Turn: bereits gepushte Karten merken,
+        # damit Modell-Wiederholungen (dasselbe show_card 2-3x) nicht den
+        # Chat mit identischen Karten fluten.
+        self._pushed_cards: list[str] = []
 
     async def list_openai_tools(self) -> list[dict]:
         tools: list[dict] = []
@@ -243,16 +258,23 @@ class ToolExecutor:
             # Titel + Daten, der Agent (z. B. Cloud-Modell) baut das HTML.
             html = await self._generate_card_html(card_type, title, data)
             if html is None:
-                return json.dumps({
-                    "ok": False,
-                    "fehler": "Fuer diese Karte fehlt darstellbarer Inhalt: "
-                              "liefere das html-Feld mit einem HTML-Fragment "
-                              "(NUR dort, nicht im Antworttext) oder nutze "
-                              "data.headline/data.body. Hinweis fuer den "
-                              "Admin: Ein aktiver Agent 'code-card' wuerde "
-                              "solche Layouts automatisch schreiben.",
-                })
-            if html.startswith("Tool-Fehler"):
+                # Kein code-card-Agent: statt leerer Karte (oder Fehler-
+                # Pingpong mit dem Modell) die Daten selbst als generic-
+                # Karte aufbereiten - eine Karte kommt IMMER an (v1.12.3).
+                if not data:
+                    return json.dumps({
+                        "ok": False,
+                        "fehler": "Fuer diese Karte fehlt jeder Inhalt: "
+                                  "liefere die anzuzeigenden Werte in data "
+                                  "oder ein html-Feld mit einem HTML-Fragment "
+                                  "(NUR dort, nicht im Antworttext). Hinweis "
+                                  "fuer den Admin: Ein aktiver Agent "
+                                  "'code-card' wuerde Layouts automatisch "
+                                  "schreiben.",
+                    })
+                card_type = "generic"
+                data = _synthesize_generic_data(title, data)
+            elif html.startswith("Tool-Fehler"):
                 return html
         if html:
             card_type = "html"
@@ -264,20 +286,32 @@ class ToolExecutor:
         }
         if title:
             envelope["title"] = title
+
+        # Identische Karte in diesem Turn schon gezeigt? Nicht nochmal
+        # pushen - manche Modelle rufen show_card mehrfach hintereinander.
+        fingerprint = json.dumps(envelope, sort_keys=True, ensure_ascii=False)
+        if fingerprint in self._pushed_cards:
+            return json.dumps({
+                "ok": True,
+                "hinweis": "Diese Karte wird bereits angezeigt - show_card "
+                           "nicht erneut mit denselben Daten aufrufen.",
+            })
+        self._pushed_cards.append(fingerprint)
+
         await self._card_push(envelope)
         return json.dumps({"ok": True, "angezeigt": envelope["type"]})
 
     @staticmethod
     def _card_needs_generated_html(card_type: str, data: dict) -> bool:
-        """HTML muss erzeugt werden, wenn explizit 'html' angefordert wurde
-        oder der Kartentyp kein gespeichertes Layout hat UND die Daten auch
-        das generic-Fallback (headline/body) nicht fuellen wuerden."""
+        """HTML muss erzeugt werden, wenn explizit 'html' angefordert wurde -
+        oder die Karte sonst leer bliebe: unbekannter Typ bzw. generic ohne
+        headline/body (haeufiger Modell-Fehlgriff: generic + eigene Keys)."""
         if card_type == "html":
             return True
-        known_types = {entry["card_type"] for entry in repos.list_card_layouts(0)}
-        if card_type in known_types:
+        if data.get("headline") or data.get("body"):
             return False
-        return not (data.get("headline") or data.get("body"))
+        known_types = {entry["card_type"] for entry in repos.list_card_layouts(0)}
+        return card_type == "generic" or card_type not in known_types
 
     async def _generate_card_html(self, card_type: str, title: str | None,
                                   data: dict) -> str | None:

@@ -38,14 +38,16 @@ async def generate_card_html(agent: dict, card_type: str, title: str | None,
     oder wirft, wenn der Agent kein brauchbares HTML produziert."""
     task = (
         "Schreibe ein eigenstaendiges HTML-Fragment fuer eine Chat-Karte "
-        "(kompakt, max. ca. 400px breit, Inline-CSS, lesbar auf dunklem UND "
-        "hellem Hintergrund).\n"
+        "(kompakt, max. ca. 400px breit, Inline-CSS).\n"
         f"Gewuenschter Kartentyp/Kontext: {card_type}\n"
         f"Titel: {title or '(keiner)'}\n"
         f"Anzuzeigende Daten (JSON): {json.dumps(data, ensure_ascii=False)}\n"
-        "Stelle ALLE Daten huebsch dar. Antworte AUSSCHLIESSLICH mit dem "
-        "HTML-Fragment - keine Erklaerungen, kein Markdown, keine "
-        "<html>/<head>/<body>-Huelle."
+        "Regeln: Die App zeigt die Karte auf DUNKLEM Hintergrund in einem "
+        "eigenen Rahmen - lass den Hintergrund transparent (kein deckendes "
+        "background), nutze helle Textfarben und wiederhole den Titel NICHT "
+        "(er steht bereits ueber der Karte). Stelle ALLE Daten huebsch dar. "
+        "Antworte AUSSCHLIESSLICH mit dem HTML-Fragment - keine "
+        "Erklaerungen, kein Markdown, keine <html>/<head>/<body>-Huelle."
     )
     messages = [
         {"role": "system", "content": agent["system_prompt"]

@@ -31,17 +31,28 @@ async def run_agent(agent: dict, task: str) -> str:
 
 
 async def generate_card_html(agent: dict, card_type: str, title: str | None,
-                             data: dict) -> str:
+                             data: dict, request: str = "") -> str:
     """Layout-Auftrag an den Karten-Agenten (code-card, 4.12 v1.12.2):
     show_card delegiert hierher, wenn das Haupt-LLM kein fertiges HTML
-    liefert. Liefert das reine HTML-Fragment (Markdown-Zaeune entfernt)
-    oder wirft, wenn der Agent kein brauchbares HTML produziert."""
+    liefert. `request` beschreibt bei interaktiven Karten die gewuenschte
+    Funktion (v1.12.5). Liefert das reine HTML-Fragment (Markdown-Zaeune
+    entfernt) oder wirft, wenn der Agent kein brauchbares HTML produziert."""
     task = (
         "Schreibe ein eigenstaendiges HTML-Fragment fuer eine Chat-Karte "
         "(kompakt, max. ca. 400px breit, Inline-CSS).\n"
         f"Gewuenschter Kartentyp/Kontext: {card_type}\n"
         f"Titel: {title or '(keiner)'}\n"
+        f"Auftrag (was die Karte zeigen/koennen soll): "
+        f"{request or '(keiner - stelle einfach die Daten dar)'}\n"
         f"Anzuzeigende Daten (JSON): {json.dumps(data, ensure_ascii=False)}\n"
+        "Interaktivitaet: erlaubt und erwuenscht, wenn der Auftrag es "
+        "verlangt. Inline-<script>, Formulare, Eingabefelder und Buttons "
+        "funktionieren (die Karte laeuft in einer Browser-Sandbox). Externe "
+        "Aktionen als Link oder window.open mit fertig zusammengebauter URL "
+        "(z. B. eine Google-Flights-/Bahn-Such-URL aus den Eingaben) - sie "
+        "oeffnen in einem neuen Browser-Tab. VERBOTEN: externe Ressourcen "
+        "(CDN-Scripts, fremde Bilder, iframes) und fetch/XHR - die Sandbox "
+        "hat keinen verlaesslichen Netzzugriff.\n"
         "Regeln: Die App zeigt die Karte auf DUNKLEM Hintergrund in einem "
         "eigenen Rahmen - lass den Hintergrund transparent (kein deckendes "
         "background), nutze helle Textfarben und wiederhole den Titel NICHT "

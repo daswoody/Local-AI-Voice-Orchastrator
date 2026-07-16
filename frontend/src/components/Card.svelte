@@ -70,9 +70,13 @@
 <div class="card">
   {#if card.title}<div class="title">{card.title}</div>{/if}
   {#if html !== null}
+    <!-- Interaktive Karten (v1.12.5): Scripts + Formulare laufen in der
+         Sandbox; Links/window.open oeffnen einen normalen Browser-Tab
+         (popups-to-escape, sonst waere die Zielseite mitgesandboxt).
+         Weiterhin KEIN allow-same-origin: kein Zugriff auf Token/Storage. -->
     <iframe
       class="html-card"
-      sandbox="allow-scripts"
+      sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
       srcdoc={srcdoc}
       style:height={`${frameHeight}px`}
       title={card.title ?? "Karte"}

@@ -64,16 +64,18 @@ def _show_card_schema() -> dict:
     card_types = [entry["card_type"] for entry in repos.list_card_layouts(0)]
     if _card_agent() is not None:
         layout_hint = (
-            "Passt kein vorhandener Kartentyp, nutze card_type 'html' und "
-            "lege ALLE anzuzeigenden Werte in data - das eigentliche "
-            "HTML-Layout schreibt dann automatisch der Agent code-card, du "
-            "musst KEIN html-Feld liefern. "
+            "Passt kein vorhandener Kartentyp, nutze card_type 'html': lege "
+            "anzuzeigende Werte in data und beschreibe im Feld request, was "
+            "die Karte zeigen oder KOENNEN soll - das HTML-Layout inklusive "
+            "Interaktivitaet baut automatisch der Agent code-card, du musst "
+            "KEIN html-Feld liefern. "
         )
     else:
         layout_hint = (
             "Passt kein vorhandener Kartentyp, erstelle selbst ein Layout: "
             "card_type 'html' und im Feld html ein eigenstaendiges "
-            "HTML-Fragment mit Inline-CSS. "
+            "HTML-Fragment mit Inline-CSS (Inline-JavaScript erlaubt, keine "
+            "externen Ressourcen). "
         )
     return {
         "type": "function",
@@ -82,7 +84,13 @@ def _show_card_schema() -> dict:
             "description": (
                 "Zeigt dem Nutzer parallel zur Antwort eine Karte in der App an. "
                 "Nutze das fuer strukturierte Inhalte (Listen, Termine, Wetter, "
-                f"Zusammenfassungen). Verfuegbare Kartentypen: {', '.join(card_types)}. "
+                "Zusammenfassungen) - und auch fuer INTERAKTIVE Mini-Tools: "
+                "Karten koennen Formulare, Eingabefelder, Buttons und Links "
+                "enthalten (z. B. eine Flugsuche-Karte, die eine fertige "
+                "Such-URL im Browser oeffnet, einen Rechner, eine Checkliste). "
+                "Sage also NIE, dass du keine interaktiven Karten kannst - "
+                "beschreibe die gewuenschte Funktion im Feld request. "
+                f"Verfuegbare Kartentypen: {', '.join(card_types)}. "
                 f"{layout_hint}"
                 "WICHTIG: Gib HTML ausschliesslich im html-Feld an und wiederhole "
                 "es NIE in deiner Text-Antwort - der Nutzer sieht die Karte direkt, "
@@ -96,6 +104,7 @@ def _show_card_schema() -> dict:
                     "card_type": {"type": "string", "description": "Kartentyp, z. B. generic oder html"},
                     "title": {"type": "string", "description": "Optionaler Titel der Karte"},
                     "data": {"type": "object", "description": "Frei strukturierte Daten passend zum Kartentyp"},
+                    "request": {"type": "string", "description": "Was die Karte zeigen oder KOENNEN soll - fuer interaktive Karten (Formulare, Such-Links, Mini-Tools) hier die gewuenschte Funktion beschreiben"},
                     "html": {"type": "string", "description": "Nur bei card_type 'html': selbst geschriebenes HTML-Fragment fuer die Karte"},
                 },
                 "required": ["card_type", "data"],
@@ -270,13 +279,18 @@ class ToolExecutor:
         # html-Feld ODER aus data.html; der Typ ist dann immer "html"
         # (Alt-Clients rendern die generic-Karte, die Web-UI ein
         # sandboxed iframe).
+        # Funktionsbeschreibung fuer interaktive Karten (v1.12.5): "Karte,
+        # in der ich Fluege raussuchen kann" -> der Auftrag geht als
+        # Design-Brief an code-card.
+        request = str(arguments.get("request") or "").strip()
         html = arguments.get("html") or data.get("html")
-        if not html and self._card_needs_generated_html(card_type, data):
-            if not data:
+        if not html and (request or self._card_needs_generated_html(card_type, data)):
+            if not data and not request:
                 return json.dumps({
                     "ok": False,
                     "fehler": "Fuer diese Karte fehlt jeder Inhalt: liefere "
-                              "die anzuzeigenden Werte in data oder ein "
+                              "die anzuzeigenden Werte in data, eine "
+                              "Funktionsbeschreibung in request oder ein "
                               "html-Feld mit einem HTML-Fragment (NUR dort, "
                               "nicht im Antworttext).",
                 })
@@ -288,13 +302,22 @@ class ToolExecutor:
             # aufrufen, sollen nicht Agent-Lauf um Agent-Lauf ausloesen.
             if self._card_generations < self._MAX_CARD_GENERATIONS_PER_TURN:
                 self._card_generations += 1
-                html = await self._generate_card_html(card_type, title, data)
+                html = await self._generate_card_html(card_type, title, data, request)
                 if html is not None and html.startswith("Tool-Fehler"):
                     return html
             if html is None:
                 # Kein code-card-Agent (oder Limit erreicht): Daten selbst
                 # als generic-Karte aufbereiten - eine Karte kommt IMMER an
                 # (v1.12.3), nur eben schlichter.
+                if not data:
+                    return json.dumps({
+                        "ok": False,
+                        "fehler": "Interaktive Karten brauchen den Agenten "
+                                  "'code-card' (Admin > Agenten) oder ein "
+                                  "selbst geschriebenes html-Feld - beides "
+                                  "fehlt. Erklaere dem Nutzer kurz, dass der "
+                                  "Karten-Agent nicht konfiguriert ist.",
+                    })
                 card_type = "generic"
                 data = _synthesize_generic_data(title, data)
         if html:
@@ -331,7 +354,7 @@ class ToolExecutor:
         return card_type == "generic" or card_type not in known_types
 
     async def _generate_card_html(self, card_type: str, title: str | None,
-                                  data: dict) -> str | None:
+                                  data: dict, request: str = "") -> str | None:
         """Laesst den Karten-Agenten (code-card) das HTML schreiben.
         None -> kein Agent konfiguriert; "Tool-Fehler ..." -> Agent-Lauf
         fehlgeschlagen (geht als korrigierbares Ergebnis ans Haupt-LLM)."""
@@ -343,7 +366,7 @@ class ToolExecutor:
         agent_tool = f"{_AGENT_PREFIX}{agent['slug']}"
         await self._notify_activity(True, agent_tool, "running")
         try:
-            html = await generate_card_html(agent, card_type, title, data)
+            html = await generate_card_html(agent, card_type, title, data, request)
         except Exception as exc:
             logger.exception("Karten-Agent %s fehlgeschlagen", agent["slug"])
             await self._notify_activity(True, agent_tool, "error")

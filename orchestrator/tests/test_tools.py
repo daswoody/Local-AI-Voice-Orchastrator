@@ -848,3 +848,76 @@ def test_show_card_success_result_warns_against_repeating_content(client, monkey
 
     tool_messages = [m for m in transcript[1]["messages"] if m["role"] == "tool"]
     assert "Wiederhole" in tool_messages[0]["content"]
+
+
+# ---- Interaktive Karten per request-Feld (v1.12.5) ----------------------------------
+
+
+def test_interactive_card_request_goes_to_card_agent(client, monkeypatch):
+    """"Karte, in der ich Fluege raussuchen kann": das Haupt-LLM liefert nur
+    den Auftrag im request-Feld (data darf leer sein) - code-card baut das
+    interaktive Layout."""
+    repos.create_agent("code-card", "Karten-Layouter", "Schreibt Karten-HTML.",
+                       "", "cloud/card")
+    agent_calls = []
+    _card_agent_llm(monkeypatch, [
+        _tool_call("show_card", {
+            "card_type": "html", "title": "Flugsuche Schweden", "data": {},
+            "request": "Formular mit Von/Nach/Datum, Button oeffnet eine Google-Flights-Such-URL",
+        }),
+        {"role": "assistant", "content": "Hier ist deine Flugsuche-Karte."},
+    ], agent_reply="<form><input id='von'><button>Suchen</button></form>",
+       agent_calls=agent_calls)
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "chat"})
+        ws.send_json({"type": "text_input", "text": "Karte fuer Fluege nach Schweden"})
+        frames = _collect_until_done(ws)
+
+    card = next(f for f in frames if f["type"] == "card")["card"]
+    assert card["type"] == "html"
+    assert "<form>" in card["data"]["html"]
+
+    task = agent_calls[0]["messages"][1]["content"]
+    assert "Google-Flights-Such-URL" in task
+    assert "Interaktivitaet" in task
+
+
+def test_show_card_offers_interactive_cards_in_description(client):
+    """Das Modell soll nie wieder behaupten, es koenne keine interaktiven
+    Karten - die Tool-Beschreibung sagt es ihm ausdruecklich."""
+    import asyncio as aio
+
+    from orchestrator.services.tool_executor import ToolExecutor
+
+    async def card_push(envelope):
+        pass
+
+    loop = aio.get_event_loop_policy().new_event_loop()
+    executor = ToolExecutor(card_push=card_push)
+    tools = loop.run_until_complete(executor.list_openai_tools())
+    show_card = next(t for t in tools if t["function"]["name"] == "show_card")
+    assert "INTERAKTIVE" in show_card["function"]["description"]
+    assert "request" in show_card["function"]["parameters"]["properties"]
+
+
+def test_interactive_request_without_card_agent_gives_feedback(client, monkeypatch):
+    """Ohne code-card-Agent und ohne Daten kann keine interaktive Karte
+    entstehen - das LLM bekommt eine erklaerbare Absage statt Stille."""
+    transcript = []
+    _scripted_llm(monkeypatch, [
+        _tool_call("show_card", {"card_type": "html", "data": {},
+                                 "request": "Flugsuche-Formular"}),
+        {"role": "assistant", "content": "Dafuer fehlt mir gerade der Karten-Agent."},
+    ], transcript)
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "chat"})
+        ws.send_json({"type": "text_input", "text": "Flugsuche-Karte"})
+        frames = _collect_until_done(ws)
+
+    assert [f for f in frames if f["type"] == "card"] == []
+    tool_messages = [m for m in transcript[1]["messages"] if m["role"] == "tool"]
+    assert "code-card" in tool_messages[0]["content"]

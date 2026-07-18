@@ -69,13 +69,20 @@ def create_user(payload: UserCreate) -> dict:
 @router.put("/users/{user_id}")
 def update_user(user_id: int, payload: UserUpdate) -> dict:
     fields: dict[str, Any] = payload.model_dump(exclude_unset=True)
+    password_changed = False
     if "password" in fields:
         password = fields.pop("password")
         if password:
             fields["password_hash"] = hash_password(password)
+            password_changed = True
     user = repos.update_user(user_id, fields)
     if user is None:
         raise HTTPException(status_code=404, detail="User nicht gefunden")
+    if password_changed:
+        # Security First (Abschnitt 8): Passwort-Reset macht alle
+        # Geraete-Tokens des Users ungueltig - die Geraete melden sich mit
+        # dem neuen Passwort neu an.
+        repos.delete_device_tokens_for_user(user["username"])
     return user
 
 
@@ -86,6 +93,24 @@ def delete_user(user_id: int) -> None:
             raise HTTPException(status_code=404, detail="User nicht gefunden")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+# ---- Geraete (v1.13.1) -----------------------------------------------------------
+#
+# Jeder Login erzeugt ein langlebiges Geraete-Token; hier sieht der Admin
+# alle angemeldeten Geraete (wer, welches Geraet, zuletzt gesehen) und kann
+# einzelne abmelden (Token-Widerruf, z. B. Handy verloren).
+
+
+@router.get("/devices")
+def list_devices() -> list[dict]:
+    return repos.list_device_tokens()
+
+
+@router.delete("/devices/{token_id}", status_code=204)
+def revoke_device(token_id: int) -> None:
+    if not repos.delete_device_token(token_id):
+        raise HTTPException(status_code=404, detail="Geraet nicht gefunden")
 
 
 # ---- Charakter -----------------------------------------------------------------

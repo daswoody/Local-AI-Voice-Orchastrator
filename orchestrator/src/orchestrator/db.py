@@ -28,6 +28,21 @@ CREATE TABLE IF NOT EXISTS app_settings (
     value TEXT NOT NULL
 );
 
+-- Geraete-Tokens (v1.13.1): Login erzeugt pro Geraet ein langlebiges,
+-- serverseitig gespeichertes Token (nur der Hash liegt in der DB).
+-- Vorteile gegenueber Langzeit-JWTs im Heim-Setup: einzeln widerrufbar
+-- (Admin-Panel), Rechte werden pro Request frisch aus users gelesen,
+-- "zuletzt gesehen" pro Geraet sichtbar. Alt-JWTs bleiben bis zu ihrem
+-- Ablauf als Fallback gueltig.
+CREATE TABLE IF NOT EXISTS device_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash TEXT UNIQUE NOT NULL,
+    username TEXT NOT NULL,
+    device_name TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS voices (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,

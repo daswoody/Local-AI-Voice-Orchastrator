@@ -110,3 +110,17 @@ Persistenz: Der Endzustand des Turns hängt als `tools`-Liste
 (`[{tool, status}]`) an der Assistant-Message in
 `GET /v1/conversations/{id}` — der Verlauf zeigt damit dieselben Chips
 wie der Live-Turn.
+
+## 7. Auth: Geräte-Tokens + strikte Token-Prüfung am WebSocket (v1.13.1)
+
+- `POST /v1/auth/login` liefert jetzt ein **langlebiges Geräte-Token**
+  (Prefix `hda_`, kein Ablauf) statt eines 7-Tage-JWT. Für Clients ändert
+  sich nichts an der Nutzung (Bearer-Header wie bisher); alte JWTs bleiben
+  bis zu ihrem Ablauf gültig. Tokens sind im Admin-Panel pro Gerät
+  widerrufbar; ein Passwort-Reset widerruft alle Geräte des Nutzers.
+- **WebSocket:** Ein mitgeschicktes, aber ungültiges/widerrufenes Token
+  führt jetzt zu einem `error`-Frame („Token ungueltig oder abgelaufen -
+  bitte neu anmelden") und **Close mit Code 4401** — vorher wurde still
+  auf Gast heruntergestuft. Clients sollten auf Close 4401 mit einem
+  Re-Login-Dialog reagieren. Verbindungen **ohne** Token bleiben als
+  Gast-Session erlaubt (Satelliten-Szenario).

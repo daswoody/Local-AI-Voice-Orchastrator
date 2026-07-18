@@ -77,7 +77,7 @@ def delete_user(user_id: int) -> bool:
     with db_session() as conn:
         # Den letzten Tier-3-User nicht loeschen lassen - sonst sperrt man
         # sich selbst aus dem Admin-Panel aus.
-        row = conn.execute("SELECT tier FROM users WHERE id = ?", (user_id,)).fetchone()
+        row = conn.execute("SELECT username, tier FROM users WHERE id = ?", (user_id,)).fetchone()
         if row is None:
             return False
         if row["tier"] >= 3:
@@ -85,8 +85,68 @@ def delete_user(user_id: int) -> bool:
             if admins <= 1:
                 raise ValueError("letzter Admin kann nicht geloescht werden")
         conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        # Geloeschter User -> alle seine Geraete-Tokens verfallen sofort.
+        conn.execute("DELETE FROM device_tokens WHERE username = ?", (row["username"],))
         conn.commit()
         return True
+
+
+# ---- Geraete-Tokens (v1.13.1) ----------------------------------------------------
+
+
+def create_device_token(token_hash: str, username: str, device_name: str) -> dict:
+    now = _utc_now()
+    with db_session() as conn:
+        cursor = conn.execute(
+            "INSERT INTO device_tokens (token_hash, username, device_name, created_at,"
+            " last_seen_at) VALUES (?, ?, ?, ?, ?)",
+            (token_hash, username, device_name[:80], now, now),
+        )
+        conn.commit()
+        return {"id": cursor.lastrowid, "username": username,
+                "device_name": device_name[:80], "created_at": now, "last_seen_at": now}
+
+
+def resolve_device_token(token_hash: str) -> dict | None:
+    """Token-Hash -> Nutzer mit AKTUELLEM Tier aus der users-Tabelle
+    (im Gegensatz zum JWT, das sein Tier eingebacken hat)."""
+    with db_session() as conn:
+        row = conn.execute(
+            "SELECT d.id AS token_id, u.username, u.tier FROM device_tokens d"
+            " JOIN users u ON u.username = d.username WHERE d.token_hash = ?",
+            (token_hash,),
+        ).fetchone()
+        if row is None:
+            return None
+        conn.execute(
+            "UPDATE device_tokens SET last_seen_at = ? WHERE id = ?",
+            (_utc_now(), row["token_id"]),
+        )
+        conn.commit()
+        return {"sub": row["username"], "tier": row["tier"], "token_id": row["token_id"]}
+
+
+def list_device_tokens() -> list[dict]:
+    with db_session() as conn:
+        rows = conn.execute(
+            "SELECT id, username, device_name, created_at, last_seen_at"
+            " FROM device_tokens ORDER BY last_seen_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def delete_device_token(token_id: int) -> bool:
+    with db_session() as conn:
+        cursor = conn.execute("DELETE FROM device_tokens WHERE id = ?", (token_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def delete_device_tokens_for_user(username: str) -> int:
+    with db_session() as conn:
+        cursor = conn.execute("DELETE FROM device_tokens WHERE username = ?", (username,))
+        conn.commit()
+        return cursor.rowcount
 
 
 # ---- Charakter / App-Settings --------------------------------------------------

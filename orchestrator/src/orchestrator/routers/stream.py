@@ -11,7 +11,7 @@ from ..audio import b64_to_pcm, chunk_pcm, pcm_to_b64, resample_pcm16
 from ..config import settings
 from ..graph import initial_state, orchestrator_graph
 from ..schemas import DeviceTool
-from ..security import decode_access_token
+from ..security import resolve_token
 from ..services import filler_service
 from ..services.litellm_client import litellm_client
 from ..services.stt_client import stt_client
@@ -25,7 +25,20 @@ router = APIRouter()
 @router.websocket("/v1/assistant/stream")
 async def assistant_stream(websocket: WebSocket) -> None:
     await websocket.accept()
-    session = StreamSession(websocket)
+    # Auth wie bei REST (v1.13.1): Ein MITGESCHICKTES, aber ungueltiges
+    # Token wird abgewiesen statt still zum Gast degradiert - sonst laufen
+    # Dialoge scheinbar weiter, landen aber als unauffindbare
+    # Gast-Gespraeche in der Historie. Ohne Token bleibt der Gast-Zugang
+    # bewusst offen (Satelliten-Szenario, 4.4).
+    tier, username, token_invalid = _resolve_identity(websocket)
+    if token_invalid:
+        await websocket.send_json({
+            "type": "error",
+            "message": "Token ungueltig oder abgelaufen - bitte neu anmelden",
+        })
+        await websocket.close(code=4401, reason="token invalid")
+        return
+    session = StreamSession(websocket, tier=tier, username=username)
     # session-Frame laut docs/PROTOCOL.md direkt nach dem Connect.
     await websocket.send_json({"type": "session", "session_id": session.session_id})
     try:
@@ -43,7 +56,7 @@ class StreamSession:
     User-Kontext aus dem Token (Tier, Charakter-Override, Standard-Stimme),
     Audio-Eingangspuffer und der laufende Antwort-Task (Barge-in)."""
 
-    def __init__(self, websocket: WebSocket) -> None:
+    def __init__(self, websocket: WebSocket, tier: int = 1, username: str | None = None) -> None:
         self.ws = websocket
         self.session_id = uuid.uuid4().hex
         self.mode = "chat"
@@ -68,7 +81,7 @@ class StreamSession:
         # ignoriert unbekannte Frames) und am Turn-Ende in die Historie.
         self._turn_tools: list[dict] = []
 
-        self.tier, self.username = _resolve_identity(websocket)
+        self.tier, self.username = tier, username
         self.system_prompt = repos.effective_system_prompt(self.username)
         self.voice_id = settings.default_voice_id
         if self.username:
@@ -509,14 +522,16 @@ def _parse_device_tools(raw: list) -> list[DeviceTool]:
     return tools
 
 
-def _resolve_identity(websocket: WebSocket) -> tuple[int, str | None]:
-    """(tier, username) aus dem Login-Token (4.4); ohne/mit ungueltigem
-    Token bewusst Gast-Fallback statt eines harten Fehlers.
+def _resolve_identity(websocket: WebSocket) -> tuple[int, str | None, bool]:
+    """(tier, username, token_invalid) aus dem Login-Token (4.4). OHNE
+    Token: Gast (Satelliten-Szenario). MIT ungueltigem Token: Kennzeichen
+    fuer den Handler - der weist die Verbindung ab, wie REST mit 401
+    (v1.13.1, vorher stiller Gast-Fallback).
 
     Die App sendet den Token laut docs/PROTOCOL.md als
     Authorization-Header; der Query-Parameter bleibt als Fallback fuer
-    die manuellen Test-Skripte (websockets-CLI kann Header, aber der
-    Query-Weg ist beim Debuggen bequemer)."""
+    die Web-UI und manuelle Test-Skripte (Browser-WebSockets koennen
+    keine Header setzen)."""
     token = None
     auth_header = websocket.headers.get("authorization", "")
     if auth_header.lower().startswith("bearer "):
@@ -524,9 +539,8 @@ def _resolve_identity(websocket: WebSocket) -> tuple[int, str | None]:
     if not token:
         token = websocket.query_params.get("token")
     if not token:
-        return 1, None
-    try:
-        payload = decode_access_token(token)
-        return int(payload.get("tier", 1)), payload.get("sub")
-    except Exception:
-        return 1, None
+        return 1, None, False
+    payload = resolve_token(token)
+    if payload is None:
+        return 1, None, True
+    return int(payload.get("tier", 1)), payload.get("sub"), False

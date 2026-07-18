@@ -203,9 +203,10 @@ views.character = async () => {
 // ---- View: Nutzer ---------------------------------------------------------------------
 
 views.users = async () => {
-  const [users, voices] = await Promise.all([
+  const [users, voices, devices] = await Promise.all([
     api.get("/v1/admin/users"),
     api.get("/v1/admin/voices"),
+    api.get("/v1/admin/devices"),
   ]);
   const voiceOptions = (selected) =>
     `<option value="">(Standard)</option>` +
@@ -253,6 +254,23 @@ views.users = async () => {
         <div><button type="submit">Speichern</button>
         <button type="button" class="ghost" data-action="resetUserForm">Neu</button></div>
       </form>
+    </section>
+    <section class="block">
+      <h2>Angemeldete Geraete</h2>
+      <p class="hint">Jeder Login erzeugt ein langlebiges Geraete-Token (kein woechentliches Neu-Anmelden). "Abmelden" widerruft das Token sofort - z. B. bei einem verlorenen Handy. Ein Passwort-Reset meldet automatisch alle Geraete des Nutzers ab.</p>
+      <table>
+        <thead><tr><th>Nutzer</th><th>Geraet</th><th>Angemeldet</th><th>Zuletzt gesehen</th><th></th></tr></thead>
+        <tbody>${devices.map((device) => `
+          <tr>
+            <td>${esc(device.username)}</td>
+            <td>${esc(device.device_name || "(unbenannt)")}</td>
+            <td>${esc(device.created_at)}</td>
+            <td>${esc(device.last_seen_at)}</td>
+            <td class="actions">
+              <button class="small danger" data-action="revokeDevice" data-id="${device.id}" data-name="${esc(device.device_name || device.username)}">Abmelden</button>
+            </td>
+          </tr>`).join("") || "<tr><td colspan='5'>Keine Geraete angemeldet.</td></tr>"}</tbody>
+      </table>
     </section>
     <script type="application/json" id="users-data">${JSON.stringify(users)}</script>`;
 };
@@ -606,6 +624,11 @@ const buttonActions = {
   async deleteUser(data) {
     if (!confirm(`Nutzer "${data.name}" wirklich loeschen?`)) return;
     await api.del(`/v1/admin/users/${data.id}`);
+  },
+
+  async revokeDevice(data) {
+    if (!confirm(`Geraet "${data.name}" abmelden? Es muss sich danach neu einloggen.`)) return;
+    await api.del(`/v1/admin/devices/${data.id}`);
   },
 
   pickSample(data) {

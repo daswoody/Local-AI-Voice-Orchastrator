@@ -45,17 +45,57 @@ def decode_access_token(token: str) -> dict:
     return jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
 
 
+# ---- Geraete-Tokens (v1.13.1) -----------------------------------------------------
+#
+# Login erzeugt pro Geraet ein langlebiges, widerrufbares Token; in der DB
+# liegt nur der SHA-256-Hash. Der Prefix macht Tokens im Log/Debugging als
+# Geraete-Token erkennbar, ohne etwas zu verraten.
+
+_DEVICE_TOKEN_PREFIX = "hda_"  # "Heim-AI device auth"
+
+
+def issue_device_token(username: str, device_name: str) -> str:
+    from . import repos
+
+    token = _DEVICE_TOKEN_PREFIX + secrets.token_urlsafe(32)
+    repos.create_device_token(_hash_token(token), username, device_name)
+    return token
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def resolve_token(token: str) -> dict | None:
+    """EIN Aufloesungsweg fuer REST und WebSocket (v1.13.1): erst
+    Geraete-Token (DB, aktuelles Tier), dann Alt-JWT (Fallback, bis die
+    Bestandsgeraete einmal neu eingeloggt sind). None = ungueltig."""
+    from . import repos
+
+    if token.startswith(_DEVICE_TOKEN_PREFIX):
+        return repos.resolve_device_token(_hash_token(token))
+    try:
+        return decode_access_token(token)
+    except jwt.PyJWTError:
+        return None
+
+
 _bearer = HTTPBearer(auto_error=False)
 
 
-def require_admin(credentials: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> dict:
-    """Dependency fuer alle /v1/admin-Routen: Tier 3 laut Token (4.4/4.14)."""
+def _resolve_credentials(credentials: HTTPAuthorizationCredentials | None) -> dict:
     if credentials is None:
         raise HTTPException(status_code=401, detail="Token fehlt")
-    try:
-        payload = decode_access_token(credentials.credentials)
-    except jwt.PyJWTError:
+    payload = resolve_token(credentials.credentials)
+    if payload is None:
         raise HTTPException(status_code=401, detail="Token ungueltig oder abgelaufen")
+    return payload
+
+
+def require_admin(credentials: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> dict:
+    """Dependency fuer alle /v1/admin-Routen: Tier 3 (4.4/4.14) - bei
+    Geraete-Tokens ist das Tier immer der aktuelle DB-Stand."""
+    payload = _resolve_credentials(credentials)
     if int(payload.get("tier", 1)) < 3:
         raise HTTPException(status_code=403, detail="Tier 3 (Admin) erforderlich")
     return payload
@@ -65,9 +105,4 @@ def require_user(credentials: HTTPAuthorizationCredentials | None = Depends(_bea
     """Dependency fuer user-gebundene Routen (z. B. Chat-Historie): jedes
     gueltige Login-Token reicht, unabhaengig vom Tier. Gaeste ohne Token
     haben keine abrufbare Historie."""
-    if credentials is None:
-        raise HTTPException(status_code=401, detail="Token fehlt")
-    try:
-        return decode_access_token(credentials.credentials)
-    except jwt.PyJWTError:
-        raise HTTPException(status_code=401, detail="Token ungueltig oder abgelaufen")
+    return _resolve_credentials(credentials)

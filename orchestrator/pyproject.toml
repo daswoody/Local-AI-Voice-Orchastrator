@@ -1,0 +1,34 @@
+[project]
+name = "heimai-orchestrator"
+version = "0.1.0"
+description = "Voice-Orchestrator fuer das Heim-AI-Projekt (Mikro-Phase 1.7+)"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "langgraph>=0.2",
+    "httpx>=0.27",
+    "pydantic-settings>=2.5",
+    "pyjwt>=2.9",
+    "python-multipart>=0.0.12",
+    "mcp>=1.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "websockets>=13.1",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# Nur tests/ einsammeln - die manuellen Skripte matchen sonst *_test.py.
+testpaths = ["tests"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/orchestrator"]

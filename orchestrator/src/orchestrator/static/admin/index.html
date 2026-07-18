@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Heim-AI Verwaltung</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏠</text></svg>">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="login-screen" class="hidden">
+    <form id="login-form" class="login-card">
+      <h1>Heim-AI Verwaltung</h1>
+      <label>Benutzername <input name="username" autocomplete="username" required></label>
+      <label>Passwort <input name="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit">Anmelden</button>
+      <p id="login-error" class="error hidden"></p>
+    </form>
+  </div>
+
+  <div id="app" class="hidden">
+    <nav id="sidebar">
+      <h2>Heim-AI</h2>
+      <a href="#/models" data-view="models">Modelle</a>
+      <a href="#/character" data-view="character">Charakter</a>
+      <a href="#/users" data-view="users">Nutzer</a>
+      <a href="#/voices" data-view="voices">Stimmen</a>
+      <a href="#/fillers" data-view="fillers">Filler &amp; Trigger</a>
+      <a href="#/agents" data-view="agents">Agenten</a>
+      <a href="#/cards" data-view="cards">Karten</a>
+      <button id="logout" class="ghost">Abmelden</button>
+    </nav>
+    <main id="content"></main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

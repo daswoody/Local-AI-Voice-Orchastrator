@@ -73,9 +73,10 @@ export const setHotkeys = (hotkeys: { chat: string; talk: string; screenshot: st
 
 export const setAutostart = (enabled: boolean) => invoke("set_autostart", { enabled });
 
-/** Wake Word (openWakeWord/ONNX in der Shell) ein-/ausschalten. */
-export const setWakeWord = (enabled: boolean, threshold: number) =>
-  invoke("set_wake_word", { enabled, threshold });
+/** Wake Word (openWakeWord/ONNX in der Shell) ein-/ausschalten.
+ *  model: hey_jarvis | alexa | hey_mycroft (mitgeliefert) oder "custom". */
+export const setWakeWord = (enabled: boolean, threshold: number, model: string) =>
+  invoke("set_wake_word", { enabled, threshold, model });
 
 /** Hauptfenster in den Vordergrund holen (z. B. nach Hotkey/Wake Word). */
 export const showMainWindow = () => invoke("show_main_window");

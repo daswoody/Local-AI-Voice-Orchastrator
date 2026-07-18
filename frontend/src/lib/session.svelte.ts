@@ -351,7 +351,7 @@ export function applySettings(settings: AppSettings): void {
   if (shell.inShell) {
     void shell.setHotkeys(settings.hotkeys);
     void shell.setAutostart(settings.autostart);
-    void shell.setWakeWord(settings.wakeWordEnabled, settings.wakeWordThreshold);
+    void shell.setWakeWord(settings.wakeWordEnabled, settings.wakeWordThreshold, settings.wakeWordModel);
   }
 }
 
@@ -359,7 +359,7 @@ export function applySettings(settings: AppSettings): void {
 export function initShellIntegration(): void {
   if (!shell.inShell) return;
   void shell.setHotkeys(app.settings.hotkeys);
-  void shell.setWakeWord(app.settings.wakeWordEnabled, app.settings.wakeWordThreshold);
+  void shell.setWakeWord(app.settings.wakeWordEnabled, app.settings.wakeWordThreshold, app.settings.wakeWordModel);
 
   shell.onShellEvent("hotkey", (payload) => {
     const action = (payload as { action: string }).action;

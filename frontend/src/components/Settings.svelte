@@ -75,6 +75,14 @@
         <input type="checkbox" bind:checked={draft.wakeWordEnabled} />
         Wake Word aktiv (openWakeWord, läuft lokal in der Windows-App)
       </label>
+      <label for="ww-model">Wake Word</label>
+      <select id="ww-model" bind:value={draft.wakeWordModel}>
+        <option value="hey_jarvis">„Hey Jarvis" (Standard)</option>
+        <option value="alexa">„Alexa"</option>
+        <option value="hey_mycroft">„Hey Mycroft"</option>
+        <option value="custom">Eigenes Modell (aus dem Modell-Ordner)</option>
+      </select>
+      <p class="hint">Die Modelle sind in der Windows-App enthalten — kein Download nötig. Eigene Modelle: <code>.onnx</code> nach <code>%APPDATA%\de.heimai.windows\openwakeword</code> legen und „Eigenes Modell" wählen.</p>
       <label for="ww-threshold">Wake-Word-Empfindlichkeit (0–1, höher = strenger)</label>
       <input id="ww-threshold" type="number" min="0.1" max="0.95" step="0.05" bind:value={draft.wakeWordThreshold} />
       <label class="check">

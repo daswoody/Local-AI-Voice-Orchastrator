@@ -8,6 +8,9 @@ export interface AppSettings {
   hotkeys: { chat: string; talk: string; screenshot: string };
   ttsFallback: boolean;
   wakeWordEnabled: boolean;
+  // Eingebaute openWakeWord-Modelle der Shell: hey_jarvis | alexa |
+  // hey_mycroft; "custom" = eigenes .onnx aus dem Modell-Ordner.
+  wakeWordModel: string;
   wakeWordThreshold: number;
   autostart: boolean;
   vadSilenceMs: number;
@@ -26,6 +29,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
   ttsFallback: true,
   wakeWordEnabled: false,
+  wakeWordModel: "hey_jarvis",
   wakeWordThreshold: 0.5,
   autostart: false,
   vadSilenceMs: 900,

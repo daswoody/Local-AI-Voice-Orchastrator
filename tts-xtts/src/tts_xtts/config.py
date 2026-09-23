@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     voices_dir: str = "/voices"
     language: str = "de"
     preload: bool = False
+    # XTTS rechnet immer nur EINE Synthese (v1.16, siehe XttsEngine) - so
+    # lange darf eine weitere auf die laufende warten, dann gibt es 503.
+    synth_lock_timeout_s: float = 120.0
 
 
 settings = Settings()

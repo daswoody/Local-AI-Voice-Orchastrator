@@ -169,7 +169,8 @@ function wireForms(root) {
 
 const NO_RERENDER = new Set(["editUser", "resetUserForm", "pickSample", "editCard",
                              "editFiller", "resetFillerForm", "editAgent",
-                             "resetAgentForm", "switchCardFormat", "playFiller"]);
+                             "resetAgentForm", "switchCardFormat", "playFiller",
+                             "filterFillers"]);
 
 // ---- View: Modelle -----------------------------------------------------------------
 
@@ -429,6 +430,23 @@ views.voices = async () => {
 
 // ---- View: Filler & Trigger ------------------------------------------------------------------
 
+/* Zustand der Filler-Ansicht (v1.16), ueberlebt das Neu-Rendern: gewaehlter
+ * Trigger-Filter (auch im Browser gemerkt), laufende Generierung (sperrt
+ * alle Generieren-Buttons) und die Ergebnis-Meldung der letzten. */
+const fillerUi = {
+  filter: readStored("heimai_filler_filter") || "all",
+  job: null,     // {id, voice, label} der laufenden Generierung
+  notice: null,  // {kind, lines} - wird beim naechsten Rendern einmal gezeigt
+};
+
+function readStored(key) {
+  try { return localStorage.getItem(key); } catch (_) { return null; }
+}
+
+function writeStored(key, value) {
+  try { localStorage.setItem(key, value); } catch (_) { /* privates Fenster o. ae. */ }
+}
+
 views.fillers = async () => {
   const [triggers, fillers, engines] = await Promise.all([
     api.get("/v1/admin/triggers"),
@@ -450,43 +468,89 @@ views.fillers = async () => {
       </td>
     </tr>`).join("");
 
+  // Filter-Chips "Alle / Trigger 1 / Trigger 2 ..." (v1.16). Ein
+  // geloeschter Trigger als gemerkte Auswahl faellt auf "Alle" zurueck.
+  if (!triggers.some((t) => String(t.id) === fillerUi.filter)) fillerUi.filter = "all";
+  const shown = (filler) => fillerUi.filter === "all" || String(filler.trigger_id) === fillerUi.filter;
+  const countFor = (triggerId) => fillers.filter((f) => f.trigger_id === triggerId).length;
+  const chip = (value, label, count, title = "") => {
+    const active = value === fillerUi.filter;
+    return `<button type="button" class="chip${active ? " active" : ""}" aria-pressed="${active}"
+      data-action="filterFillers" data-trigger="${value}" title="${esc(title)}">${esc(label)} <span class="count">${count}</span></button>`;
+  };
+  const chips = [chip("all", "Alle", fillers.length)]
+    .concat(triggers.map((t) => chip(String(t.id), t.name, countFor(t.id), kindLabel[t.kind] || t.kind)))
+    .join("");
+
+  // Neuer Filler landet standardmaessig im gerade gefilterten Trigger.
   const triggerOptions = triggers.map((t) =>
-    `<option value="${t.id}">${esc(t.name)}</option>`).join("");
+    `<option value="${t.id}"${String(t.id) === fillerUi.filter ? " selected" : ""}>${esc(t.name)}</option>`).join("");
+
+  // Gruppiert nach Trigger (in Trigger-Reihenfolge): Auch unter "Alle"
+  // stehen die Filler eines Triggers so beieinander.
+  const triggerOrder = new Map(triggers.map((t, index) => [t.id, index]));
+  fillers.sort((a, b) =>
+    (triggerOrder.get(a.trigger_id) - triggerOrder.get(b.trigger_id)) || (a.id - b.id));
+
+  const job = fillerUi.job;
+  const generateButton = (fillerId, voiceId, label, title, extraClass = "") => {
+    const running = job && job.id === String(fillerId) && job.voice === (voiceId || null);
+    const voiceAttr = voiceId ? ` data-voice="${esc(voiceId)}"` : "";
+    return `<button class="small ${extraClass}${running ? " busy" : ""}" data-action="generateFiller" data-id="${fillerId}"${voiceAttr} title="${esc(title)}" aria-label="${esc(title)}"${job ? " disabled" : ""}>${label}</button>`;
+  };
 
   const fillerRows = fillers.map((filler) => {
     const audio = Object.entries(filler.audio_status || {});
-    // Pro Stimme ein Play-Button (bzw. Warnung, wenn nichts generiert ist):
-    // So hoert man direkt, ob die Generierung gelungen ist - statt es erst
-    // zu merken, wenn der Filler zufaellig im Realtime-Talk auftaucht.
-    const audioCell = audio.map(([voiceId, ok]) => ok
-      ? `<button class="small ghost" data-action="playFiller" data-id="${filler.id}" data-voice="${esc(voiceId)}" title="Anhoeren">&#9654; ${esc(voiceId)}</button>`
-      : `<span class="badge warn" title="noch nicht generiert">${esc(voiceId)}</span>`
-    ).join(" ") || '<span class="badge off">keine Stimmen angelegt</span>';
+    // Pro Stimme: Anhoeren (bzw. Warnung, wenn nichts generiert ist) und
+    // NUR diese Stimme neu generieren - eine gelungene Stimme bleibt
+    // erhalten, wenn eine andere neu gewuerfelt wird (v1.16).
+    const audioCell = audio.map(([voiceId, ok]) => `
+      <div class="voice-audio">
+        ${ok
+          ? `<button class="small ghost" data-action="playFiller" data-id="${filler.id}" data-voice="${esc(voiceId)}" title="Anhoeren">&#9654; ${esc(voiceId)}</button>`
+          : `<span class="badge warn" title="noch nicht generiert">${esc(voiceId)}</span>`}
+        ${generateButton(filler.id, voiceId, "&#8635;",
+          ok ? `Nur ${voiceId} neu generieren` : `Nur ${voiceId} generieren`, "ghost icon")}
+      </div>`
+    ).join("") || '<span class="badge off">keine Stimmen angelegt</span>';
 
     return `
-    <tr>
+    <tr data-trigger="${filler.trigger_id}"${shown(filler) ? "" : ' class="hidden"'}>
       <td>${esc(filler.title)}<br><small>"${esc(filler.text)}"</small></td>
       <td>${esc(filler.trigger_name)}</td>
-      <td>${esc(engineLabel[filler.engine] || filler.engine || "xtts")}</td>
-      <td>${filler.delay_ms} ms</td>
+      <td class="nowrap" title="${esc(engineLabel[filler.engine] || "")}">${esc(engineShort(engineLabel[filler.engine] || filler.engine || "xtts"))}</td>
+      <td class="nowrap">${filler.delay_ms} ms</td>
       <td>${filler.enabled ? '<span class="badge ok">aktiv</span>' : '<span class="badge off">aus</span>'}</td>
       <td>${audioCell}</td>
       <td class="actions">
-        <button class="small" data-action="generateFiller" data-id="${filler.id}">Audio generieren</button>
+        ${generateButton(filler.id, null, "Alle generieren", "Audio fuer alle Stimmen neu erzeugen")}
         <button class="small ghost" data-action="editFiller" data-id="${filler.id}">Bearbeiten</button>
         <button class="small danger" data-action="deleteFiller" data-id="${filler.id}">Loeschen</button>
       </td>
     </tr>`;
   }).join("");
 
+  // Ergebnis der letzten Generierung einmalig anzeigen (statt alert):
+  // Hinweise auf auffaellige Aufnahmen stehen so direkt ueber den
+  // Play-Buttons, mit denen man sie pruefen kann.
+  const notice = fillerUi.notice;
+  fillerUi.notice = null;
+  const statusHtml = job ? fillerJobNotice(job)
+    : notice ? `<div class="notice ${notice.kind}">${notice.lines.map(esc).join("<br>")}</div>`
+    : "";
+
   return `
     <h1>Filler &amp; Trigger</h1>
     <p class="hint">Trigger bestimmen, WANN ein Filler gespielt wird - der Orchestrator kennt seinen Zustand selbst: "Nachdenken" (LLM langsam), "Suche/RAG", "Tool-Aufruf" (optional per Muster auf bestimmte Tools, z. B. <code>Calendar-*</code>; greift ab Tool-Calling 1.12). Filler werden per XTTS in jeder Stimme vorgeneriert - kein Stimmbruch mehr zwischen Filler und Antwort.</p>
     <section class="block">
       <h2>Filler</h2>
+      <div class="chips" role="group" aria-label="Nach Trigger filtern">${chips}</div>
+      <div id="filler-status">${statusHtml}</div>
       <table>
-        <thead><tr><th>Filler</th><th>Trigger</th><th>Engine</th><th>Delay</th><th>Status</th><th>Audio (anhoeren)</th><th></th></tr></thead>
-        <tbody>${fillerRows || "<tr><td colspan='7'>Noch keine Filler.</td></tr>"}</tbody>
+        <thead><tr><th>Filler</th><th>Trigger</th><th>Engine</th><th>Delay</th><th>Status</th><th>Audio je Stimme</th><th></th></tr></thead>
+        <tbody id="filler-rows">${fillerRows}
+          <tr id="filler-empty"${fillers.some(shown) ? ' class="hidden"' : ""}><td colspan="7">${fillers.length ? "Keine Filler fuer diesen Trigger." : "Noch keine Filler."}</td></tr>
+        </tbody>
       </table>
       <br>
       <h2 id="filler-form-title">Neuen Filler anlegen</h2>
@@ -529,6 +593,72 @@ views.fillers = async () => {
       </form>
     </section>`;
 };
+
+/* "XTTS-v2 (Stimme des Nutzers)" -> "XTTS-v2": in der Tabelle reicht der
+ * Name, die Erklaerung steht im Tooltip und unter dem Formular. */
+function engineShort(label) {
+  return label.split(" (")[0];
+}
+
+function fillerById(id) {
+  const data = document.getElementById("fillers-data");
+  const fillers = data ? JSON.parse(data.textContent) : [];
+  return fillers.find((f) => f.id === parseInt(id, 10)) || null;
+}
+
+function fillerJobNotice(job) {
+  return `<div class="notice">${esc(job.label)} - je Stimme einige Sekunden; wirkt eine
+    Aufnahme auffaellig (Zeitlupe, angehaengte Laute), wird bis zu zweimal neu gewuerfelt.</div>`;
+}
+
+/* Filter-Chip gewechselt: nur ein-/ausblenden, kein Neuladen der Seite. */
+function applyFillerFilter() {
+  const selected = fillerUi.filter;
+  document.querySelectorAll("[data-action='filterFillers']").forEach((chip) => {
+    const active = chip.dataset.trigger === selected;
+    chip.classList.toggle("active", active);
+    chip.setAttribute("aria-pressed", String(active));
+  });
+  let visible = 0;
+  document.querySelectorAll("#filler-rows tr[data-trigger]").forEach((row) => {
+    const shown = selected === "all" || row.dataset.trigger === selected;
+    row.classList.toggle("hidden", !shown);
+    if (shown) visible += 1;
+  });
+  document.getElementById("filler-empty").classList.toggle("hidden", visible > 0);
+  const form = document.getElementById("filler-form");
+  if (selected !== "all" && !form.id.value) form.trigger_id.value = selected;
+}
+
+/* Laufende Generierung im DOM spiegeln (ohne Neu-Rendern): alle
+ * Generieren-Buttons gesperrt, der geklickte dreht sich. */
+function markFillerJob() {
+  const job = fillerUi.job;
+  document.querySelectorAll("[data-action='generateFiller']").forEach((button) => {
+    button.disabled = Boolean(job);
+    button.classList.toggle("busy", Boolean(job) && button.dataset.id === job.id
+      && (button.dataset.voice || null) === job.voice);
+  });
+  const status = document.getElementById("filler-status");
+  if (status) status.innerHTML = job ? fillerJobNotice(job) : "";
+}
+
+function describeGeneration(filler, results) {
+  let kind = "ok";
+  const lines = results.map((r) => {
+    if (!r.ok) {
+      kind = "error";
+      return `${r.voice_id}: fehlgeschlagen - ${r.error}`;
+    }
+    if (r.warning) {
+      if (kind === "ok") kind = "warn";
+      return `${r.voice_id}: ${r.warning}`;
+    }
+    return `${r.voice_id}: fertig${r.attempts > 1 ? ` (im ${r.attempts}. Versuch)` : ""}`;
+  });
+  const title = filler ? `"${filler.title}"` : "Filler";
+  return { kind, lines: [`Audio fuer ${title}:`].concat(lines) };
+}
 
 // ---- View: Agenten -----------------------------------------------------------------------
 
@@ -817,14 +947,37 @@ const buttonActions = {
     form.reset();
     form.id.value = "";
     form.delay_ms.value = 1200;
+    if (fillerUi.filter !== "all") form.trigger_id.value = fillerUi.filter;
     document.getElementById("filler-form-title").textContent = "Neuen Filler anlegen";
   },
 
+  filterFillers(data) {
+    fillerUi.filter = data.trigger;
+    writeStored("heimai_filler_filter", data.trigger);
+    applyFillerFilter();
+  },
+
+  /* Alle Stimmen oder mit data-voice nur eine (v1.16) - eine gelungene
+   * Stimme bleibt erhalten, wenn eine andere neu gewuerfelt wird. Immer nur
+   * eine Generierung zur Zeit: Der Server serialisiert ohnehin, so sieht
+   * man aber, dass noch etwas laeuft, statt mehrfach zu klicken. */
   async generateFiller(data) {
-    const result = await api.post(`/v1/admin/fillers/${data.id}/generate`, {});
-    const failed = result.results.filter((r) => !r.ok);
-    if (failed.length) {
-      alert("Teilweise fehlgeschlagen:\n" + failed.map((f) => `${f.voice_id}: ${f.error}`).join("\n"));
+    if (fillerUi.job) return;
+    const filler = fillerById(data.id);
+    const target = data.voice ? `Stimme ${data.voice}` : "alle Stimmen";
+    fillerUi.job = {
+      id: data.id,
+      voice: data.voice || null,
+      label: `Generiere ${filler ? `"${filler.title}"` : "Filler"} (${target})`,
+    };
+    markFillerJob();
+    try {
+      const query = data.voice ? `?voice_id=${encodeURIComponent(data.voice)}` : "";
+      const result = await api.post(`/v1/admin/fillers/${data.id}/generate${query}`, {});
+      fillerUi.notice = describeGeneration(filler, result.results);
+    } finally {
+      fillerUi.job = null;
+      markFillerJob();
     }
   },
 

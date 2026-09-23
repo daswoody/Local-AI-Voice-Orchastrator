@@ -20,6 +20,10 @@ class FakeEngine:
         yield b"\x01\x02" * 100
         yield b"\x03\x04" * 100
 
+    def synthesize(self, text: str, voice_id: str, language=None, temperature=None) -> bytes:
+        self.last_request = (text, voice_id, language, temperature)
+        return b"\x05\x06" * 300
+
 
 @pytest.fixture
 def fake_engine(monkeypatch):

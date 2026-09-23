@@ -194,13 +194,23 @@ def test_filler_text_change_invalidates_audio(client, admin_headers, tmp_path):
     assert not filler_service.has_audio(filler["id"], "default-de-female")
 
 
+def _tone_pcm(seconds: float, rate: int = 24000) -> bytes:
+    import math
+    from array import array
+
+    return array("h", (int(8000 * math.sin(2 * math.pi * 220 * i / rate))
+                       for i in range(int(seconds * rate)))).tobytes()
+
+
 def test_generate_filler_writes_wav_for_voices_with_sample(client, admin_headers, monkeypatch):
     from orchestrator.services import filler_service as fs
 
-    async def fake_stream(text, voice_id, language=None):
-        yield 24000, b"\x01\x02" * 1000
+    spoken = _tone_pcm(1.6)
 
-    monkeypatch.setattr(fs.xtts_client, "stream", fake_stream)
+    async def fake_synthesize(text, voice_id, language=None, temperature=None):
+        return spoken, 24000
+
+    monkeypatch.setattr(fs.xtts_client, "synthesize", fake_synthesize)
 
     # Nur default-de-female bekommt ein Sample
     from orchestrator.config import settings
@@ -216,10 +226,11 @@ def test_generate_filler_writes_wav_for_voices_with_sample(client, admin_headers
     assert by_voice["default-de-female"]["ok"] is True
     assert by_voice["default-de-male"]["ok"] is False  # kein Sample
     assert filler_service.has_audio(filler_id, "default-de-female")
-    # Generiertes WAV ist lesbar und hat die XTTS-Rate
+    # Generiertes WAV ist lesbar und hat die XTTS-Rate; die Sprache reicht
+    # bis an beide Enden, also wird nur ein-/ausgeblendet, nichts gekappt.
     pcm, rate = filler_service.load_audio(filler_service.audio_path(filler_id, "default-de-female"))
     assert rate == 24000
-    assert pcm == b"\x01\x02" * 1000
+    assert len(pcm) == len(spoken)
 
 
 # ---- Karten ------------------------------------------------------------------------

@@ -7,6 +7,7 @@
   --accent: #5b8cff;
   --danger: #e05b5b;
   --ok: #4fbf7f;
+  --warn: #e0a84f;
   --border: #2c3040;
 }
 
@@ -83,6 +84,7 @@ table { width: 100%; border-collapse: collapse; font-size: .92rem; }
 th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--border); vertical-align: top; }
 th { color: var(--muted); font-weight: 600; }
 td.actions { white-space: nowrap; text-align: right; }
+td.nowrap { white-space: nowrap; }
 
 label { display: flex; flex-direction: column; gap: .3rem; font-size: .88rem; color: var(--muted); }
 input, select, textarea {
@@ -131,6 +133,56 @@ button.small { padding: .25rem .6rem; font-size: .82rem; }
   border: 1px solid rgba(91, 140, 255, .4);
 }
 .notice.error { background: rgba(224, 91, 91, .12); border-color: var(--danger); color: var(--danger); }
+.notice.ok { background: rgba(79, 191, 127, .12); border-color: rgba(79, 191, 127, .5); }
+.notice.warn { background: rgba(224, 168, 79, .12); border-color: var(--warn); color: var(--warn); }
+
+button:disabled { opacity: .45; cursor: not-allowed; filter: none; }
+button.icon { min-width: 2rem; }
+
+/* Laufende Generierung: Spinner am geklickten Button (v1.16). Der
+ * gesperrte Rest wird blass, der aktive bleibt gut sichtbar. */
+button.busy:disabled { opacity: 1; }
+button.busy::after {
+  content: "";
+  display: inline-block;
+  width: .75em;
+  height: .75em;
+  margin-left: .4em;
+  vertical-align: -.1em;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Filter-Chips ueber der Filler-Liste (v1.16) */
+.chips { display: flex; flex-wrap: wrap; gap: .45rem; margin-bottom: 1rem; }
+.chip {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 20px;
+  padding: .3rem .8rem;
+  font-size: .85rem;
+}
+.chip:hover { color: var(--text); filter: none; border-color: var(--muted); }
+.chip.active { background: rgba(91, 140, 255, .18); border-color: var(--accent); color: var(--text); }
+.chip .count {
+  display: inline-block;
+  min-width: 1.4em;
+  margin-left: .25rem;
+  padding: 0 .35rem;
+  border-radius: 10px;
+  background: rgba(154, 161, 178, .18);
+  font-size: .75rem;
+  text-align: center;
+}
+.chip.active .count { background: rgba(91, 140, 255, .35); }
+
+/* Audio-Spalte: pro Stimme Anhoeren + nur diese Stimme neu generieren */
+.voice-audio { display: flex; align-items: center; gap: .3rem; margin-bottom: .3rem; white-space: nowrap; }
+.voice-audio:last-child { margin-bottom: 0; }
 
 /* GPU-Uebersicht (v1.14) */
 .gpu-grid { display: flex; flex-wrap: wrap; gap: 1rem; }

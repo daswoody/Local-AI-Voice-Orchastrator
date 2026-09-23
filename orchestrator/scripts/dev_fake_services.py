@@ -117,6 +117,22 @@ async def xtts_synthesize(payload: dict) -> StreamingResponse:
                              headers={"X-Sample-Rate": "24000"})
 
 
+@xtts.post("/v1/synthesize/full")
+async def xtts_synthesize_full(payload: dict) -> Response:
+    # Komplettes WAV fuer die Filler-Vorgenerierung (v1.16). Laenge grob wie
+    # gesprochen (~14 Zeichen/s), damit die Plausibilitaetspruefung passt;
+    # die Pause macht den Busy-Zustand im Panel sichtbar.
+    await asyncio.sleep(0.8)
+    seconds = 0.2 + len(payload.get("text", "")) / 14
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(24000)
+        wav.writeframes(_sine_pcm16(seconds, 24000, freq=440))
+    return Response(buffer.getvalue(), media_type="audio/wav")
+
+
 app = FastAPI(title="Heim-AI Fake-Backends")
 app.mount("/llm", llm)
 app.mount("/stt", stt)

@@ -1,14 +1,16 @@
+import io
 import logging
+import wave
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import engine as engine_module
 from .config import settings
-from .engine import SAMPLE_RATE
+from .engine import SAMPLE_RATE, EngineBusy
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,12 @@ class SynthesizeRequest(BaseModel):
     text: str
     voice_id: str
     language: str | None = None
+
+
+class FullSynthesizeRequest(SynthesizeRequest):
+    # Optional vorsichtiger sampeln (Neuversuch der Filler-Generierung);
+    # None = XTTS-Default.
+    temperature: float | None = Field(default=None, gt=0.0, le=1.5)
 
 
 @app.get("/")
@@ -70,13 +78,7 @@ def list_voices() -> list[dict[str, str]]:
     return [{"id": voice_id} for voice_id in engine_module.engine.list_voices()]
 
 
-@app.post("/v1/synthesize")
-async def synthesize(payload: SynthesizeRequest) -> StreamingResponse:
-    """Text rein -> PCM16-Stream (mono, 24 kHz) raus (Erfolgskriterium 1.10).
-
-    Roh-PCM statt WAV, weil WAV die Gesamtlaenge im Header braucht -
-    Streaming waere damit nicht moeglich. Die Samplerate ist bei XTTS-v2
-    fix und reist im X-Sample-Rate-Header mit."""
+def _validate(payload: SynthesizeRequest) -> None:
     if not payload.text.strip():
         raise HTTPException(status_code=400, detail="leerer Text")
     if not engine_module.engine.has_voice(payload.voice_id):
@@ -86,14 +88,31 @@ async def synthesize(payload: SynthesizeRequest) -> StreamingResponse:
             detail=f"voice_id '{payload.voice_id}' unbekannt - verfuegbar: {available}",
         )
 
+
+def _busy(exc: EngineBusy) -> HTTPException:
+    return HTTPException(status_code=503, detail=str(exc))
+
+
+@app.post("/v1/synthesize")
+async def synthesize(payload: SynthesizeRequest) -> StreamingResponse:
+    """Text rein -> PCM16-Stream (mono, 24 kHz) raus (Erfolgskriterium 1.10).
+
+    Roh-PCM statt WAV, weil WAV die Gesamtlaenge im Header braucht -
+    Streaming waere damit nicht moeglich. Die Samplerate ist bei XTTS-v2
+    fix und reist im X-Sample-Rate-Header mit."""
+    _validate(payload)
+
     stream = engine_module.engine.stream(payload.text, payload.voice_id, payload.language)
 
     # Den ERSTEN Chunk vor der Response erzeugen (Threadpool, GPU-blockierend):
     # Modell-Laden, Latents-Berechnung und kaputte Samples schlagen genau dort
     # fehl - so werden daraus saubere 500er mit Fehlertext statt mitten im
     # Stream abgerissener Verbindungen ("incomplete chunked read" im Client).
+    # Hier wartet der Request auch, falls gerade eine andere Synthese laeuft.
     try:
         first_chunk = await run_in_threadpool(next, stream, None)
+    except EngineBusy as exc:
+        raise _busy(exc)
     except Exception as exc:
         logger.exception("XTTS-Synthese fuer voice_id=%s fehlgeschlagen", payload.voice_id)
         raise HTTPException(status_code=500, detail=f"XTTS-Synthese fehlgeschlagen: {str(exc)[:300]}")
@@ -107,12 +126,49 @@ async def synthesize(payload: SynthesizeRequest) -> StreamingResponse:
     )
 
 
-def _first_then_rest(first_chunk: bytes, rest):
-    yield first_chunk
+@app.post("/v1/synthesize/full")
+async def synthesize_full(payload: FullSynthesizeRequest) -> Response:
+    """Text rein -> komplettes WAV raus (v1.16, Filler-Vorgenerierung).
+
+    Nicht streamend: Der Aufrufer wartet ohnehin aufs Ganze, dafuer liefert
+    XTTS hier seinen Qualitaetspfad (siehe XttsEngine.synthesize)."""
+    _validate(payload)
     try:
+        pcm = await run_in_threadpool(
+            engine_module.engine.synthesize,
+            payload.text, payload.voice_id, payload.language, payload.temperature,
+        )
+    except EngineBusy as exc:
+        raise _busy(exc)
+    except Exception as exc:
+        logger.exception("XTTS-Synthese (full) fuer voice_id=%s fehlgeschlagen", payload.voice_id)
+        raise HTTPException(status_code=500, detail=f"XTTS-Synthese fehlgeschlagen: {str(exc)[:300]}")
+    if not pcm:
+        raise HTTPException(status_code=500, detail="XTTS hat keine Audio-Daten erzeugt")
+    return Response(content=_wav_bytes(pcm, SAMPLE_RATE), media_type="audio/wav")
+
+
+def _first_then_rest(first_chunk: bytes, rest):
+    try:
+        yield first_chunk
         yield from rest
     except Exception:
         # Header sind raus, der Abbruch ist nicht mehr zu verhindern - aber
         # der Grund muss in den Container-Logs stehen.
         logger.exception("XTTS-Stream mitten in der Generierung abgerissen")
         raise
+    finally:
+        # Wird der Stream geschlossen (Client-Abbruch), bricht close() die
+        # Generierung beim naechsten Chunk ab. Schliesst ihn niemand, gibt
+        # der Producer-Thread die Engine trotzdem mit Generierungsende frei.
+        rest.close()
+
+
+def _wav_bytes(pcm: bytes, rate: int) -> bytes:
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(rate)
+        wav.writeframes(pcm)
+    return buffer.getvalue()

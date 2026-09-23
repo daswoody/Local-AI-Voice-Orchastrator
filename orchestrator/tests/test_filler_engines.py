@@ -59,10 +59,10 @@ async def test_xtts_engine_still_generates_per_voice(client, monkeypatch):
     voices_dir.mkdir(parents=True, exist_ok=True)
     (voices_dir / "default-de-female.wav").write_bytes(b"RIFF fake")
 
-    async def fake_stream(text, voice_id, language=None):
-        yield 24000, b"\x03\x04" * 800
+    async def fake_synthesize(text, voice_id, language=None, temperature=None):
+        return b"\x03\x04" * 12000, 24000
 
-    monkeypatch.setattr(filler_service.xtts_client, "stream", fake_stream)
+    monkeypatch.setattr(filler_service.xtts_client, "synthesize", fake_synthesize)
     monkeypatch.setattr(
         filler_service.piper_client, "synthesize",
         AsyncMock(side_effect=AssertionError("Piper darf hier nicht laufen")),

@@ -328,10 +328,12 @@ def delete_filler(filler_id: int) -> None:
 
 
 @router.post("/fillers/{filler_id}/generate")
-async def generate_filler(filler_id: int) -> dict:
-    """Erzeugt das Filler-Audio per XTTS fuer alle Stimmen mit Sample (1.7d)."""
+async def generate_filler(filler_id: int, voice_id: str | None = None) -> dict:
+    """Erzeugt das Filler-Audio per XTTS fuer alle Stimmen mit Sample (1.7d)
+    - oder mit ?voice_id=... nur fuer diese eine (v1.16): Eine gelungene
+    Stimme bleibt so erhalten, wenn nur eine andere neu gewuerfelt wird."""
     try:
-        results = await filler_service.generate_audio(filler_id)
+        results = await filler_service.generate_audio(filler_id, voice_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     return {"results": results}

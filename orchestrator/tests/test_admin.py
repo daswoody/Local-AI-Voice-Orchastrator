@@ -316,3 +316,105 @@ def test_filler_delay_ms_crud(client, admin_headers):
         headers=admin_headers,
     )
     assert bad.status_code == 422
+
+
+# ---- Filler: Engine-Wahl + Audio anhoeren (v1.15) ----------------------------
+
+
+def _create_filler(client, admin_headers, engine="xtts", text="Moment bitte."):
+    trigger = client.get("/v1/admin/triggers", headers=admin_headers).json()[0]
+    response = client.post(
+        "/v1/admin/fillers",
+        json={"title": "Test", "text": text, "trigger_id": trigger["id"],
+              "delay_ms": 500, "engine": engine},
+        headers=admin_headers,
+    )
+    assert response.status_code == 201
+    return response.json()
+
+
+def test_tts_engines_are_listed_for_the_dropdown(client, admin_headers):
+    engines = client.get("/v1/admin/tts-engines", headers=admin_headers).json()
+    by_id = {engine["id"]: engine for engine in engines}
+    assert set(by_id) == {"xtts", "piper"}
+    # per_voice steuert, ob die Engine in der Nutzerstimme spricht
+    assert by_id["xtts"]["per_voice"] is True
+    assert by_id["piper"]["per_voice"] is False
+
+
+def test_filler_engine_defaults_to_xtts_and_is_stored(client, admin_headers):
+    default = _create_filler(client, admin_headers)
+    assert default["engine"] == "xtts"
+
+    piper = _create_filler(client, admin_headers, engine="piper")
+    assert piper["engine"] == "piper"
+
+    listed = {f["id"]: f for f in client.get("/v1/admin/fillers", headers=admin_headers).json()}
+    assert listed[piper["id"]]["engine"] == "piper"
+
+
+def test_unknown_engine_is_rejected(client, admin_headers):
+    trigger = client.get("/v1/admin/triggers", headers=admin_headers).json()[0]
+    response = client.post(
+        "/v1/admin/fillers",
+        json={"title": "x", "text": "y", "trigger_id": trigger["id"], "engine": "elevenlabs"},
+        headers=admin_headers,
+    )
+    assert response.status_code == 422
+
+
+def test_switching_engine_invalidates_generated_audio(client, admin_headers):
+    """Vorhandenes Audio stammt von der alten Engine - beim Wechsel muss es
+    weg, sonst spielt der Turn weiter die alte Stimme."""
+    from orchestrator.services import filler_service
+
+    filler = _create_filler(client, admin_headers)
+    path = filler_service.audio_path(filler["id"], "default-de-female")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_wav_bytes())
+    assert path.exists()
+
+    client.put(
+        f"/v1/admin/fillers/{filler['id']}",
+        json={"title": filler["title"], "text": filler["text"],
+              "trigger_id": filler["trigger_id"], "delay_ms": filler["delay_ms"],
+              "engine": "piper"},
+        headers=admin_headers,
+    )
+
+    assert not path.exists()
+
+
+def test_filler_audio_can_be_played_back(client, admin_headers):
+    """Play-Button im Panel: WAV mit Token abrufbar (ein <audio src> kann
+    keinen Header senden, das Panel holt es per fetch als Blob)."""
+    from orchestrator.services import filler_service
+
+    filler = _create_filler(client, admin_headers)
+    path = filler_service.audio_path(filler["id"], "default-de-female")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_wav_bytes())
+
+    response = client.get(
+        f"/v1/admin/fillers/{filler['id']}/audio?voice_id=default-de-female",
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "audio/wav"
+    assert response.content[:4] == b"RIFF"
+
+    # Ohne Token kein Audio
+    assert client.get(
+        f"/v1/admin/fillers/{filler['id']}/audio?voice_id=default-de-female"
+    ).status_code == 401
+
+
+def test_playing_missing_audio_says_so(client, admin_headers):
+    filler = _create_filler(client, admin_headers)
+    response = client.get(
+        f"/v1/admin/fillers/{filler['id']}/audio?voice_id=default-de-male",
+        headers=admin_headers,
+    )
+    assert response.status_code == 404
+    assert "default-de-male" in response.json()["detail"]

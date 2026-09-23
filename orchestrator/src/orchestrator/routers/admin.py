@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from .. import repos
@@ -252,6 +252,15 @@ class FillerPayload(BaseModel):
     # Wartezeit, bevor dieser Filler spielen darf (0 = sofort): Ist die
     # Antwort bzw. das Tool vorher fertig, entfaellt der Filler.
     delay_ms: int = Field(default=1200, ge=0, le=60_000)
+    # Womit das Audio vorgeneriert wird (v1.15).
+    engine: Literal["xtts", "piper"] = "xtts"
+
+
+@router.get("/tts-engines")
+def list_tts_engines() -> list[dict]:
+    """Engines, die Filler-Audio erzeugen koennen - Grundlage fuer das
+    Dropdown im Filler-Formular."""
+    return filler_service.TTS_ENGINES
 
 
 @router.get("/fillers")
@@ -272,7 +281,7 @@ def list_fillers() -> list[dict]:
 def create_filler(payload: FillerPayload) -> dict:
     try:
         return repos.create_filler(payload.title, payload.text, payload.trigger_id,
-                                   payload.enabled, payload.delay_ms)
+                                   payload.enabled, payload.delay_ms, payload.engine)
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=400, detail="trigger_id existiert nicht")
 
@@ -283,11 +292,32 @@ def update_filler(filler_id: int, payload: FillerPayload) -> dict:
     if old is None:
         raise HTTPException(status_code=404, detail="Filler nicht gefunden")
     updated = repos.update_filler(filler_id, payload.title, payload.text, payload.trigger_id,
-                                  payload.enabled, payload.delay_ms)
-    if old["text"] != payload.text:
-        # Text geaendert -> gecachtes Audio passt nicht mehr.
+                                  payload.enabled, payload.delay_ms, payload.engine)
+    if old["text"] != payload.text or (old.get("engine") or "xtts") != payload.engine:
+        # Text ODER Engine geaendert -> gecachtes Audio passt nicht mehr
+        # (es waere sonst noch mit der alten Engine/dem alten Text erzeugt).
         filler_service.delete_audio(filler_id)
     return updated
+
+
+@router.get("/fillers/{filler_id}/audio")
+def get_filler_audio(filler_id: int, voice_id: str) -> Response:
+    """Vorgeneriertes Filler-Audio zum Anhoeren im Panel (v1.15).
+
+    Damit faellt eine misslungene Generierung beim Anlegen auf - statt
+    erst, wenn der Filler zufaellig im Realtime-Talk gespielt wird."""
+    path = filler_service.audio_path(filler_id, voice_id)
+    if not path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Fuer Stimme '{voice_id}' ist noch kein Audio generiert",
+        )
+    return Response(
+        content=path.read_bytes(),
+        media_type="audio/wav",
+        # Nach einem Neu-Generieren soll der Browser das neue Audio holen.
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @router.delete("/fillers/{filler_id}", status_code=204)

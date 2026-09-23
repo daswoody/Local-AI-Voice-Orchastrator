@@ -19,7 +19,7 @@ aus `ADMIN_USERNAME`/`ADMIN_PASSWORD` in die leere DB geschrieben.
 | Charakter | Globaler System-Prompt; pro Nutzer ueberschreibbar (Nutzer-Formular) |
 | Nutzer | Anlegen/Bearbeiten/Loeschen, Tier 1-3, Standard-Stimme, Charakter-Override |
 | Stimmen | Anlegen + WAV-Sample-Upload (landet im XTTS-Voices-Volume, kein docker cp mehr) |
-| Filler & Trigger | Eigene Trigger (Nachdenken/Suche/Tool inkl. Tool-Muster wie `Calendar-*`), Filler mit Titel+Text, "Audio generieren" rendert sie per XTTS pro Stimme vor |
+| Filler & Trigger | Eigene Trigger (Nachdenken/Suche/Tool inkl. Tool-Muster wie `Calendar-*`), Filler mit Titel+Text, Engine pro Filler (XTTS = Nutzerstimme, Piper = feste Stimme/robust), "Audio generieren" rendert vor, Play-Button pro Stimme zum Probehoeren |
 | Agenten | Spezial-Agenten (4.16) mit eigener ID, Beschreibung, System-Prompt und eigenem LiteLLM-Modell; erscheinen der Haupt-KI als Tool `agent-<id>` - z. B. Websuche/Coding an Cloud-Modelle delegieren. Reservierte ID `code-card`: schreibt automatisch die HTML-Layouts fuer Karten ohne passendes Template |
 | Karten | Layout-Templates (4.12) anlegen/bearbeiten/loeschen, Version zaehlt automatisch hoch; Format JSON (Layout-Baum) oder HTML (Fragment mit `{{data.*}}`-Platzhaltern, sandboxed gerendert) |
 
@@ -56,6 +56,13 @@ sauberes Deutsch) -> unter "Filler & Trigger" bei jedem Filler "Audio
 generieren" klicken. Ab dann spielt der Orchestrator Filler in der
 XTTS-Stimme aus dem Cache; ohne generiertes Audio faellt er auf Piper
 zurueck, ohne Piper laeuft die Antwort einfach ohne Filler.
+
+**Nach dem Generieren kurz probehoeren:** In der Audio-Spalte steht pro
+Stimme ein Play-Button. Klingt ein Filler kaputt oder fehlt er, hilft
+entweder erneutes Generieren oder die Engine dieses Fillers auf **Piper**
+umstellen (robust und ohne GPU, klingt dafuer anders als die
+Hauptantwort). Achtung: Ein Wechsel der Engine oder des Textes verwirft
+vorhandenes Audio - danach neu generieren.
 
 ## 1. Lokal testen (ohne echtes LiteLLM/Weaviate)
 

@@ -68,7 +68,12 @@ CREATE TABLE IF NOT EXISTS fillers (
     -- Wartezeit, bevor DIESER Filler spielen darf: Ist die Antwort (bzw.
     -- das Tool) vorher fertig, entfaellt er - so blockieren Filler keine
     -- schnellen Antworten. 0 = sofort spielen.
-    delay_ms INTEGER NOT NULL DEFAULT 1200
+    delay_ms INTEGER NOT NULL DEFAULT 1200,
+    -- Womit das Audio vorgeneriert wird (v1.15): 'xtts' = in der Stimme
+    -- des Nutzers (Default, kein Stimmbruch zur Hauptantwort), 'piper' =
+    -- feste Piper-Stimme, dafuer robust und schnell - Ausweg, wenn XTTS
+    -- fuer einen Text reproduzierbar scheitert.
+    engine TEXT NOT NULL DEFAULT 'xtts'
 );
 
 CREATE TABLE IF NOT EXISTS card_layouts (
@@ -188,6 +193,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     filler_columns = {row[1] for row in conn.execute("PRAGMA table_info(fillers)")}
     if "delay_ms" not in filler_columns:
         conn.execute("ALTER TABLE fillers ADD COLUMN delay_ms INTEGER NOT NULL DEFAULT 1200")
+    if "engine" not in filler_columns:
+        conn.execute("ALTER TABLE fillers ADD COLUMN engine TEXT NOT NULL DEFAULT 'xtts'")
     card_columns = {row[1] for row in conn.execute("PRAGMA table_info(card_layouts)")}
     if "format" not in card_columns:
         conn.execute("ALTER TABLE card_layouts ADD COLUMN format TEXT NOT NULL DEFAULT 'json'")

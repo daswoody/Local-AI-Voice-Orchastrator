@@ -36,6 +36,24 @@ const api = {
     return response.json();
   },
 
+  /* Binaerdaten (Filler-Audio) MIT Token holen: ein <audio src="..."> kann
+   * keinen Authorization-Header senden, deshalb fetch + Blob-URL. */
+  async blob(path) {
+    const headers = {};
+    if (this.token) headers["Authorization"] = `Bearer ${this.token}`;
+    const response = await fetch(path, { headers });
+    if (response.status === 401) {
+      logout();
+      throw new Error("Sitzung abgelaufen - bitte neu anmelden.");
+    }
+    if (!response.ok) {
+      let detail = `${response.status}`;
+      try { detail = (await response.json()).detail || detail; } catch (_) {}
+      throw new Error(detail);
+    }
+    return response.blob();
+  },
+
   get(path) { return this.request("GET", path); },
   post(path, body) { return this.request("POST", path, body); },
   put(path, body) { return this.request("PUT", path, body); },
@@ -151,7 +169,7 @@ function wireForms(root) {
 
 const NO_RERENDER = new Set(["editUser", "resetUserForm", "pickSample", "editCard",
                              "editFiller", "resetFillerForm", "editAgent",
-                             "resetAgentForm", "switchCardFormat"]);
+                             "resetAgentForm", "switchCardFormat", "playFiller"]);
 
 // ---- View: Modelle -----------------------------------------------------------------
 
@@ -412,11 +430,15 @@ views.voices = async () => {
 // ---- View: Filler & Trigger ------------------------------------------------------------------
 
 views.fillers = async () => {
-  const [triggers, fillers] = await Promise.all([
+  const [triggers, fillers, engines] = await Promise.all([
     api.get("/v1/admin/triggers"),
     api.get("/v1/admin/fillers"),
+    api.get("/v1/admin/tts-engines"),
   ]);
   const kindLabel = { thinking: "Nachdenken", search: "Suche/RAG", tool: "Tool-Aufruf" };
+  const engineLabel = Object.fromEntries(engines.map((e) => [e.id, e.label]));
+  const engineOptions = engines.map((e) =>
+    `<option value="${esc(e.id)}">${esc(e.label)}</option>`).join("");
 
   const triggerRows = triggers.map((trigger) => `
     <tr>
@@ -433,15 +455,22 @@ views.fillers = async () => {
 
   const fillerRows = fillers.map((filler) => {
     const audio = Object.entries(filler.audio_status || {});
-    const generated = audio.filter(([, ok]) => ok).length;
+    // Pro Stimme ein Play-Button (bzw. Warnung, wenn nichts generiert ist):
+    // So hoert man direkt, ob die Generierung gelungen ist - statt es erst
+    // zu merken, wenn der Filler zufaellig im Realtime-Talk auftaucht.
+    const audioCell = audio.map(([voiceId, ok]) => ok
+      ? `<button class="small ghost" data-action="playFiller" data-id="${filler.id}" data-voice="${esc(voiceId)}" title="Anhoeren">&#9654; ${esc(voiceId)}</button>`
+      : `<span class="badge warn" title="noch nicht generiert">${esc(voiceId)}</span>`
+    ).join(" ") || '<span class="badge off">keine Stimmen angelegt</span>';
+
     return `
     <tr>
       <td>${esc(filler.title)}<br><small>"${esc(filler.text)}"</small></td>
       <td>${esc(filler.trigger_name)}</td>
+      <td>${esc(engineLabel[filler.engine] || filler.engine || "xtts")}</td>
       <td>${filler.delay_ms} ms</td>
       <td>${filler.enabled ? '<span class="badge ok">aktiv</span>' : '<span class="badge off">aus</span>'}</td>
-      <td>${generated}/${audio.length} Stimmen
-        ${generated < audio.length ? '<span class="badge warn">unvollstaendig</span>' : '<span class="badge ok">bereit</span>'}</td>
+      <td>${audioCell}</td>
       <td class="actions">
         <button class="small" data-action="generateFiller" data-id="${filler.id}">Audio generieren</button>
         <button class="small ghost" data-action="editFiller" data-id="${filler.id}">Bearbeiten</button>
@@ -456,8 +485,8 @@ views.fillers = async () => {
     <section class="block">
       <h2>Filler</h2>
       <table>
-        <thead><tr><th>Filler</th><th>Trigger</th><th>Delay</th><th>Status</th><th>Audio</th><th></th></tr></thead>
-        <tbody>${fillerRows || "<tr><td colspan='6'>Noch keine Filler.</td></tr>"}</tbody>
+        <thead><tr><th>Filler</th><th>Trigger</th><th>Engine</th><th>Delay</th><th>Status</th><th>Audio (anhoeren)</th><th></th></tr></thead>
+        <tbody>${fillerRows || "<tr><td colspan='7'>Noch keine Filler.</td></tr>"}</tbody>
       </table>
       <br>
       <h2 id="filler-form-title">Neuen Filler anlegen</h2>
@@ -465,10 +494,15 @@ views.fillers = async () => {
         <input type="hidden" name="id">
         <label>Titel <input name="title" required></label>
         <label>Trigger <select name="trigger_id">${triggerOptions}</select></label>
+        <label>Engine (womit das Audio erzeugt wird)
+          <select name="engine">${engineOptions}</select>
+        </label>
         <label>Delay (ms) - Wartezeit, bevor der Filler spielen darf; ist die Antwort/das Tool vorher fertig, entfaellt er. 0 = sofort
           <input name="delay_ms" type="number" min="0" max="60000" step="100" value="1200" required>
         </label>
         <label class="full">Gesprochener Text <input name="text" required placeholder="Ich schaue kurz in den Kalender."></label>
+        <p class="hint full">${engines.map((e) => `<strong>${esc(e.label)}:</strong> ${esc(e.description)}`).join("<br>")}<br>
+        Achtung: Beim Wechsel der Engine (oder des Textes) wird vorhandenes Audio verworfen - danach neu generieren.</p>
         <div><button type="submit">Speichern</button>
         <button type="button" class="ghost" data-action="resetFillerForm">Neu</button></div>
       </form>
@@ -647,6 +681,7 @@ const formActions = {
       text: form.text.value,
       trigger_id: parseInt(form.trigger_id.value, 10),
       delay_ms: parseInt(form.delay_ms.value, 10),
+      engine: form.engine.value,
       enabled: true,
     };
     if (form.id.value) {
@@ -772,6 +807,7 @@ const buttonActions = {
     form.text.value = filler.text;
     form.trigger_id.value = filler.trigger_id;
     form.delay_ms.value = filler.delay_ms;
+    form.engine.value = filler.engine || "xtts";
     document.getElementById("filler-form-title").textContent = `Filler bearbeiten: ${filler.title}`;
     form.scrollIntoView({ behavior: "smooth" });
   },
@@ -790,6 +826,20 @@ const buttonActions = {
     if (failed.length) {
       alert("Teilweise fehlgeschlagen:\n" + failed.map((f) => `${f.voice_id}: ${f.error}`).join("\n"));
     }
+  },
+
+  /* Generiertes Audio anhoeren - deckt misslungene Generierungen auf,
+   * bevor sie im Realtime-Talk auffallen. */
+  async playFiller(data) {
+    const blob = await api.blob(
+      `/v1/admin/fillers/${data.id}/audio?voice_id=${encodeURIComponent(data.voice)}`
+    );
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    // Blob-URL wieder freigeben, sonst sammeln sich die Objekte im Tab an.
+    audio.addEventListener("ended", () => URL.revokeObjectURL(url));
+    audio.addEventListener("error", () => URL.revokeObjectURL(url));
+    await audio.play();
   },
 
   async deleteFiller(data) {

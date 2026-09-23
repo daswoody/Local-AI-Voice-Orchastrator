@@ -18,9 +18,32 @@ import httpx
 
 from .. import repos
 from ..config import settings
-from .tts_client import xtts_client
+from .tts_client import piper_client, xtts_client
 
 logger = logging.getLogger(__name__)
+
+# Verfuegbare Engines fuer die Vorgenerierung (v1.15). `per_voice` sagt,
+# ob die Engine in der jeweiligen Nutzerstimme spricht - Piper hat genau
+# eine feste Stimme, sein Audio gilt deshalb fuer alle Stimmen.
+TTS_ENGINES: list[dict] = [
+    {
+        "id": "xtts",
+        "label": "XTTS-v2 (Stimme des Nutzers)",
+        "per_voice": True,
+        "description": "Gleiche Stimme wie die Hauptantwort - kein hoerbarer "
+                       "Stimmbruch. Braucht ein Voice-Sample und mehr VRAM.",
+    },
+    {
+        "id": "piper",
+        "label": "Piper (feste Stimme, robust)",
+        "per_voice": False,
+        "description": "Schnell und ohne GPU; klingt aber anders als die "
+                       "Hauptantwort. Guter Ausweg, wenn XTTS bei einem Text "
+                       "reproduzierbar scheitert.",
+    },
+]
+
+ENGINE_IDS = [engine["id"] for engine in TTS_ENGINES]
 
 
 def audio_path(filler_id: int, voice_id: str) -> Path:
@@ -72,7 +95,7 @@ def delete_audio(filler_id: int) -> None:
 
 
 async def generate_audio(filler_id: int) -> list[dict]:
-    """Generiert den Filler per XTTS fuer alle Stimmen, die ein Sample haben.
+    """Generiert das Filler-Audio mit der am Filler gewaehlten Engine (v1.15).
 
     Synchron im Request (Admin klickt und wartet ein paar Sekunden) - bei
     einer Handvoll Stimmen ist eine Job-Queue Overkill."""
@@ -83,6 +106,12 @@ async def generate_audio(filler_id: int) -> list[dict]:
     cache_dir = Path(settings.filler_cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
+    if (filler.get("engine") or "xtts") == "piper":
+        return await _generate_with_piper(filler_id, filler["text"])
+    return await _generate_with_xtts(filler_id, filler["text"])
+
+
+async def _generate_with_xtts(filler_id: int, text: str) -> list[dict]:
     results = []
     for voice in repos.list_voices():
         voice_id = voice["id"]
@@ -94,7 +123,7 @@ async def generate_audio(filler_id: int) -> list[dict]:
         try:
             pcm = bytearray()
             rate = 24000
-            async for chunk_rate, chunk in xtts_client.stream(filler["text"], voice_id):
+            async for chunk_rate, chunk in xtts_client.stream(text, voice_id):
                 rate = chunk_rate
                 pcm.extend(chunk)
             _write_wav(audio_path(filler_id, voice_id), bytes(pcm), rate)
@@ -110,11 +139,34 @@ async def generate_audio(filler_id: int) -> list[dict]:
                 "error": "XTTS-Service waehrend der Generierung abgestuerzt. "
                          "Auf der VM pruefen: 'docker logs heimai-tts-xtts' "
                          "(Fehlertext/Traceback) und 'dmesg | grep -i oom' "
-                         "(RAM-Knappheit) sowie nvidia-smi (VRAM).",
+                         "(RAM-Knappheit) sowie nvidia-smi (VRAM). Alternativ "
+                         "diesen Filler auf die Engine 'Piper' umstellen.",
             })
         except Exception as exc:
             logger.exception("Filler-Generierung fuer Stimme %s fehlgeschlagen", voice_id)
             results.append({"voice_id": voice_id, "ok": False, "error": str(exc)[:350]})
+    return results
+
+
+async def _generate_with_piper(filler_id: int, text: str) -> list[dict]:
+    """Piper hat genau EINE Stimme - dasselbe Audio wird fuer alle Stimmen
+    abgelegt. So bleibt der Abspielpfad (Cache-Matrix Filler x Stimme)
+    unveraendert: select_filler muss die Engine gar nicht kennen."""
+    voices = repos.list_voices()
+    try:
+        pcm, rate = await piper_client.synthesize(text)
+    except Exception as exc:
+        logger.exception("Piper-Generierung fuer Filler %s fehlgeschlagen", filler_id)
+        error = str(exc)[:350]
+        return [{"voice_id": voice["id"], "ok": False, "error": error} for voice in voices]
+
+    results = []
+    for voice in voices:
+        try:
+            _write_wav(audio_path(filler_id, voice["id"]), pcm, rate)
+            results.append({"voice_id": voice["id"], "ok": True})
+        except Exception as exc:
+            results.append({"voice_id": voice["id"], "ok": False, "error": str(exc)[:350]})
     return results
 
 

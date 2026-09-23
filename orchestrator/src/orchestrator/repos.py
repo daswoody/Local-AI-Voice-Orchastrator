@@ -288,24 +288,24 @@ def fillers_for_kind(kind: str) -> list[dict]:
 
 
 def create_filler(title: str, text: str, trigger_id: int, enabled: bool,
-                  delay_ms: int = 1200) -> dict:
+                  delay_ms: int = 1200, engine: str = "xtts") -> dict:
     with db_session() as conn:
         cursor = conn.execute(
-            "INSERT INTO fillers (title, text, trigger_id, enabled, delay_ms)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (title, text, trigger_id, int(enabled), delay_ms),
+            "INSERT INTO fillers (title, text, trigger_id, enabled, delay_ms, engine)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (title, text, trigger_id, int(enabled), delay_ms, engine),
         )
         conn.commit()
         return get_filler(cursor.lastrowid)
 
 
 def update_filler(filler_id: int, title: str, text: str, trigger_id: int, enabled: bool,
-                  delay_ms: int = 1200) -> dict | None:
+                  delay_ms: int = 1200, engine: str = "xtts") -> dict | None:
     with db_session() as conn:
         cursor = conn.execute(
             "UPDATE fillers SET title = ?, text = ?, trigger_id = ?, enabled = ?,"
-            " delay_ms = ? WHERE id = ?",
-            (title, text, trigger_id, int(enabled), delay_ms, filler_id),
+            " delay_ms = ?, engine = ? WHERE id = ?",
+            (title, text, trigger_id, int(enabled), delay_ms, engine, filler_id),
         )
         conn.commit()
         if cursor.rowcount == 0:

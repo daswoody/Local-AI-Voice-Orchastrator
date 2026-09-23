@@ -1,8 +1,12 @@
+import gc
+import logging
 import threading
 from collections.abc import Iterator
 from pathlib import Path
 
 from .config import settings
+
+logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 24000  # XTTS-v2 gibt fest 24 kHz aus (passt zum Protokoll, 4.13)
 
@@ -12,24 +16,92 @@ class XttsEngine:
 
     Lazy geladen wie die Whisper-Engine; zusaetzlich werden die
     Conditioning-Latents pro voice_id gecacht, damit das Voice-Cloning
-    (~1-2s Latent-Berechnung) nur einmal pro Stimme anfaellt."""
+    (~1-2s Latent-Berechnung) nur einmal pro Stimme anfaellt.
+
+    Umschaltbares Device (v1.14): Das Admin-Panel weist zur Laufzeit eine
+    Karte zu ("cuda:0", "cuda:1", "cpu"). `assigned` ist die Zuweisung,
+    `effective` das tatsaechlich genutzte Device - weichen sie ab, hat der
+    Fallback gegriffen (Karte voll). ACHTUNG: Die gecachten Latents sind
+    Tensoren auf der alten Karte und muessen beim Wechsel mit weg."""
 
     def __init__(self) -> None:
         self._model = None
         self._lock = threading.Lock()
         self._latents_cache: dict[str, tuple] = {}
+        self._assigned: str = settings.device
+        self._effective: str | None = None
+
+    # ---- Laden / Device-Wechsel -------------------------------------------
 
     def load(self) -> None:
         with self._lock:
-            if self._model is not None:
-                return
-            import torch  # noqa: F401 - stellt sicher, dass torch da ist, bevor TTS importiert
-            from TTS.api import TTS
+            self._load_locked()
 
-            api = TTS(settings.model_name).to(settings.device)
-            # Fuer inference_stream brauchen wir das rohe Xtts-Modell hinter
-            # der High-Level-API (die API selbst kann kein Streaming).
-            self._model = api.synthesizer.tts_model
+    def _load_locked(self) -> None:
+        if self._model is not None:
+            return
+        import torch  # noqa: F401 - stellt sicher, dass torch da ist, bevor TTS importiert
+        from TTS.api import TTS
+
+        target = self._assigned
+        try:
+            api = TTS(settings.model_name).to(target)
+        except Exception as exc:
+            if target == "cpu":
+                raise
+            # Gleiche Philosophie wie bei Whisper: lieber langsam als tot.
+            # XTTS auf CPU ist allerdings WIRKLICH langsam - das Panel zeigt
+            # die Abweichung deshalb als Warnung an.
+            logger.warning(
+                "XTTS-Laden auf %s fehlgeschlagen (VRAM belegt?) - CPU-Fallback "
+                "(sehr langsam): %s", target, str(exc)[:200],
+            )
+            api = TTS(settings.model_name).to("cpu")
+            target = "cpu"
+        # Fuer inference_stream brauchen wir das rohe Xtts-Modell hinter
+        # der High-Level-API (die API selbst kann kein Streaming).
+        self._model = api.synthesizer.tts_model
+        self._effective = target
+
+    def set_device(self, device: str) -> dict:
+        """Weist zur Laufzeit ein Device zu und laedt das Modell dort neu."""
+        with self._lock:
+            self._assigned = device
+            self._model = None
+            self._effective = None
+            # Latents zeigen auf die alte Karte -> mit verwerfen, sonst
+            # knallt die naechste Synthese mit einem Device-Mismatch.
+            self._latents_cache.clear()
+            self._free_memory()
+            self._load_locked()
+            return self._status_locked()
+
+    @staticmethod
+    def _free_memory() -> None:
+        gc.collect()
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:  # pragma: no cover - torch fehlt nur in Tests
+            pass
+
+    # ---- Status ------------------------------------------------------------
+
+    def status(self) -> dict:
+        with self._lock:
+            return self._status_locked()
+
+    def _status_locked(self) -> dict:
+        return {
+            "assigned": self._assigned,
+            "effective": self._effective,
+            "loaded": self._model is not None,
+            "model": settings.model_name,
+        }
+
+    # ---- Stimmen / Inferenz ------------------------------------------------
 
     def _voice_path(self, voice_id: str) -> Path:
         return Path(settings.voices_dir) / f"{voice_id}.wav"

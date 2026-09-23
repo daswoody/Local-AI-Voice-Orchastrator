@@ -12,6 +12,10 @@ dependencies = [
     "pyjwt>=2.9",
     "python-multipart>=0.0.12",
     "mcp>=1.2",
+    # NVML-Bindings fuer die GPU-Uebersicht (4.2/v1.14): reines Python, liest
+    # nur den Treiberzustand (VRAM, Kartenname) - belegt selbst kein VRAM.
+    # Ohne GPU-Freigabe im Container meldet das Panel das sauber.
+    "nvidia-ml-py>=12.560",
 ]
 
 [project.optional-dependencies]

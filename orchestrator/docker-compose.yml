@@ -37,6 +37,21 @@ services:
       - stt
       - tts-piper
       - tts-xtts
+    deploy:
+      resources:
+        reservations:
+          devices:
+            # NUR lesender Zugriff fuer die GPU-Uebersicht im Admin-Panel
+            # (4.2/v1.14): "utility" gibt NVML/nvidia-smi, aber KEINE
+            # CUDA-Laufzeit - der Orchestrator rechnet nichts auf der GPU
+            # und belegt kein VRAM. Damit sieht das Panel die Belegung
+            # beider Karten inklusive LM Studio auf dem Host.
+            # Falls der Runtime die Capability nicht akzeptiert: auf
+            # [gpu] aendern (dann ist auch die CUDA-Runtime sichtbar) -
+            # ohne den Block laeuft alles weiter, nur ohne VRAM-Zahlen.
+            - driver: nvidia
+              count: all
+              capabilities: [utility]
 
   stt:
     build:
@@ -49,8 +64,14 @@ services:
       # und WHISPER_COMPUTE_TYPE=int8 setzen (und den deploy-Block unten
       # entfernen) - Medium auf CPU ist langsam, small/base sind fluessiger.
       WHISPER_MODEL: medium
-      WHISPER_DEVICE: cuda
+      # Start-Default; die tatsaechliche Karte weist das Admin-Panel zur
+      # Laufzeit zu ("cuda:0"/"cuda:1"/"cpu", v1.14) und stellt sie nach
+      # einem Neustart automatisch wieder her.
+      WHISPER_DEVICE: cuda:0
       WHISPER_COMPUTE_TYPE: float16
+      # Damit "cuda:1" im Panel dieselbe Karte meint wie Index 1 in
+      # nvidia-smi: CUDA sortiert sonst nach "schnellste zuerst".
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
     volumes:
       - whisper-models:/models
     networks:
@@ -59,8 +80,11 @@ services:
       resources:
         reservations:
           devices:
+            # ALLE Karten sichtbar machen (v1.14): Welche genutzt wird,
+            # entscheidet der Dienst selbst - nur so ist die Zuweisung im
+            # Panel umschaltbar, ohne den Container neu zu erstellen.
             - driver: nvidia
-              count: 1
+              count: all
               capabilities: [gpu]
 
   tts-piper:
@@ -82,6 +106,10 @@ services:
       dockerfile: Dockerfile
     container_name: heimai-tts-xtts
     restart: unless-stopped
+    environment:
+      # Start-Default; die Karte weist das Admin-Panel zur Laufzeit zu (v1.14).
+      DEVICE: cuda:0
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
     volumes:
       - xtts-models:/models
       # Deutsche Sample-WAVs ({voice_id}.wav) hier ablegen - offener Punkt
@@ -93,8 +121,9 @@ services:
       resources:
         reservations:
           devices:
+            # Alle Karten sichtbar (v1.14), Auswahl trifft der Dienst.
             - driver: nvidia
-              count: 1
+              count: all
               capabilities: [gpu]
 
 networks:

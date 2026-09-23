@@ -118,6 +118,22 @@ Charakter des Projekts: **Lernprojekt** – schrittweise Umsetzung mit erklären
 
 **Modell-Hot-Swap (NEU in v1.6):** Siehe 4.14 — LM Studio bietet eine native REST-API zum Laden/Entladen, die der Orchestrator kapselt.
 
+**Zwei Karten & GPU-Zuweisung im Panel (NEU in v1.14):** Das Setup hat jetzt **zwei Karten** (11 GB + 8 GB). Damit ist das Budget oben kein Engpass mehr, sondern eine Verteilungsfrage — und die soll spontan entscheidbar sein. Admin-Panel-View **„GPUs"**: links die Karten mit Name, Compute-Capability und **live belegtem VRAM** (per NVML, enthält auch LM Studios Verbrauch auf dem Host), rechts eine Liste aller vier Dienste mit Dropdown pro Dienst (CPU / GPU 0 / GPU 1).
+
+**Warum auf Anwendungsebene und nicht über Docker:** Die GPU-Zuweisung eines Containers (`deploy.resources.reservations.devices`) ist beim Containerstart eingefroren — sie zu ändern hieße Container neu erstellen, den Docker-Socket in den Orchestrator mounten (faktisch Root auf dem Host) und sich mit Coolify überwerfen, das die Compose beim nächsten Deploy zurückschreibt. Stattdessen sehen die GPU-Container **alle** Karten (`count: all`) und die Anwendung wählt ihr Device selbst: STT über `device_index` von faster-whisper, XTTS über `torch .to("cuda:N")`. Ein Wechsel lädt das Modell auf der neuen Karte neu (Sekunden), **ohne Container-Neustart**, und überlebt Coolify-Deploys. Beide Dienste bieten dafür `GET/POST /v1/device`.
+
+**Zuweisung, Abweichung und Persistenz:**
+- Die Wahl liegt in `app_settings` (`gpu_device_<dienst>`); der Orchestrator stellt sie beim Start und bei jedem Öffnen der Panel-Seite wieder her, falls ein Dienst zwischendurch neu gestartet ist (dann meldet er seinen Compose-Default).
+- Jeder Dienst meldet **`assigned`** (zugewiesen) und **`effective`** (tatsächlich geladen). Reicht das VRAM nicht, greift der CPU-Fallback (4.13/v1.11.1) — das Panel zeigt dann „weicht ab" statt stillschweigend etwas anderes zu tun. Der Orchestrator zieht eine aktive Abweichung **nicht** automatisch zurück auf die GPU (sonst Endlosschleife gegen den Fallback).
+- **Compute-Type folgt der Karte:** Der Orchestrator liest die Compute-Capability per NVML und gibt dem STT-Dienst beim Wechsel den passenden Typ mit — `float16` ab Turing (≥ 7.0), `int8_float16` auf Pascal und älter, wo float16 emuliert und damit langsamer ist.
+- `CUDA_DEVICE_ORDER=PCI_BUS_ID` in den Containern, damit „GPU 1" im Panel dieselbe Karte meint wie Index 1 in `nvidia-smi` (CUDA sortiert sonst nach „schnellste zuerst").
+
+**Nicht umschaltbar (bewusst in der Liste, aber ohne Dropdown):**
+- **LM Studio** läuft auf dem **Host**, nicht als Container — der Orchestrator hat keinen Zugriff darauf. Die Karte fürs LLM wird in LM Studio selbst gewählt (GPU-Einstellungen bzw. `CUDA_VISIBLE_DEVICES` des Prozesses). Das Panel zeigt den Eintrag als Info mit genau diesem Hinweis; den VRAM-Verbrauch sieht man trotzdem in der Kartenübersicht.
+- **Piper** ist per Design CPU-only (4.3) — sub-sekundenschnell auch ohne GPU.
+
+Der Orchestrator-Container bekommt für die Anzeige nur **lesenden** GPU-Zugriff (`capabilities: [utility]` → NVML/nvidia-smi, keine CUDA-Runtime) und belegt damit selbst kein VRAM. Fehlt die Freigabe, bleibt das Panel bedienbar und meldet nur die fehlende VRAM-Anzeige.
+
 ### 4.3 Filler-Phrasen-Strategie
 
 | Trigger | Phrasen-Typ |
@@ -726,9 +742,10 @@ Verbindlicher Vertrag in `docs/PROTOCOL.md` (App-Repo). **Die App ist fertig geb
 
 ---
 
-**Version:** 1.13.1
-**Stand:** 2026-07-18
+**Version:** 1.14
+**Stand:** 2026-09-23
 **Changelog:**
+- v1.14 (2026-09-23): **Zweite Grafikkarte + GPU-Zuweisung im Admin-Panel** (Setup jetzt 11 GB + 8 GB). Neue Panel-View „GPUs": Karten mit Name, Compute-Capability und live belegtem VRAM (NVML, inkl. LM Studio auf dem Host) plus Dropdown pro Dienst (CPU / GPU 0 / GPU 1). Umgesetzt auf **Anwendungsebene statt über Docker** (Begründung in 4.2): Container sehen alle Karten (`count: all`), STT/XTTS laden ihr Modell per `GET/POST /v1/device` zur Laufzeit auf der gewählten Karte neu — kein Container-Neustart, kein Docker-Socket, Coolify-fest. Zuweisung wird in `app_settings` gemerkt und nach Dienst-Neustarts automatisch wiederhergestellt; `assigned` vs. `effective` macht einen aktiven CPU-Fallback im Panel sichtbar, statt ihn zu überschreiben. Compute-Type folgt der Karte (float16 ab Turing, int8_float16 auf Pascal). Nicht umschaltbar und als Info gekennzeichnet: LM Studio (läuft auf dem Host — Karte dort einstellen) und Piper (CPU per Design). 111 Orchestrator-Tests grün, dazu 16 STT- und 10 XTTS-Tests.
 - v1.13.1 (2026-07-18): **Geräte-Tokens + einheitliche Auth** (App-Test: 7-Tage-JWT zwingt Geräte zum wöchentlichen Re-Login; WebSocket prüfte Tokens milder als REST). Login liefert jetzt ein **langlebiges, widerrufbares Geräte-Token** (nur SHA-256-Hash in der DB, Prefix `hda_`) statt Langzeit-JWT — bewusste Entscheidung gegen 1-Jahres-JWTs: Geräte-Tokens sind einzeln widerrufbar (Admin-Panel „Angemeldete Geräte" mit zuletzt-gesehen + Abmelden), das Tier wird pro Request frisch aus der DB gelesen (Zurückstufen wirkt sofort), Passwort-Reset/Nutzer-Löschung widerruft alle Geräte des Nutzers. Alt-JWTs bleiben bis Ablauf als Fallback gültig. **WS-Auth vereinheitlicht:** mitgeschicktes, aber ungültiges Token → `error`-Frame + Close 4401 (vorher stiller Gast-Fallback → Dialoge liefen scheinbar weiter, landeten aber als unauffindbare Gast-Gespräche); ohne Token bleibt Gast erlaubt (Satelliten-Szenario 4.4). Dokumentiert in `docs/protocol-additions-2.5.md` (Abschnitt 7). 98 Tests grün.
 - v1.13 (2026-07-16): **Voice-First-Antwortmodell + Gesprächsgedächtnis** (Nutzer-Use-Case: Spracheingabe → kurze Sprachantwort, Umfang in Karten, Folgefrage kennt die Karten-Infos). Bei Spracheingaben bekommt das LLM eine Sprachmodus-Anweisung (Antwort = Sprachantwort, 1–3 Sätze ohne Formatierung; Umfangreiches per `show_card` auslagern) — die Audio-Kurzfassung (v1.10) ist nur noch Sicherheitsnetz. NEU entdeckte Lücke geschlossen: Der LLM-Kontext wurde bisher pro Turn frisch aufgebaut (kein Gesprächsgedächtnis!) — jetzt gehen die letzten 12 Nachrichten der Konversation inkl. Karten-Daten (ohne Layout-HTML) in den Kontext (`HISTORY_MAX_MESSAGES`/`HISTORY_MAX_CHARS_PER_MESSAGE`). 91 Tests grün.
 - v1.12.6 (2026-07-16): **Fähigkeiten in den System-Prompt** (fünfter Praxistest: Modell verneinte interaktive Karten, ohne `show_card` aufzurufen — kleine Modelle beantworten Fähigkeitsfragen aus dem Vorwissen, nicht aus Tool-Beschreibungen). Der ToolExecutor liefert `system_hint()`: Karten-Fähigkeit inkl. interaktiver Mini-Tools („niemals ablehnen", Funktionswunsch → `request`-Feld) + Liste der aktiven Agenten mit Beschreibung (ohne internen `code-card`); der Graph hängt ihn an den Charakter-Prompt jeder Session mit Karten-Kanal. 89 Tests grün.

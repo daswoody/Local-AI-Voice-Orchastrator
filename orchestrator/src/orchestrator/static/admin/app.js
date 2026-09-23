@@ -124,8 +124,15 @@ function wireForms(root) {
     });
   });
   root.querySelectorAll("[data-action-change]").forEach((element) => {
-    element.addEventListener("change", () => {
-      buttonActions[element.dataset.actionChange]?.(element.dataset);
+    element.addEventListener("change", async () => {
+      const action = element.dataset.actionChange;
+      try {
+        await buttonActions[action]?.(element.dataset, element);
+        if (!NO_RERENDER.has(action)) render();
+      } catch (err) {
+        alert(err.message);
+        render();
+      }
     });
   });
   root.querySelectorAll("[data-action]").forEach((button) => {
@@ -175,6 +182,94 @@ views.models = async () => {
       <table>
         <thead><tr><th>Modell</th><th>Status</th><th></th></tr></thead>
         <tbody>${rows || "<tr><td colspan='3'>Keine Modelle gefunden.</td></tr>"}</tbody>
+      </table>
+    </section>`;
+};
+
+// ---- View: GPUs ------------------------------------------------------------------------
+
+views.gpus = async () => {
+  const data = await api.get("/v1/admin/gpus");
+
+  const notice = data.nvml.available
+    ? ""
+    : `<div class="notice error">Keine VRAM-Anzeige: ${esc(data.nvml.reason)}</div>`;
+
+  const gpuCards = data.gpus.map((gpu) => {
+    const percent = gpu.memory_total_mb
+      ? Math.round((gpu.memory_used_mb / gpu.memory_total_mb) * 100) : 0;
+    const capability = gpu.compute_capability
+      ? ` &middot; Compute ${gpu.compute_capability} &middot; ${esc(gpu.compute_type)}` : "";
+    return `
+      <div class="gpu-card">
+        <h3>GPU ${gpu.index} &ndash; ${esc(gpu.name)}</h3>
+        <div class="sub"><code>${esc(gpu.device)}</code>${capability}</div>
+        <div class="vram-bar"><span class="${percent >= 85 ? "hot" : ""}" style="width:${percent}%"></span></div>
+        <div class="vram-text">${gpu.memory_used_mb} / ${gpu.memory_total_mb} MB belegt &middot; ${gpu.memory_free_mb} MB frei</div>
+      </div>`;
+  }).join("");
+
+  // Ohne NVML-Zugriff trotzdem zuweisbar bleiben: dann generische Eintraege.
+  const choices = data.gpus.length
+    ? data.gpus.map((gpu) => ({
+        device: gpu.device,
+        label: `GPU ${gpu.index} - ${gpu.name} (${gpu.memory_free_mb} MB frei)`,
+      }))
+    : [0, 1].map((index) => ({ device: `cuda:${index}`, label: `GPU ${index}` }));
+
+  const deviceOptions = (selected) =>
+    [{ device: "cpu", label: "CPU" }, ...choices].map((choice) =>
+      `<option value="${esc(choice.device)}" ${choice.device === selected ? "selected" : ""}>${esc(choice.label)}</option>`
+    ).join("");
+
+  const rows = data.services.map((service) => {
+    let control;
+    if (!service.controllable) {
+      control = service.external
+        ? '<span class="badge off">extern (Host)</span>'
+        : '<span class="badge off">CPU (fest)</span>';
+    } else if (service.reachable) {
+      control = `<select data-action-change="assignDevice" data-service="${esc(service.name)}">${deviceOptions(service.assigned)}</select>`;
+    } else {
+      control = '<span class="badge warn">nicht erreichbar</span>';
+    }
+
+    let running = "&ndash;";
+    if (service.effective) {
+      const deviates = service.assigned && service.effective !== service.assigned;
+      running = `<code>${esc(service.effective)}</code>`;
+      if (deviates) {
+        running += ` <span class="badge warn">weicht ab</span>`;
+      } else if (service.loaded) {
+        running += ' <span class="badge ok">geladen</span>';
+      } else {
+        running += ' <span class="badge off">noch nicht geladen</span>';
+      }
+    } else if (service.error) {
+      running = `<span class="badge warn">${esc(service.error)}</span>`;
+    }
+
+    return `
+      <tr>
+        <td>${esc(service.label)}<br><small>${esc(service.note)}</small></td>
+        <td>${control}</td>
+        <td>${running}</td>
+      </tr>`;
+  }).join("");
+
+  return `
+    <h1>GPUs &amp; Dienste</h1>
+    <p class="hint">Verteilt die Dienste auf die vorhandenen Karten (VRAM-Budget 4.2). Der Wechsel laedt das Modell auf der neuen Karte neu &ndash; das dauert einige Sekunden, ein Container-Neustart ist nicht noetig, und die Zuweisung wird nach einem Neustart automatisch wiederhergestellt. Reicht das VRAM nicht, weicht der Dienst auf die CPU aus und die Spalte "Laeuft auf" zeigt "weicht ab".</p>
+    ${notice}
+    <section class="block">
+      <h2>Grafikkarten</h2>
+      <div class="gpu-grid">${gpuCards || "<p class='hint'>Keine Karten sichtbar.</p>"}</div>
+    </section>
+    <section class="block">
+      <h2>Dienste</h2>
+      <table>
+        <thead><tr><th>Dienst</th><th>Zuweisung</th><th>Laeuft auf</th></tr></thead>
+        <tbody>${rows}</tbody>
       </table>
     </section>`;
 };
@@ -597,6 +692,17 @@ const formActions = {
 
 const buttonActions = {
   activateModel: (data) => api.post("/v1/admin/models/activate", { model: data.id }),
+
+  async assignDevice(data, element) {
+    // Das Neuladen des Modells dauert - Zeile sichtbar "beschaeftigt"
+    // stellen, sonst wirkt das Panel eingefroren.
+    element.disabled = true;
+    const row = element.closest("tr");
+    if (row) row.style.opacity = "0.5";
+    await api.put(`/v1/admin/gpus/${encodeURIComponent(data.service)}`, {
+      device: element.value,
+    });
+  },
 
   editUser(data) {
     const users = JSON.parse(document.getElementById("users-data").textContent);

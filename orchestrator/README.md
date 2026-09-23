@@ -15,12 +15,41 @@ aus `ADMIN_USERNAME`/`ADMIN_PASSWORD` in die leere DB geschrieben.
 | Bereich | Funktion |
 |---|---|
 | Modelle | In LiteLLM registrierte Modelle anzeigen und das aktive Modell setzen (LM Studio laedt per JIT beim ersten Request, Entladen per Idle-TTL) |
+| GPUs | Karten mit Name, Compute-Capability und live belegtem VRAM; pro Dienst die Karte waehlen (CPU / GPU 0 / GPU 1). STT und XTTS laden ihr Modell dabei zur Laufzeit neu - kein Container-Neustart. Piper ist CPU-only, LM Studio laeuft auf dem Host und wird dort eingestellt (4.2) |
 | Charakter | Globaler System-Prompt; pro Nutzer ueberschreibbar (Nutzer-Formular) |
 | Nutzer | Anlegen/Bearbeiten/Loeschen, Tier 1-3, Standard-Stimme, Charakter-Override |
 | Stimmen | Anlegen + WAV-Sample-Upload (landet im XTTS-Voices-Volume, kein docker cp mehr) |
 | Filler & Trigger | Eigene Trigger (Nachdenken/Suche/Tool inkl. Tool-Muster wie `Calendar-*`), Filler mit Titel+Text, "Audio generieren" rendert sie per XTTS pro Stimme vor |
 | Agenten | Spezial-Agenten (4.16) mit eigener ID, Beschreibung, System-Prompt und eigenem LiteLLM-Modell; erscheinen der Haupt-KI als Tool `agent-<id>` - z. B. Websuche/Coding an Cloud-Modelle delegieren. Reservierte ID `code-card`: schreibt automatisch die HTML-Layouts fuer Karten ohne passendes Template |
 | Karten | Layout-Templates (4.12) anlegen/bearbeiten/loeschen, Version zaehlt automatisch hoch; Format JSON (Layout-Baum) oder HTML (Fragment mit `{{data.*}}`-Platzhaltern, sandboxed gerendert) |
+
+### GPUs verteilen (zwei Karten)
+
+Unter "GPUs" siehst du beide Karten mit belegtem VRAM und weist jedem
+Dienst eine zu. Ein Wechsel laedt das Modell auf der neuen Karte neu
+(einige Sekunden) - der Container bleibt laufen, und die Zuweisung wird
+nach einem Neustart automatisch wiederhergestellt.
+
+Bewaehrte Aufteilung bei 11 GB + 8 GB:
+
+| Dienst | Karte | Warum |
+|---|---|---|
+| LLM (LM Studio) | grosse Karte | groesster und am staerksten schwankender Verbrauch |
+| STT (Whisper Medium) | kleine Karte | ~1,5-3 GB, laeuft nur waehrend der Transkription |
+| XTTS | kleine Karte | ~3 GB, zusammen mit Whisper passen beide in 8 GB |
+| Piper | CPU (fest) | sub-sekundenschnell auch ohne GPU |
+
+**Wichtig:** Die Karte fuer das LLM stellst du in **LM Studio** ein, nicht
+hier - LM Studio laeuft auf dem Host und ist fuer den Orchestrator nicht
+erreichbar. Das Panel zeigt den Eintrag nur zur Orientierung; den
+VRAM-Verbrauch siehst du trotzdem in der Kartenuebersicht.
+
+Zeigt ein Dienst "weicht ab", hat er die zugewiesene Karte nicht bekommen
+(zu wenig freies VRAM) und ist auf CPU ausgewichen - dann eine andere
+Karte waehlen oder in LM Studio Platz schaffen. Fehlt die VRAM-Anzeige
+ganz, hat der Orchestrator-Container keinen GPU-Zugriff: den
+`devices`-Block mit `capabilities: [utility]` in der Compose pruefen und
+neu deployen.
 
 Ablauf fuer die erste Stimme: Stimme anlegen -> Sample hochladen (6-30s
 sauberes Deutsch) -> unter "Filler & Trigger" bei jedem Filler "Audio

@@ -17,7 +17,7 @@ from .. import repos
 from ..config import settings
 from ..schemas import CardLayout
 from ..security import hash_password, require_admin
-from ..services import filler_service
+from ..services import filler_service, gpu_manager
 from ..services.litellm_client import litellm_client
 
 logger = logging.getLogger(__name__)
@@ -398,6 +398,48 @@ def update_agent(slug: str, payload: AgentPayload) -> dict:
 def delete_agent(slug: str) -> None:
     if not repos.delete_agent(slug):
         raise HTTPException(status_code=404, detail="Agent nicht gefunden")
+
+
+# ---- GPU-Verteilung (4.2, v1.14) ----------------------------------------------------
+#
+# Zwei Karten, vier Dienste: Hier waehlt der Admin pro Dienst die Karte (oder
+# CPU). Umgesetzt auf Anwendungsebene - die Container sehen alle Karten und
+# laden ihr Modell dort neu, wo sie sollen (Begruendung siehe gpu_manager).
+
+
+class DeviceAssignPayload(BaseModel):
+    # "cpu", "cuda:0", "cuda:1", ...
+    device: str = Field(pattern=r"^(cpu|cuda(:\d+)?)$")
+
+
+@router.get("/gpus")
+async def gpu_overview() -> dict:
+    # Selbstheilung: Wurde ein Dienst zwischendurch neu gestartet, steht er
+    # wieder auf seinem Compose-Default - beim Oeffnen der Seite ziehen wir
+    # die gespeicherte Zuweisung nach.
+    try:
+        await gpu_manager.restore_assignments()
+    except Exception:
+        logger.exception("GPU-Zuweisungen konnten nicht geprueft werden")
+    return await gpu_manager.overview()
+
+
+@router.put("/gpus/{service}")
+async def assign_device(service: str, payload: DeviceAssignPayload) -> dict:
+    spec = gpu_manager.SERVICES.get(service)
+    if spec is None:
+        raise HTTPException(status_code=404, detail=f"Unbekannter Dienst '{service}'")
+    if not spec["controllable"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{spec['label']} ist nicht umschaltbar: {spec.get('note', '')}",
+        )
+    try:
+        return await gpu_manager.apply_device(service, payload.device)
+    except Exception as exc:
+        # Haeufigster Fall: Karte ist voll. Der Dienst sagt selbst, woran es
+        # lag - das gehoert unveraendert ins Panel.
+        raise HTTPException(status_code=502, detail=str(exc)[:400])
 
 
 # ---- Modelle (ueber LiteLLM, 4.6/4.14) ----------------------------------------------

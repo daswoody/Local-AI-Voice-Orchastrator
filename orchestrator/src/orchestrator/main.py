@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -7,14 +9,31 @@ from fastapi.staticfiles import StaticFiles
 
 from .db import init_db
 from .routers import admin, auth, cards, conversations, health, stream, voices
+from .services import gpu_manager
+
+logger = logging.getLogger(__name__)
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
+async def _restore_gpu_assignments() -> None:
+    """GPU-Zuweisungen nachziehen (v1.14). Im Hintergrund, damit der
+    Orchestrator nicht auf langsam startende GPU-Dienste wartet - und mit
+    kurzer Anlaufzeit, weil STT/XTTS beim gemeinsamen Compose-Start noch
+    nicht erreichbar sind."""
+    await asyncio.sleep(10)
+    try:
+        await gpu_manager.restore_assignments()
+    except Exception:
+        logger.exception("GPU-Zuweisungen konnten beim Start nicht angewendet werden")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    task = asyncio.create_task(_restore_gpu_assignments())
     yield
+    task.cancel()
 
 
 app = FastAPI(title="Heim-AI Voice-Orchestrator", lifespan=lifespan)

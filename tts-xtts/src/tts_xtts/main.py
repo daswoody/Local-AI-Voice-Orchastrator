@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import engine as engine_module
 from .config import settings
@@ -37,6 +37,31 @@ def root() -> dict[str, str]:
 @app.get("/v1/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+# ---- GPU-/Device-Zuweisung (v1.14) ------------------------------------------
+
+
+class DevicePayload(BaseModel):
+    device: str = Field(pattern=r"^(cpu|cuda(:\d+)?)$")
+
+
+@app.get("/v1/device")
+def get_device() -> dict:
+    return engine_module.engine.status()
+
+
+@app.post("/v1/device")
+async def set_device(payload: DevicePayload) -> dict:
+    """Laedt XTTS auf dem gewuenschten Device neu. Dauert einige Sekunden
+    (Modell + Latents), laeuft deshalb im Threadpool."""
+    try:
+        return await run_in_threadpool(engine_module.engine.set_device, payload.device)
+    except Exception as exc:
+        logger.exception("Device-Wechsel auf %s fehlgeschlagen", payload.device)
+        raise HTTPException(
+            status_code=500, detail=f"Device-Wechsel fehlgeschlagen: {str(exc)[:300]}"
+        )
 
 
 @app.get("/v1/voices")

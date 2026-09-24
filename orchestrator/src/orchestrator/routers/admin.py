@@ -460,7 +460,7 @@ async def activate_tts_engine(payload: TtsActivatePayload) -> dict:
             else "Bis dahin liest die App die Antworten selbst vor (TTS-Fallback)."
         )
         result["warning"] = (
-            f"{name} ist aktiviert, antwortet aber gerade nicht ({status['detail']}). {meanwhile}"
+            f"{name} ist aktiviert, antwortet aber gerade nicht: {status['detail']} {meanwhile}"
         )
     return result
 

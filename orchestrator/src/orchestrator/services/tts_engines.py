@@ -13,9 +13,11 @@ hergibt. Filler behalten ihre eigene Engine (v1.15)."""
 
 import asyncio
 import logging
+import socket
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -39,6 +41,7 @@ ENGINES: dict[str, dict] = {
         "per_voice": True,
         "needs_sample": True,
         "container": "heimai-tts-xtts",
+        "deploy_hint": "Laeuft der Voice-Stack (docker-compose.yml) in Coolify?",
         "base_url": lambda: settings.xtts_base_url,
         "health_path": "/v1/health",
         "description": "Klont die Nutzerstimme aus dem Voice-Sample, spricht "
@@ -51,6 +54,7 @@ ENGINES: dict[str, dict] = {
         "per_voice": False,
         "needs_sample": False,
         "container": "heimai-tts-piper",
+        "deploy_hint": "Laeuft der Voice-Stack (docker-compose.yml) in Coolify?",
         "base_url": lambda: settings.piper_base_url,
         "health_path": "/v1/health",
         "description": "Schnell und ohne GPU, eine feste deutsche Stimme - "
@@ -64,6 +68,9 @@ ENGINES: dict[str, dict] = {
         "per_voice": True,
         "needs_sample": False,
         "container": "heimai-tts-breeze",
+        "deploy_hint": "Breeze laeuft als eigener Deploy: docker-compose.breeze.yml in "
+                       "Coolify anlegen bzw. starten (der erste Start baut das Image und "
+                       "laedt mehrere GB Gewichte - das dauert).",
         "base_url": lambda: settings.breeze_base_url,
         # Offizieller Server: /health antwortet 503, solange das Modell laedt.
         "health_path": "/health",
@@ -170,12 +177,39 @@ async def engine_status(engine_id: str) -> dict:
         async with httpx.AsyncClient(timeout=3.0) as client:
             response = await client.get(url)
     except Exception as exc:
-        return {"status": "unreachable", "detail": str(exc)[:200] or type(exc).__name__}
+        return {"status": "unreachable", "detail": _unreachable_detail(exc, spec)}
     if response.status_code == 200:
         return {"status": "ok", "detail": ""}
     if response.status_code == 503:
         return {"status": "loading", "detail": "Modell wird geladen"}
     return {"status": "error", "detail": f"HTTP {response.status_code}"}
+
+
+def _unreachable_detail(exc: Exception, spec: dict) -> str:
+    """Technische Ursache -> was zu tun ist. Ein nackter DNS-Fehler wie
+    "[Errno -2] Name or service not known" sieht im Panel sonst wie ein
+    Programmfehler aus, heisst aber schlicht: der Container laeuft nicht."""
+    host = urlsplit(spec["base_url"]()).hostname or "?"
+    if _caused_by(exc, socket.gaierror):
+        return (f"Container nicht gefunden - den Namen '{host}' gibt es im Netzwerk "
+                f"nicht. {spec['deploy_hint']}")
+    if _caused_by(exc, ConnectionRefusedError):
+        return (f"'{host}' ist da, nimmt aber keine Verbindungen an - der Dienst startet "
+                f"noch oder ist abgestuerzt ('docker logs {spec['container']}').")
+    if isinstance(exc, httpx.TimeoutException):
+        return f"'{host}' antwortet nicht innerhalb von 3 s."
+    return str(exc)[:200] or type(exc).__name__
+
+
+def _caused_by(exc: BaseException, kind: type) -> bool:
+    """httpx verpackt die eigentliche Ursache (socket-Fehler) in eine Kette."""
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        if isinstance(exc, kind):
+            return True
+        seen.add(id(exc))
+        exc = exc.__cause__ or exc.__context__
+    return False
 
 
 async def overview() -> list[dict]:

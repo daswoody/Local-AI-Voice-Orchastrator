@@ -141,6 +141,26 @@ bewusst **nicht** angebunden: Jede Antwort wuerde das Haus verlassen.
    stoppen, um das VRAM wieder freizugeben (XTTS bleibt aktiv bzw. springt
    ein).
 
+**Panel zeigt Breeze als "nicht erreichbar"?** Die Meldung nennt die Ursache:
+
+- *Container nicht gefunden* - der Name `tts-breeze` ist im Netzwerk
+  unbekannt, der Breeze-Deploy laeuft also (noch) nicht. In Coolify pruefen,
+  ob die Resource aus Schritt 1 existiert und fertig deployt ist (der erste
+  Build dauert). Auf der VM:
+  ```bash
+  docker ps --filter name=heimai-tts-breeze          # laeuft der Container?
+  docker network inspect ai-lab --format '{{range .Containers}}{{.Name}} {{end}}'
+  docker exec heimai-orchestrator python -c "import socket; print(socket.gethostbyname('tts-breeze'))"
+  ```
+- *nimmt keine Verbindungen an* - der Container laeuft, der Server aber
+  (noch) nicht: `docker logs -f heimai-tts-breeze` zeigt Download,
+  Modell-Laden oder den Fehler (z. B. Lizenz-Zustimmung -> `HF_TOKEN`,
+  CUDA out of memory -> Karte freiraeumen).
+- *laedt Modell...* - einfach warten, danach steht dort "erreichbar".
+
+Aktivieren geht trotzdem (nach Rueckfrage) - bis Breeze antwortet, spricht
+XTTS.
+
 Grenzen des offiziellen Servers: genau **ein** Request zur Zeit (weitere
 bekommen 409 - der Orchestrator wartet bis ~5 s, danach springt XTTS ein)
 und die Referenz wird bei jedem Request neu kodiert. Das offizielle

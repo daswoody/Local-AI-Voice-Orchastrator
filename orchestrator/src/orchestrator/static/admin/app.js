@@ -291,7 +291,8 @@ views.tts = async () => {
         </label>
         <div><button type="submit">Speichern</button></div>
       </form>
-    </section>`;
+    </section>
+    <script type="application/json" id="tts-data">${JSON.stringify(data.engines)}</script>`;
 };
 
 // ---- View: GPUs ------------------------------------------------------------------------
@@ -1006,9 +1007,22 @@ const formActions = {
 const buttonActions = {
   activateModel: (data) => api.post("/v1/admin/models/activate", { model: data.id }),
 
+  /* Eine gerade nicht erreichbare Engine erst nach Rueckfrage aktivieren -
+   * vorab waehlen bleibt moeglich, aber nicht aus Versehen. */
   async activateTts(data) {
+    const engines = JSON.parse(document.getElementById("tts-data").textContent);
+    const engine = engines.find((e) => e.id === data.id);
+    let confirmed = false;
+    if (engine && engine.status.status !== "ok") {
+      const meanwhile = engine.id === "xtts"
+        ? "Bis dahin liest die App die Antworten selbst vor."
+        : "Bis der Dienst laeuft, spricht weiter XTTS.";
+      if (!confirm(`${engine.label} ist gerade nicht erreichbar:\n\n${engine.status.detail}`
+        + `\n\nTrotzdem aktivieren? ${meanwhile}`)) return;
+      confirmed = true;
+    }
     const result = await api.post("/v1/admin/tts/activate", { engine: data.id });
-    if (result.warning) alert(result.warning);
+    if (result.warning && !confirmed) alert(result.warning);
   },
 
   async assignDevice(data, element) {

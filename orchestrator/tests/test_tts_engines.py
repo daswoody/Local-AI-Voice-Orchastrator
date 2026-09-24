@@ -3,6 +3,7 @@
 import base64
 import io
 import math
+import socket
 import wave
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -145,6 +146,55 @@ def test_activating_unknown_engine_is_rejected(client, admin_headers):
     )
     assert response.status_code == 404
     assert tts_engines.active_engine() == "xtts"
+
+
+async def test_unknown_host_says_the_container_is_missing(monkeypatch):
+    """Nutzer-Report: "[Errno -2] Name or service not known" beim Aktivieren
+    sah wie ein Programmfehler aus - gemeint ist: Breeze-Container laeuft
+    nicht. Die Meldung sagt jetzt genau das und was zu tun ist."""
+
+    def handler(request):
+        try:
+            raise socket.gaierror(-2, "Name or service not known")
+        except socket.gaierror as cause:
+            raise httpx.ConnectError("[Errno -2] Name or service not known",
+                                     request=request) from cause
+
+    _mock_http(monkeypatch, handler)
+
+    status = await tts_engines.engine_status("breeze")
+
+    assert status["status"] == "unreachable"
+    assert "Container nicht gefunden" in status["detail"]
+    assert "'tts-breeze'" in status["detail"]
+    assert "docker-compose.breeze.yml" in status["detail"]
+
+
+async def test_refused_connection_points_to_the_logs(monkeypatch):
+    def handler(request):
+        try:
+            raise ConnectionRefusedError(111, "Connect call failed")
+        except ConnectionRefusedError as cause:
+            raise httpx.ConnectError("All connection attempts failed", request=request) from cause
+
+    _mock_http(monkeypatch, handler)
+
+    status = await tts_engines.engine_status("breeze")
+
+    assert status["status"] == "unreachable"
+    assert "docker logs heimai-tts-breeze" in status["detail"]
+
+
+async def test_timeout_is_named_as_such(monkeypatch):
+    def handler(request):
+        raise httpx.ConnectTimeout("timed out", request=request)
+
+    _mock_http(monkeypatch, handler)
+
+    status = await tts_engines.engine_status("xtts")
+
+    assert status == {"status": "unreachable",
+                      "detail": "'tts-xtts' antwortet nicht innerhalb von 3 s."}
 
 
 def test_tts_routes_require_admin(client):

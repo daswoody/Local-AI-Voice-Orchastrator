@@ -35,6 +35,17 @@ def wav_to_pcm16(wav_bytes: bytes) -> tuple[bytes, int]:
     return frames, rate
 
 
+def pcm16_to_wav(pcm: bytes, rate: int) -> bytes:
+    """PCM16 mono -> WAV-Bytes (Gegenstueck zu wav_to_pcm16)."""
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(rate)
+        wav.writeframes(pcm)
+    return buffer.getvalue()
+
+
 def resample_pcm16(pcm: bytes, src_rate: int, dst_rate: int) -> bytes:
     if src_rate == dst_rate:
         return pcm

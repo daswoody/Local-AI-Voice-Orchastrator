@@ -3,6 +3,7 @@ import wave
 
 from orchestrator import repos
 from orchestrator.services import filler_service
+from orchestrator.services.tts_client import xtts_client
 
 
 def _wav_bytes(rate=22050, seconds=0.1) -> bytes:
@@ -203,14 +204,12 @@ def _tone_pcm(seconds: float, rate: int = 24000) -> bytes:
 
 
 def test_generate_filler_writes_wav_for_voices_with_sample(client, admin_headers, monkeypatch):
-    from orchestrator.services import filler_service as fs
-
     spoken = _tone_pcm(1.6)
 
     async def fake_synthesize(text, voice_id, language=None, temperature=None):
         return spoken, 24000
 
-    monkeypatch.setattr(fs.xtts_client, "synthesize", fake_synthesize)
+    monkeypatch.setattr(xtts_client, "synthesize", fake_synthesize)
 
     # Nur default-de-female bekommt ein Sample
     from orchestrator.config import settings
@@ -347,10 +346,13 @@ def _create_filler(client, admin_headers, engine="xtts", text="Moment bitte."):
 def test_tts_engines_are_listed_for_the_dropdown(client, admin_headers):
     engines = client.get("/v1/admin/tts-engines", headers=admin_headers).json()
     by_id = {engine["id"]: engine for engine in engines}
-    assert set(by_id) == {"xtts", "piper"}
+    assert set(by_id) == {"xtts", "piper", "breeze"}
     # per_voice steuert, ob die Engine in der Nutzerstimme spricht
     assert by_id["xtts"]["per_voice"] is True
     assert by_id["piper"]["per_voice"] is False
+    assert by_id["breeze"]["per_voice"] is True
+    # Registry geht ohne Client-Objekte raus (JSON)
+    assert "client" not in by_id["xtts"]
 
 
 def test_filler_engine_defaults_to_xtts_and_is_stored(client, admin_headers):

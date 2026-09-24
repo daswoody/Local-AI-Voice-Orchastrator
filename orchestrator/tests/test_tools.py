@@ -9,6 +9,7 @@ from orchestrator import graph as graph_module, repos
 from orchestrator.audio import pcm_to_b64
 from orchestrator.config import settings
 from orchestrator.routers import stream as stream_module
+from orchestrator.services.tts_client import xtts_client
 from orchestrator.services import filler_service
 from orchestrator.services import mcp_gateway as mcp_gateway_module
 
@@ -188,7 +189,7 @@ def test_tool_filler_with_specific_pattern_plays_before_tool(client, monkeypatch
     async def fake_xtts(text, voice_id, language=None):
         yield 24000, b"\x01\x02" * 600
 
-    monkeypatch.setattr(stream_module.xtts_client, "stream", fake_xtts)
+    monkeypatch.setattr(xtts_client, "stream", fake_xtts)
     piper_mock = AsyncMock(side_effect=RuntimeError("kein Piper noetig"))
     monkeypatch.setattr(stream_module.piper_client, "synthesize", piper_mock)
 
@@ -295,7 +296,7 @@ def test_tool_filler_skipped_when_tool_is_fast(client, monkeypatch):
     async def fake_xtts(text, voice_id, language=None):
         yield 24000, b"\x01\x02" * 600
 
-    monkeypatch.setattr(stream_module.xtts_client, "stream", fake_xtts)
+    monkeypatch.setattr(xtts_client, "stream", fake_xtts)
     piper_mock = AsyncMock(return_value=(b"\x05\x06" * 2205, 22050))
     monkeypatch.setattr(stream_module.piper_client, "synthesize", piper_mock)
 

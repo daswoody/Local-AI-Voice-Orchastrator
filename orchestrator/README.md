@@ -3,7 +3,8 @@
 Siehe `../docs/heim-ai-projektspezifikation.md` fuer den Gesamtkontext.
 Die Nachbar-Services der Voice-Pipeline liegen im selben Repo:
 `../stt-service` (1.8, faster-whisper), `../tts-piper` (1.9, Filler),
-`../tts-xtts` (1.10, Hauptstimme).
+`../tts-xtts` (1.10, Hauptstimme), `../tts-breeze` (v1.17, Test-Engine
+Breeze TTS 2, eigener Deploy).
 
 ## Admin-Panel (/admin)
 
@@ -15,11 +16,12 @@ aus `ADMIN_USERNAME`/`ADMIN_PASSWORD` in die leere DB geschrieben.
 | Bereich | Funktion |
 |---|---|
 | Modelle | In LiteLLM registrierte Modelle anzeigen und das aktive Modell setzen (LM Studio laedt per JIT beim ersten Request, Entladen per Idle-TTL) |
+| Sprachausgabe | TTS-Engine der gesprochenen Antworten waehlen (XTTS / Piper / Breeze TTS 2) mit Live-Status; Probehoeren pro Engine + Stimme mit Latenzmessung (Vergleich auf der echten Hardware); optionale Breeze-Sprechanweisung |
 | GPUs | Karten mit Name, Compute-Capability und live belegtem VRAM; pro Dienst die Karte waehlen (CPU / GPU 0 / GPU 1). STT und XTTS laden ihr Modell dabei zur Laufzeit neu - kein Container-Neustart. Piper ist CPU-only, LM Studio laeuft auf dem Host und wird dort eingestellt (4.2) |
 | Charakter | Globaler System-Prompt; pro Nutzer ueberschreibbar (Nutzer-Formular) |
 | Nutzer | Anlegen/Bearbeiten/Loeschen, Tier 1-3, Standard-Stimme, Charakter-Override |
-| Stimmen | Anlegen + WAV-Sample-Upload (landet im XTTS-Voices-Volume, kein docker cp mehr) |
-| Filler & Trigger | Eigene Trigger (Nachdenken/Suche/Tool inkl. Tool-Muster wie `Calendar-*`), Filler mit Titel+Text, Engine pro Filler (XTTS = Nutzerstimme, Piper = feste Stimme/robust), "Alle generieren" rendert vor, pro Stimme Play-Button zum Probehoeren und &#8635; zum Neu-Generieren nur dieser Stimme, Filter-Chips nach Trigger |
+| Stimmen | Anlegen + WAV-Sample-Upload (landet im XTTS-Voices-Volume, kein docker cp mehr); Transkript des Samples (fuer Breeze), beim Upload per Whisper vorgeschlagen und editierbar |
+| Filler & Trigger | Eigene Trigger (Nachdenken/Suche/Tool inkl. Tool-Muster wie `Calendar-*`), Filler mit Titel+Text, Engine pro Filler (XTTS = Nutzerstimme, Piper = feste Stimme/robust, Breeze = Test), "Alle generieren" rendert vor, pro Stimme Play-Button zum Probehoeren und &#8635; zum Neu-Generieren nur dieser Stimme, Filter-Chips nach Trigger |
 | Agenten | Spezial-Agenten (4.16) mit eigener ID, Beschreibung, System-Prompt und eigenem LiteLLM-Modell; erscheinen der Haupt-KI als Tool `agent-<id>` - z. B. Websuche/Coding an Cloud-Modelle delegieren. Reservierte ID `code-card`: schreibt automatisch die HTML-Layouts fuer Karten ohne passendes Template |
 | Karten | Layout-Templates (4.12) anlegen/bearbeiten/loeschen, Version zaehlt automatisch hoch; Format JSON (Layout-Baum) oder HTML (Fragment mit `{{data.*}}`-Platzhaltern, sandboxed gerendert) |
 
@@ -73,6 +75,80 @@ Ursache fuer Fetzen und Zeitlupe bis v1.15. **Nach dem Update auf v1.16
 alle Filler einmal neu generieren**, aeltere Aufnahmen koennen noch
 betroffen sein.
 
+## Sprachausgabe: TTS-Engine wechseln (v1.17)
+
+Unter **Sprachausgabe** waehlst du, welche Engine die gesprochenen
+Antworten erzeugt - server-weit, genau wie das aktive LLM unter "Modelle".
+Die Wahl greift ab dem naechsten Sprach-Turn, ohne Neustart.
+
+| Engine | Stimme | Hardware | Wofuer |
+|---|---|---|---|
+| XTTS-v2 (Default) | klont die Nutzerstimme aus dem Sample, Deutsch | ~3 GB VRAM | bewaehrte Hauptstimme |
+| Piper | eine feste deutsche Stimme | CPU | robuster Notbetrieb, z. B. wenn die GPUs fuer einen LLM-Test gebraucht werden |
+| Breeze TTS 2 | klont aus Sample **+ exaktem Transkript**, sonst eingebaute Stimme | ~7,7 GB VRAM | Test-Engine (eigener Container, s. u.) |
+
+Wie es funktioniert:
+
+- **Gemeinsame Schnittstelle:** Jede Engine liefert `(Samplerate, PCM16-Chunk)`,
+  deshalb kennen Antwort-Pipeline, Filler-Generierung und Probehoeren nur die
+  Engine-ID (`services/tts_engines.py`). Eine weitere Engine ist ein Client
+  mit `stream()` plus ein Registry-Eintrag.
+- **Sicherheitsnetz:** Faellt eine andere Engine als XTTS aus, bevor Audio
+  geflossen ist (Container gestoppt, Modell laedt noch, belegt), spricht XTTS
+  die Antwort. Nach dem ersten Chunk wird nicht mehr gewechselt (sonst
+  doppeltes Audio).
+- **Probehoeren & vergleichen:** Testsatz + Stimme waehlen, "Anhoeren" -
+  ohne Fallback, damit du wirklich die gewaehlte Engine hoerst. Das Panel
+  zeigt die Zeit bis zur ersten Sekunde Audio, die Gesamtdauer und den
+  Echtzeitfaktor (< 1 = schneller als Echtzeit).
+- **Filler** behalten ihre eigene Engine (Filler & Trigger). Fuer eine
+  einheitliche Stimme dort dieselbe Engine waehlen und neu generieren.
+
+### Breeze TTS 2 testen
+
+Vorab, weil es die Erwartung praegt: Laut [offiziellem Repo](https://github.com/breezeblue-ai/breeze-tts)
+spricht das Open-Weight-Modell **nur Englisch und Chinesisch** - deutsche
+Antworten koennen mit Akzent oder falsch ausgesprochen klingen. Die Gewichte
+stehen unter der *BreezeBlue Research and Non-Commercial License* (privat ok,
+kommerziell nicht). Die Cloud-API von breezeblue.ai (mehr Sprachen) ist
+bewusst **nicht** angebunden: Jede Antwort wuerde das Haus verlassen.
+
+1. **Deploy anlegen:** Coolify -> New Resource -> Docker Compose, dasselbe
+   Repo, Base Directory `/orchestrator`, Compose-Datei
+   `docker-compose.breeze.yml`. Getrennt vom Voice-Stack, weil der Container
+   das Modell beim Start laedt und dann dauerhaft ~7,7 GB VRAM belegt - er
+   soll nur laufen, solange du testest.
+2. **Karte waehlen:** Env-Variable `BREEZE_GPU` (Index wie im GPU-Panel,
+   Default `0`). Bei 11 GB + 8 GB ist die grosse Karte die realistische Wahl
+   (auf 8 GB bleibt neben ~7,7 GB praktisch nichts) - vorher im GPU-Panel
+   XTTS/STT auf die andere Karte schieben und das LLM in LM Studio dort
+   entladen bzw. umziehen.
+3. **Deployen:** Der erste Start laedt die Gewichte (mehrere GB) ins Volume
+   `breeze-models`; danach laedt der Server das Modell (`/health` meldet so
+   lange 503, das Panel zeigt "laedt Modell..."). Verlangt Hugging Face eine
+   Lizenz-Zustimmung, bricht der Download mit einem Hinweis ab: auf der
+   Modellseite zustimmen und `HF_TOKEN` setzen.
+4. **Transkripte pflegen:** Breeze klont eine Stimme nur mit dem exakten
+   Wortlaut des Samples. Unter **Stimmen** bei vorhandenen Samples
+   "Transkribieren" klicken (Whisper schlaegt den Text vor) und ggf. unter
+   "Bearbeiten" korrigieren. Ohne Transkript spricht Breeze mit seiner
+   eingebauten Stimme.
+5. **Probehoeren:** Sprachausgabe -> Probehoeren, Engine "Breeze TTS 2",
+   denselben Satz auch mit XTTS - Klang und Latenz direkt vergleichen.
+   Optional eine Sprechanweisung setzen ("Voice Direction", z. B. *Speak in a
+   warm, calm tone.*).
+6. **Aktivieren**, wenn es ueberzeugt - oder den Breeze-Deploy in Coolify
+   stoppen, um das VRAM wieder freizugeben (XTTS bleibt aktiv bzw. springt
+   ein).
+
+Grenzen des offiziellen Servers: genau **ein** Request zur Zeit (weitere
+bekommen 409 - der Orchestrator wartet bis ~5 s, danach springt XTTS ein)
+und die Referenz wird bei jedem Request neu kodiert. Das offizielle
+Dockerfile baut FlashAttention (nur ab Ampere) - `tts-breeze/` verzichtet
+darauf, der Server rechnet ohnehin "eager". Ob die RTX 2080 Ti (Turing, ohne
+natives bf16) Breeze schnell genug rechnet, zeigt erst der Test - genau
+dafuer misst das Probehoeren den Echtzeitfaktor.
+
 ## 1. Lokal testen (ohne echtes LiteLLM/Weaviate)
 
 ```bash
@@ -108,8 +184,10 @@ Infrastruktur zeigt. Die Weaviate-Abfrage selbst scheitert dabei bewusst
 
 ### Kompletter Voice-Loop ohne GPU (Fake-Backends)
 
-`scripts/dev_fake_services.py` stellt LiteLLM, STT, Piper und XTTS auf einem
-Port nach (inkl. simulierter LLM-Latenz, damit die Filler-Logik sichtbar wird):
+`scripts/dev_fake_services.py` stellt LiteLLM, STT, Piper, XTTS und Breeze auf
+einem Port nach (inkl. simulierter LLM-Latenz, damit die Filler-Logik sichtbar
+wird; der Fake-Breeze klingt beim Voice-Cloning tiefer als mit eingebauter
+Stimme, so hoert man im Probehoeren, welcher Modus gegriffen hat):
 
 ```bash
 # Terminal 1: Fake-Backends
@@ -120,6 +198,7 @@ LITELLM_BASE_URL=http://127.0.0.1:9100/llm \
 STT_BASE_URL=http://127.0.0.1:9100/stt \
 PIPER_BASE_URL=http://127.0.0.1:9100/piper \
 XTTS_BASE_URL=http://127.0.0.1:9100/xtts \
+BREEZE_BASE_URL=http://127.0.0.1:9100/breeze \
 WEAVIATE_URL=http://127.0.0.1:9100/weaviate-gibtsnicht \
 FILLER_DELAY_MS=800 \
 uv run uvicorn orchestrator.main:app --port 8000

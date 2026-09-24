@@ -7,13 +7,14 @@ from orchestrator.config import settings
 from orchestrator.db import init_db
 from orchestrator.main import app
 from orchestrator.services import mcp_gateway as mcp_gateway_module
+from orchestrator.services.stt_client import stt_client
 
 
 @pytest.fixture(autouse=True)
 def temp_environment(tmp_path, monkeypatch):
     """Jeder Test bekommt frische DB + leere Voice-/Filler-Verzeichnisse.
-    Das MCP-Gateway wird global gemockt (kein Netzwerk in Tests) -
-    einzelne Tests ueberschreiben es bei Bedarf."""
+    MCP-Gateway und STT werden global gemockt (kein Netzwerk in Tests) -
+    einzelne Tests ueberschreiben sie bei Bedarf."""
     monkeypatch.setattr(settings, "database_path", str(tmp_path / "test.db"))
     monkeypatch.setattr(settings, "voices_dir", str(tmp_path / "voices"))
     monkeypatch.setattr(settings, "filler_cache_dir", str(tmp_path / "filler-cache"))
@@ -23,6 +24,10 @@ def temp_environment(tmp_path, monkeypatch):
     monkeypatch.setattr(
         mcp_gateway_module.mcp_gateway, "call_tool",
         AsyncMock(return_value="Tool-Fehler: in Tests nicht verfuegbar"),
+    )
+    monkeypatch.setattr(
+        stt_client, "transcribe",
+        AsyncMock(side_effect=RuntimeError("STT in Tests nicht verfuegbar")),
     )
     init_db()
 

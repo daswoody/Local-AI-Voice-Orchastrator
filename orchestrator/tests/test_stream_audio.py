@@ -5,6 +5,7 @@ from orchestrator import graph as graph_module
 from orchestrator.audio import pcm_to_b64
 from orchestrator.config import settings
 from orchestrator.routers import stream as stream_module
+from orchestrator.services.tts_client import xtts_client
 
 
 def _open(ws) -> None:
@@ -49,7 +50,7 @@ def _patch_pipeline(monkeypatch, llm_response="Antwort", llm_delay=0.0):
         "synthesize",
         AsyncMock(return_value=(b"\x05\x06" * 2205, 22050)),
     )
-    monkeypatch.setattr(stream_module.xtts_client, "stream", _fake_xtts_stream)
+    monkeypatch.setattr(xtts_client, "stream", _fake_xtts_stream)
 
 
 
@@ -213,7 +214,7 @@ def test_long_answer_is_summarized_for_speech(client, monkeypatch):
     monkeypatch.setattr(
         stream_module.stt_client, "transcribe", AsyncMock(return_value="Erzaehl mir alles")
     )
-    monkeypatch.setattr(stream_module.xtts_client, "stream", capture_xtts)
+    monkeypatch.setattr(xtts_client, "stream", capture_xtts)
     monkeypatch.setattr(settings, "filler_enabled", False)
 
     with client.websocket_connect("/v1/assistant/stream") as ws:
@@ -235,7 +236,7 @@ def test_short_answer_is_spoken_verbatim(client, monkeypatch):
         yield 24000, b"\x01\x02" * 100
 
     _patch_pipeline(monkeypatch, llm_response="Ja, mache ich.")
-    monkeypatch.setattr(stream_module.xtts_client, "stream", capture_xtts)
+    monkeypatch.setattr(xtts_client, "stream", capture_xtts)
     monkeypatch.setattr(settings, "filler_enabled", False)
 
     with client.websocket_connect("/v1/assistant/stream") as ws:

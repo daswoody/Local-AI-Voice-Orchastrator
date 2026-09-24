@@ -1,0 +1,48 @@
+# Breeze TTS 2 (Test-Engine, v1.17) als EIGENER Coolify-Deploy.
+#
+# Bewusst getrennt vom Voice-Stack (docker-compose.yml): Der Container laedt
+# das Modell schon beim Start und belegt dann dauerhaft ~7,7 GB VRAM. Er soll
+# nur laufen, solange getestet wird - in Coolify starten/stoppen, ohne den
+# Rest anzufassen. Der Orchestrator erreicht ihn ueber das gemeinsame
+# ai-lab-Netzwerk unter http://tts-breeze:7860 (BREEZE_BASE_URL).
+#
+# Build-Context ist wie im Haupt-Stack relativ zum Repo-Root (Coolify baut mit
+# --project-directory <repo-root>). Lokal vom Repo-Root aus:
+#   docker compose -f orchestrator/docker-compose.breeze.yml --project-directory . up
+
+services:
+  tts-breeze:
+    build:
+      context: ./tts-breeze
+      dockerfile: Dockerfile
+    container_name: heimai-tts-breeze
+    restart: unless-stopped
+    environment:
+      # Karte waehlen - Index wie in nvidia-smi bzw. im GPU-Panel (dank
+      # PCI_BUS_ID). Breeze braucht ~7,7 GB am Stueck; die Karte vorher im
+      # GPU-Panel freiraeumen (XTTS/STT umziehen, LLM in LM Studio).
+      CUDA_VISIBLE_DEVICES: ${BREEZE_GPU:-0}
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      # Nur noetig, falls Hugging Face fuer das Modell eine Lizenz-Zustimmung
+      # verlangt (Lese-Token eines Kontos, das zugestimmt hat).
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      # Modellgewichte (mehrere GB, Download beim ersten Start)
+      - breeze-models:/models
+    networks:
+      - ai-lab
+    deploy:
+      resources:
+        reservations:
+          devices:
+            # Alle Karten sichtbar, CUDA_VISIBLE_DEVICES waehlt eine aus.
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+networks:
+  ai-lab:
+    external: true
+
+volumes:
+  breeze-models:

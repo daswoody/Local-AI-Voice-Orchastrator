@@ -9,6 +9,7 @@ from orchestrator.audio import pcm_to_b64
 from orchestrator.config import settings
 from orchestrator.routers import stream as stream_module
 from orchestrator.services import filler_service
+from orchestrator.services.tts_client import xtts_client
 
 
 def _open(ws) -> None:
@@ -48,7 +49,7 @@ def _patch_base(monkeypatch, chat):
     monkeypatch.setattr(
         stream_module.stt_client, "transcribe", AsyncMock(return_value="Langsame Frage")
     )
-    monkeypatch.setattr(stream_module.xtts_client, "stream", _fake_xtts_stream)
+    monkeypatch.setattr(xtts_client, "stream", _fake_xtts_stream)
 
 
 
@@ -119,7 +120,7 @@ def test_user_specific_voice_and_prompt_from_token(client, monkeypatch):
         yield 24000, b"\x01\x02" * 100
 
     _patch_base(monkeypatch, capture_chat)
-    monkeypatch.setattr(stream_module.xtts_client, "stream", capture_xtts)
+    monkeypatch.setattr(xtts_client, "stream", capture_xtts)
     monkeypatch.setattr(settings, "filler_enabled", False)
 
     from orchestrator.security import hash_password
@@ -150,7 +151,7 @@ def test_tts_failure_still_delivers_text(client, monkeypatch):
         yield  # pragma: no cover
 
     _patch_base(monkeypatch, AsyncMock(return_value={"role": "assistant", "content": "Antwort"}))
-    monkeypatch.setattr(stream_module.xtts_client, "stream", broken_xtts)
+    monkeypatch.setattr(xtts_client, "stream", broken_xtts)
     monkeypatch.setattr(settings, "filler_enabled", False)
 
     with client.websocket_connect("/v1/assistant/stream") as ws:

@@ -150,6 +150,7 @@ def test_voice_turn_gets_voice_mode_prompt_text_turn_does_not(client, monkeypatc
 
     from orchestrator.audio import pcm_to_b64
     from orchestrator.routers import stream as stream_module
+    from orchestrator.services.tts_client import xtts_client
 
     captured = []
 
@@ -164,7 +165,7 @@ def test_voice_turn_gets_voice_mode_prompt_text_turn_does_not(client, monkeypatc
     async def fake_xtts(text, voice_id, language=None):
         yield 24000, b"\x01\x02" * 100
 
-    monkeypatch.setattr(stream_module.xtts_client, "stream", fake_xtts)
+    monkeypatch.setattr(xtts_client, "stream", fake_xtts)
     monkeypatch.setattr(settings, "filler_enabled", False)
 
     with client.websocket_connect("/v1/assistant/stream") as ws:

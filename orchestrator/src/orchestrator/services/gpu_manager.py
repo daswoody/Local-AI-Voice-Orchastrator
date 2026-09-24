@@ -51,6 +51,19 @@ SERVICES: dict[str, dict] = {
         "controllable": True,
         "note": "~3 GB VRAM. Auf CPU technisch moeglich, aber sehr langsam (Sekunden pro Satz).",
     },
+    "tts-breeze": {
+        "label": "Sprachausgabe-Test (Breeze TTS 2)",
+        "base_url": lambda: settings.breeze_base_url,
+        "controllable": False,
+        # Der offizielle Breeze-Server laedt sein Modell beim Start auf eine
+        # feste Karte und kann nicht zur Laufzeit wechseln.
+        "control_hint": "per Compose (BREEZE_GPU)",
+        "note": (
+            "Nur aktiv, solange docker-compose.breeze.yml laeuft: laedt das Modell "
+            "schon beim Start und belegt dann ~7,7 GB VRAM. Karte ueber BREEZE_GPU "
+            "in Coolify waehlen, nicht hier."
+        ),
+    },
     "tts-piper": {
         "label": "Filler-Stimme (Piper)",
         "base_url": lambda: settings.piper_base_url,
@@ -226,6 +239,7 @@ async def overview() -> dict:
             "label": spec["label"],
             "controllable": spec["controllable"],
             "external": spec.get("external", False),
+            "control_hint": spec.get("control_hint", ""),
             "note": spec.get("note", ""),
             "assigned": assigned_device(name),
             "effective": spec.get("fixed_device"),

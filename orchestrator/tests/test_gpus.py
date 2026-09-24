@@ -44,16 +44,18 @@ def test_gpu_overview_requires_admin(client):
     assert client.get("/v1/admin/gpus").status_code == 401
 
 
-def test_overview_lists_all_four_services(client, admin_headers, monkeypatch):
-    """Alle vier Dienste stehen in der Liste - auch die, die wir nicht
+def test_overview_lists_all_services(client, admin_headers, monkeypatch):
+    """Alle Dienste stehen in der Liste - auch die, die wir nicht
     umschalten koennen (Piper: CPU per Design, LM Studio: laeuft auf dem
-    Host)."""
+    Host, Breeze: Karte fest per Compose)."""
     _unreachable_services(monkeypatch)
 
     body = client.get("/v1/admin/gpus", headers=admin_headers).json()
 
     services = {entry["name"]: entry for entry in body["services"]}
-    assert set(services) == {"stt", "tts-xtts", "tts-piper", "llm"}
+    assert set(services) == {"stt", "tts-xtts", "tts-breeze", "tts-piper", "llm"}
+    assert services["tts-breeze"]["controllable"] is False
+    assert "BREEZE_GPU" in services["tts-breeze"]["control_hint"]
     assert services["stt"]["controllable"] is True
     assert services["tts-xtts"]["controllable"] is True
     assert services["tts-piper"]["controllable"] is False

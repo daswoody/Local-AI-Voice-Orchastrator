@@ -12,11 +12,11 @@ from ..config import settings
 from ..graph import initial_state, orchestrator_graph
 from ..schemas import DeviceTool
 from ..security import resolve_token
-from ..services import filler_service
+from ..services import filler_service, tts_engines
 from ..services.litellm_client import litellm_client
 from ..services.stt_client import stt_client
 from ..services.tool_executor import ToolExecutor
-from ..services.tts_client import piper_client, xtts_client
+from ..services.tts_client import piper_client
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -494,7 +494,9 @@ class StreamSession:
 
     async def _stream_main_tts(self, text: str) -> None:
         try:
-            async for rate, chunk in xtts_client.stream(text, self.voice_id):
+            # Engine der Hauptstimme waehlt der Admin im Panel (v1.17);
+            # faellt eine Test-Engine vor dem ersten Chunk aus, spricht XTTS.
+            async for rate, chunk in tts_engines.stream_main(text, self.voice_id):
                 if rate != settings.target_sample_rate:
                     chunk = resample_pcm16(chunk, rate, settings.target_sample_rate)
                 await self.ws.send_json(

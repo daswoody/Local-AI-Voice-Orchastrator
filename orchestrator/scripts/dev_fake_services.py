@@ -1,14 +1,16 @@
 """Fake-Backends fuer lokale Orchestrator-Tests ohne GPU/echte Infra.
 
-Startet EINEN Server (Port 9100), der LiteLLM, STT, Piper und XTTS als
-Sub-Apps unter eigenen Pfad-Prefixen nachstellt. Damit laesst sich der
-komplette Voice-Loop (Mikro-Phase 1.11) auf jedem Rechner durchspielen:
+Startet EINEN Server (Port 9100), der LiteLLM, STT, Piper, XTTS und Breeze
+TTS 2 als Sub-Apps unter eigenen Pfad-Prefixen nachstellt. Damit laesst sich
+der komplette Voice-Loop (Mikro-Phase 1.11) inklusive TTS-Engine-Wechsel
+(v1.17) auf jedem Rechner durchspielen:
 
     Terminal 1:  uv run python scripts/dev_fake_services.py
     Terminal 2:  LITELLM_BASE_URL=http://127.0.0.1:9100/llm \\
                  STT_BASE_URL=http://127.0.0.1:9100/stt \\
                  PIPER_BASE_URL=http://127.0.0.1:9100/piper \\
                  XTTS_BASE_URL=http://127.0.0.1:9100/xtts \\
+                 BREEZE_BASE_URL=http://127.0.0.1:9100/breeze \\
                  WEAVIATE_URL=http://127.0.0.1:9100/weaviate-gibtsnicht \\
                  uv run uvicorn orchestrator.main:app --port 8000
     Terminal 3:  uv run python scripts/manual_audio_ws_test.py
@@ -21,7 +23,7 @@ import struct
 import wave
 
 import uvicorn
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import StreamingResponse
 
 
@@ -89,6 +91,11 @@ async def transcribe() -> dict:
 piper = FastAPI()
 
 
+@piper.get("/v1/health")
+async def piper_health() -> dict:
+    return {"status": "ok"}
+
+
 @piper.post("/v1/synthesize")
 async def piper_synthesize(payload: dict) -> Response:
     rate = 22050
@@ -104,6 +111,11 @@ async def piper_synthesize(payload: dict) -> Response:
 
 # --- Fake XTTS (Hauptstimme, 24k PCM-Stream) -----------------------------------
 xtts = FastAPI()
+
+
+@xtts.get("/v1/health")
+async def xtts_health() -> dict:
+    return {"status": "ok"}
 
 
 @xtts.post("/v1/synthesize")
@@ -133,11 +145,53 @@ async def xtts_synthesize_full(payload: dict) -> Response:
     return Response(buffer.getvalue(), media_type="audio/wav")
 
 
+# --- Fake Breeze TTS 2 (Test-Engine, v1.17) ------------------------------------
+# Formular-Signatur wie im offiziellen Server (breeze_infer/api.py), damit
+# der Multipart-Request des Orchestrators gegen denselben Parser laeuft.
+breeze = FastAPI()
+
+
+@breeze.get("/health")
+async def breeze_health() -> dict:
+    return {"status": "ok", "sample_rate": 24000}
+
+
+@breeze.post("/v1/audio/speech")
+async def breeze_speech(
+    text: str = Form(...),
+    instruction: str | None = Form(None),
+    cfg_scale: float = Form(1.0),
+    ref_audio: UploadFile | None = File(None),
+    ref_text: str = Form(""),
+    seed: int = Form(42),
+) -> StreamingResponse:
+    has_reference = ref_audio is not None and bool(ref_audio.filename)
+    if has_reference != bool(ref_text.strip()):
+        raise HTTPException(
+            status_code=400,
+            detail="ref_audio and ref_text must be provided together or both omitted.",
+        )
+    # Klon = tieferer Ton, eingebaute Stimme = hoeherer - so hoert man im
+    # Probehoeren, welcher Modus gegriffen hat. Laenge grob wie gesprochen
+    # (~14 Zeichen/s), damit die Plausibilitaetspruefung der Filler passt.
+    base = 220 if has_reference else 330
+    part = (0.2 + len(text) / 14) / 3
+
+    async def generate():
+        for step in range(3):
+            yield _sine_pcm16(part, 24000, freq=base + 110 * step)
+            await asyncio.sleep(0.05)
+
+    return StreamingResponse(generate(), media_type="audio/pcm",
+                             headers={"X-Sample-Rate": "24000", "X-Sample-Format": "s16le"})
+
+
 app = FastAPI(title="Heim-AI Fake-Backends")
 app.mount("/llm", llm)
 app.mount("/stt", stt)
 app.mount("/piper", piper)
 app.mount("/xtts", xtts)
+app.mount("/breeze", breeze)
 
 
 if __name__ == "__main__":

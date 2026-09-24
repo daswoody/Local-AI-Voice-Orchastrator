@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     stt_base_url: str = "http://stt:8000"
     piper_base_url: str = "http://tts-piper:8000"
     xtts_base_url: str = "http://tts-xtts:8000"
+    # Breeze TTS 2 (Test-Engine, v1.17): offizieller Streaming-Server aus
+    # tts-breeze/, eigener Deploy ueber docker-compose.breeze.yml.
+    breeze_base_url: str = "http://tts-breeze:7860"
+
+    # Engine der Hauptantwort, solange im Admin-Panel keine gewaehlt wurde
+    # (v1.17): xtts | breeze | piper.
+    tts_engine: str = "xtts"
 
     # Ausgabe-Stream laeuft einheitlich auf XTTS-Rate (Protokoll 4.13:
     # "typisch 24 kHz"); Piper-Filler wird darauf resampled, damit Filler

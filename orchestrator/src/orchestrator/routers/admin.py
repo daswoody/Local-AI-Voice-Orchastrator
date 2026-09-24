@@ -11,14 +11,17 @@ from typing import Any, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .. import repos
+from ..audio import pcm16_to_wav, wav_to_pcm16
 from ..config import settings
 from ..schemas import CardLayout
 from ..security import hash_password, require_admin
-from ..services import filler_service, gpu_manager
+from ..services import filler_service, gpu_manager, tts_engines
 from ..services.litellm_client import litellm_client
+from ..services.stt_client import stt_client
+from ..services.tts_client import BREEZE_INSTRUCTION_SETTING
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/admin", dependencies=[Depends(require_admin)])
@@ -150,8 +153,31 @@ class VoiceCreate(BaseModel):
     language: str = "de"
 
 
+class VoiceUpdate(BaseModel):
+    name: str | None = None
+    language: str | None = None
+    # Exaktes Transkript des Samples (v1.17) - braucht Breeze TTS 2 fuers
+    # Voice-Cloning. Leer = keins.
+    sample_text: str | None = None
+
+
 def _sample_path(voice_id: str) -> Path:
     return Path(settings.voices_dir) / f"{voice_id}.wav"
+
+
+async def _transcribe_sample(wav: bytes) -> tuple[str | None, str | None]:
+    """Transkript-Vorschlag per Whisper -> (Text, Fehler). Best effort: Das
+    Sample ist auch ohne Transkript gespeichert, der Admin kann es im Panel
+    selbst eintragen."""
+    try:
+        pcm, rate = wav_to_pcm16(wav)
+        text = (await stt_client.transcribe(pcm, rate)).strip()
+    except Exception as exc:
+        logger.warning("Transkription des Voice-Samples fehlgeschlagen: %s", str(exc)[:200])
+        return None, str(exc)[:300] or type(exc).__name__
+    if not text:
+        return None, "Whisper hat im Sample keine Sprache erkannt"
+    return text, None
 
 
 @router.get("/voices")
@@ -171,6 +197,17 @@ def create_voice(payload: VoiceCreate) -> dict:
         return repos.create_voice(voice_id, payload.name, payload.language)
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=409, detail="voice_id existiert bereits")
+
+
+@router.put("/voices/{voice_id}")
+def update_voice(voice_id: str, payload: VoiceUpdate) -> dict:
+    fields: dict[str, Any] = payload.model_dump(exclude_unset=True)
+    if "sample_text" in fields:
+        fields["sample_text"] = (fields["sample_text"] or "").strip() or None
+    voice = repos.update_voice(voice_id, fields)
+    if voice is None:
+        raise HTTPException(status_code=404, detail="Stimme nicht gefunden")
+    return {**voice, "has_sample": _sample_path(voice_id).exists()}
 
 
 @router.delete("/voices/{voice_id}", status_code=204)
@@ -197,7 +234,32 @@ async def upload_voice_sample(voice_id: str, file: UploadFile) -> dict:
     path.write_bytes(content)
     # Achtung: Bereits vorgenerierte Filler dieser Stimme klingen noch nach
     # dem alten Sample - im Panel neu generieren.
-    return {"voice_id": voice_id, "bytes": len(content)}
+
+    # Transkript fuer Breeze (v1.17) gleich mit vorschlagen. Ein altes
+    # Transkript passt zum neuen Sample nicht mehr und wird so oder so
+    # ersetzt - ein falsches Transkript verdirbt das Voice-Cloning.
+    transcript, error = await _transcribe_sample(content)
+    repos.update_voice(voice_id, {"sample_text": transcript})
+    result = {"voice_id": voice_id, "bytes": len(content), "sample_text": transcript}
+    if error:
+        result["transcript_error"] = error
+    return result
+
+
+@router.post("/voices/{voice_id}/transcribe")
+async def transcribe_voice_sample(voice_id: str) -> dict:
+    """Transkript fuer ein vorhandenes Sample (z. B. vor v1.17 hochgeladen)
+    per Whisper neu vorschlagen lassen."""
+    if repos.get_voice(voice_id) is None:
+        raise HTTPException(status_code=404, detail="Stimme nicht gefunden")
+    path = _sample_path(voice_id)
+    if not path.exists():
+        raise HTTPException(status_code=400, detail="Fuer diese Stimme ist kein Sample hochgeladen")
+    transcript, error = await _transcribe_sample(path.read_bytes())
+    if transcript is None:
+        raise HTTPException(status_code=502, detail=f"Transkription fehlgeschlagen: {error}")
+    voice = repos.update_voice(voice_id, {"sample_text": transcript})
+    return {**voice, "has_sample": True}
 
 
 # ---- Filler-Trigger --------------------------------------------------------------
@@ -252,15 +314,23 @@ class FillerPayload(BaseModel):
     # Wartezeit, bevor dieser Filler spielen darf (0 = sofort): Ist die
     # Antwort bzw. das Tool vorher fertig, entfaellt der Filler.
     delay_ms: int = Field(default=1200, ge=0, le=60_000)
-    # Womit das Audio vorgeneriert wird (v1.15).
-    engine: Literal["xtts", "piper"] = "xtts"
+    # Womit das Audio vorgeneriert wird (v1.15); erlaubt ist jede Engine
+    # der Registry (v1.17).
+    engine: str = "xtts"
+
+    @field_validator("engine")
+    @classmethod
+    def _known_engine(cls, value: str) -> str:
+        if value not in tts_engines.engine_ids():
+            raise ValueError(f"unbekannte TTS-Engine '{value}'")
+        return value
 
 
 @router.get("/tts-engines")
 def list_tts_engines() -> list[dict]:
     """Engines, die Filler-Audio erzeugen koennen - Grundlage fuer das
     Dropdown im Filler-Formular."""
-    return filler_service.TTS_ENGINES
+    return tts_engines.public_engines()
 
 
 @router.get("/fillers")
@@ -329,14 +399,104 @@ def delete_filler(filler_id: int) -> None:
 
 @router.post("/fillers/{filler_id}/generate")
 async def generate_filler(filler_id: int, voice_id: str | None = None) -> dict:
-    """Erzeugt das Filler-Audio per XTTS fuer alle Stimmen mit Sample (1.7d)
-    - oder mit ?voice_id=... nur fuer diese eine (v1.16): Eine gelungene
-    Stimme bleibt so erhalten, wenn nur eine andere neu gewuerfelt wird."""
+    """Erzeugt das Filler-Audio mit der Engine des Fillers fuer alle Stimmen
+    (1.7d/v1.15) - oder mit ?voice_id=... nur fuer diese eine (v1.16): Eine
+    gelungene Stimme bleibt so erhalten, wenn nur eine andere neu gewuerfelt
+    wird."""
     try:
         results = await filler_service.generate_audio(filler_id, voice_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     return {"results": results}
+
+
+# ---- Sprachausgabe / TTS-Engine (v1.17) ------------------------------------------
+#
+# Wie beim LLM (Modelle): Der Admin waehlt server-weit, welche Engine die
+# gesprochenen Antworten erzeugt. Probehoeren rendert einen Testsatz mit
+# einer beliebigen Engine - ohne Fallback und mit Zeitmessung, damit sich
+# Engines auf der echten Hardware vergleichen lassen.
+
+
+class TtsActivatePayload(BaseModel):
+    engine: str
+
+
+class TtsPreviewPayload(BaseModel):
+    engine: str
+    voice_id: str
+    text: str = Field(min_length=1, max_length=500)
+
+
+class TtsSettingsPayload(BaseModel):
+    # Optionale Sprechanweisung fuer Breeze ("Voice Direction"), z. B.
+    # "Speak in a warm, calm tone." - leer = keine.
+    breeze_instruction: str = ""
+
+
+@router.get("/tts")
+async def tts_overview() -> dict:
+    return {
+        "active_engine": tts_engines.active_engine(),
+        "engines": await tts_engines.overview(),
+        "breeze_instruction": repos.get_setting(BREEZE_INSTRUCTION_SETTING) or "",
+    }
+
+
+@router.post("/tts/activate")
+async def activate_tts_engine(payload: TtsActivatePayload) -> dict:
+    if payload.engine not in tts_engines.engine_ids():
+        raise HTTPException(status_code=404, detail=f"Unbekannte TTS-Engine '{payload.engine}'")
+    tts_engines.set_active_engine(payload.engine)
+    status = await tts_engines.engine_status(payload.engine)
+    result: dict[str, Any] = {"active_engine": payload.engine, "status": status}
+    if status["status"] != "ok":
+        # Nicht blockieren (man darf eine Engine vorab waehlen), aber klar
+        # sagen, was bis dahin passiert.
+        name = tts_engines.get_engine(payload.engine)["name"]
+        meanwhile = (
+            "Bis der Dienst laeuft, spricht XTTS die Antworten."
+            if payload.engine != tts_engines.DEFAULT_ENGINE
+            else "Bis dahin liest die App die Antworten selbst vor (TTS-Fallback)."
+        )
+        result["warning"] = (
+            f"{name} ist aktiviert, antwortet aber gerade nicht ({status['detail']}). {meanwhile}"
+        )
+    return result
+
+
+@router.post("/tts/preview")
+async def preview_tts(payload: TtsPreviewPayload) -> Response:
+    if payload.engine not in tts_engines.engine_ids():
+        raise HTTPException(status_code=404, detail=f"Unbekannte TTS-Engine '{payload.engine}'")
+    text = payload.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text fuer das Probehoeren fehlt")
+    name = tts_engines.get_engine(payload.engine)["name"]
+    try:
+        result = await tts_engines.synthesize(payload.engine, text, payload.voice_id)
+    except Exception as exc:
+        logger.exception("Probehoeren mit %s fehlgeschlagen", payload.engine)
+        raise HTTPException(status_code=502, detail=f"{name}: {str(exc)[:400] or type(exc).__name__}")
+    if not result.pcm:
+        raise HTTPException(status_code=502, detail=f"{name} hat keine Audio-Daten geliefert")
+    return Response(
+        content=pcm16_to_wav(result.pcm, result.rate),
+        media_type="audio/wav",
+        headers={
+            "Cache-Control": "no-store",
+            "X-TTS-First-Chunk-Ms": str(round(result.first_chunk_ms)),
+            "X-TTS-Total-Ms": str(round(result.total_ms)),
+            "X-Audio-Ms": str(round(result.audio_ms)),
+        },
+    )
+
+
+@router.put("/tts/settings")
+def save_tts_settings(payload: TtsSettingsPayload) -> dict:
+    instruction = payload.breeze_instruction.strip()
+    repos.set_setting(BREEZE_INSTRUCTION_SETTING, instruction)
+    return {"breeze_instruction": instruction}
 
 
 # ---- Karten-Layouts ---------------------------------------------------------------

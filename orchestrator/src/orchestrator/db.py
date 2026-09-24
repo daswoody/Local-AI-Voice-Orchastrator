@@ -46,7 +46,11 @@ CREATE TABLE IF NOT EXISTS device_tokens (
 CREATE TABLE IF NOT EXISTS voices (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
-    language TEXT NOT NULL DEFAULT 'de'
+    language TEXT NOT NULL DEFAULT 'de',
+    -- Exaktes Transkript des Voice-Samples (v1.17): Breeze TTS 2 braucht
+    -- es fuers Voice-Cloning, XTTS nicht. Beim Upload per Whisper
+    -- vorgeschlagen, im Panel korrigierbar. NULL = keins.
+    sample_text TEXT
 );
 
 CREATE TABLE IF NOT EXISTS filler_triggers (
@@ -202,6 +206,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     message_columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
     if "tools_json" not in message_columns:
         conn.execute("ALTER TABLE messages ADD COLUMN tools_json TEXT")
+    voice_columns = {row[1] for row in conn.execute("PRAGMA table_info(voices)")}
+    if "sample_text" not in voice_columns:
+        conn.execute("ALTER TABLE voices ADD COLUMN sample_text TEXT")
 
 
 def _seed_admin_user(conn: sqlite3.Connection) -> None:

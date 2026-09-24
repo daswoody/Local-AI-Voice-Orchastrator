@@ -208,6 +208,18 @@ def create_voice(voice_id: str, name: str, language: str) -> dict:
     return {"id": voice_id, "name": name, "language": language}
 
 
+def update_voice(voice_id: str, fields: dict[str, Any]) -> dict | None:
+    allowed = {"name", "language", "sample_text"}
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    with db_session() as conn:
+        if updates:
+            assignments = ", ".join(f"{k} = ?" for k in updates)
+            conn.execute(f"UPDATE voices SET {assignments} WHERE id = ?", (*updates.values(), voice_id))
+            conn.commit()
+        row = conn.execute("SELECT * FROM voices WHERE id = ?", (voice_id,)).fetchone()
+        return dict(row) if row else None
+
+
 def delete_voice(voice_id: str) -> bool:
     with db_session() as conn:
         cursor = conn.execute("DELETE FROM voices WHERE id = ?", (voice_id,))

@@ -33,6 +33,7 @@ import httpx
 from .. import repos
 from ..audio import speech_segments, trim_silence
 from ..config import settings
+from . import tts_engines
 from .tts_client import piper_client, xtts_client
 
 logger = logging.getLogger(__name__)
@@ -55,28 +56,8 @@ XTTS_TEMPERATURES: tuple[float | None, ...] = (None, 0.6, 0.45)
 _LONGEST = (0.4, 9.0)    # Sekunden Sockel, Zeichen pro Sekunde
 _SHORTEST = (0.1, 40.0)
 
-# Verfuegbare Engines fuer die Vorgenerierung (v1.15). `per_voice` sagt,
-# ob die Engine in der jeweiligen Nutzerstimme spricht - Piper hat genau
-# eine feste Stimme, sein Audio gilt deshalb fuer alle Stimmen.
-TTS_ENGINES: list[dict] = [
-    {
-        "id": "xtts",
-        "label": "XTTS-v2 (Stimme des Nutzers)",
-        "per_voice": True,
-        "description": "Gleiche Stimme wie die Hauptantwort - kein hoerbarer "
-                       "Stimmbruch. Braucht ein Voice-Sample und mehr VRAM.",
-    },
-    {
-        "id": "piper",
-        "label": "Piper (feste Stimme, robust)",
-        "per_voice": False,
-        "description": "Schnell und ohne GPU; klingt aber anders als die "
-                       "Hauptantwort. Guter Ausweg, wenn XTTS bei einem Text "
-                       "reproduzierbar scheitert.",
-    },
-]
-
-ENGINE_IDS = [engine["id"] for engine in TTS_ENGINES]
+# Welche Engines es gibt, steht seit v1.17 in tts_engines.ENGINES - dieselbe
+# Registry wie fuer Hauptstimme und Probehoeren.
 
 
 def audio_path(filler_id: int, voice_id: str) -> Path:
@@ -147,9 +128,15 @@ async def generate_audio(filler_id: int, voice_id: str | None = None) -> list[di
         if filler is None:
             raise ValueError("Filler existiert nicht")
         Path(settings.filler_cache_dir).mkdir(parents=True, exist_ok=True)
-        if (filler.get("engine") or "xtts") == "piper":
+        engine_id = filler.get("engine") or "xtts"
+        if engine_id == "piper":
             return await _generate_with_piper(filler, voice_ids)
-        return await _generate_with_xtts(filler, voice_ids)
+        if engine_id == "xtts":
+            return await _generate_with_xtts(filler, voice_ids)
+        if engine_id in tts_engines.ENGINES:
+            return await _generate_with_engine(filler, voice_ids, engine_id)
+        error = f"Engine '{engine_id}' gibt es nicht mehr - Filler auf eine andere Engine umstellen"
+        return [{"voice_id": v, "ok": False, "error": error} for v in voice_ids]
 
 
 def prepare_text(text: str) -> str:
@@ -253,6 +240,49 @@ async def _generate_with_xtts(filler: dict, voice_ids: list[str]) -> list[dict]:
             })
         except Exception as exc:
             logger.exception("Filler-Generierung fuer Stimme %s fehlgeschlagen", voice_id)
+            results.append({"voice_id": voice_id, "ok": False, "error": str(exc)[:350]})
+    return results
+
+
+async def _generate_with_engine(filler: dict, voice_ids: list[str], engine_id: str) -> list[dict]:
+    """Weitere Engines aus der Registry (z. B. Breeze TTS 2, v1.17) ueber
+    ihren Stream: pro Stimme ein Versuch mit derselben Textaufbereitung,
+    Trimmung und Plausibilitaetspruefung wie bei XTTS - nur ohne dessen
+    Temperatur-Neuversuche, die kennt die gemeinsame Schnittstelle nicht."""
+    spec = tts_engines.get_engine(engine_id)
+    text = prepare_text(filler["text"])
+    results = []
+    for voice_id in voice_ids:
+        sample = Path(settings.voices_dir) / f"{voice_id}.wav"
+        if spec["needs_sample"] and not sample.exists():
+            results.append({"voice_id": voice_id, "ok": False,
+                            "error": "kein Voice-Sample hochgeladen"})
+            continue
+        try:
+            synthesis = await tts_engines.synthesize(engine_id, text, voice_id)
+            if not synthesis.pcm:
+                raise RuntimeError(f"{spec['name']} hat keine Audio-Daten geliefert")
+            take = assess_take(text, synthesis.pcm, synthesis.rate)
+            result = _store(filler, voice_id, trim_silence(take.pcm, take.rate), take.rate)
+            if result["ok"] and take.problem:
+                result["warning"] = (f"{take.problem} - bitte probehoeren, ggf. nur diese "
+                                     "Stimme neu generieren")
+            results.append(result)
+        except httpx.RemoteProtocolError:
+            # Stream mitten in der Generierung abgerissen = Container
+            # gestorben (RAM-/VRAM-Knappheit) - wie bei XTTS sagen, wo man
+            # nachsehen muss.
+            logger.exception("%s-Stream fuer Stimme %s abgerissen", spec["name"], voice_id)
+            results.append({
+                "voice_id": voice_id, "ok": False,
+                "error": f"{spec['name']}-Service waehrend der Generierung abgestuerzt. "
+                         f"Auf der VM pruefen: 'docker logs {spec['container']}' "
+                         "(Fehlertext/Traceback) sowie nvidia-smi (VRAM). Alternativ "
+                         "diesen Filler auf die Engine 'Piper' umstellen.",
+            })
+        except Exception as exc:
+            logger.exception("Filler-Generierung (%s) fuer Stimme %s fehlgeschlagen",
+                             spec["name"], voice_id)
             results.append({"voice_id": voice_id, "ok": False, "error": str(exc)[:350]})
     return results
 

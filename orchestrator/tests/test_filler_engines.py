@@ -6,6 +6,7 @@ import pytest
 
 from orchestrator import repos
 from orchestrator.services import filler_service
+from orchestrator.services.tts_client import piper_client, xtts_client
 
 
 def _filler(engine: str) -> dict:
@@ -20,9 +21,9 @@ async def test_piper_engine_writes_one_audio_for_every_voice(client, monkeypatch
     abgelegt, damit der Abspielpfad (Cache-Matrix) unveraendert bleibt."""
     filler = _filler("piper")
     piper = AsyncMock(return_value=(b"\x01\x02" * 800, 22050))
-    monkeypatch.setattr(filler_service.piper_client, "synthesize", piper)
+    monkeypatch.setattr(piper_client, "synthesize", piper)
     xtts = AsyncMock(side_effect=AssertionError("XTTS darf hier nicht laufen"))
-    monkeypatch.setattr(filler_service.xtts_client, "stream", xtts)
+    monkeypatch.setattr(xtts_client, "stream", xtts)
 
     results = await filler_service.generate_audio(filler["id"])
 
@@ -36,7 +37,7 @@ async def test_piper_engine_writes_one_audio_for_every_voice(client, monkeypatch
 async def test_piper_failure_is_reported_per_voice(client, monkeypatch):
     filler = _filler("piper")
     monkeypatch.setattr(
-        filler_service.piper_client, "synthesize",
+        piper_client, "synthesize",
         AsyncMock(side_effect=RuntimeError("Piper-Container down")),
     )
 
@@ -62,9 +63,9 @@ async def test_xtts_engine_still_generates_per_voice(client, monkeypatch):
     async def fake_synthesize(text, voice_id, language=None, temperature=None):
         return b"\x03\x04" * 12000, 24000
 
-    monkeypatch.setattr(filler_service.xtts_client, "synthesize", fake_synthesize)
+    monkeypatch.setattr(xtts_client, "synthesize", fake_synthesize)
     monkeypatch.setattr(
-        filler_service.piper_client, "synthesize",
+        piper_client, "synthesize",
         AsyncMock(side_effect=AssertionError("Piper darf hier nicht laufen")),
     )
 

@@ -36,12 +36,18 @@ const api = {
     return response.json();
   },
 
-  /* Binaerdaten (Filler-Audio) MIT Token holen: ein <audio src="..."> kann
-   * keinen Authorization-Header senden, deshalb fetch + Blob-URL. */
-  async blob(path) {
+  /* Binaerdaten (Filler-Audio, Probehoeren) MIT Token holen: ein
+   * <audio src="..."> kann keinen Authorization-Header senden, deshalb
+   * fetch + Blob-URL. Liefert die Response, damit auch Header lesbar sind. */
+  async binary(method, path, body) {
     const headers = {};
     if (this.token) headers["Authorization"] = `Bearer ${this.token}`;
-    const response = await fetch(path, { headers });
+    if (body) headers["Content-Type"] = "application/json";
+    const response = await fetch(path, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+    });
     if (response.status === 401) {
       logout();
       throw new Error("Sitzung abgelaufen - bitte neu anmelden.");
@@ -51,7 +57,11 @@ const api = {
       try { detail = (await response.json()).detail || detail; } catch (_) {}
       throw new Error(detail);
     }
-    return response.blob();
+    return response;
+  },
+
+  async blob(path) {
+    return (await this.binary("GET", path)).blob();
   },
 
   get(path) { return this.request("GET", path); },
@@ -135,7 +145,7 @@ function wireForms(root) {
       event.preventDefault();
       try {
         await formActions[form.dataset.submit](form);
-        render();
+        if (!NO_RERENDER.has(form.dataset.submit)) render();
       } catch (err) {
         alert(err.message);
       }
@@ -170,7 +180,18 @@ function wireForms(root) {
 const NO_RERENDER = new Set(["editUser", "resetUserForm", "pickSample", "editCard",
                              "editFiller", "resetFillerForm", "editAgent",
                              "resetAgentForm", "switchCardFormat", "playFiller",
-                             "filterFillers"]);
+                             "filterFillers", "editVoice", "resetVoiceForm",
+                             "previewTts"]);
+
+/* Audio-Blob abspielen und die Blob-URL danach wieder freigeben, sonst
+ * sammeln sich die Objekte im Tab an. */
+async function playBlob(blob) {
+  const url = URL.createObjectURL(blob);
+  const audio = new Audio(url);
+  audio.addEventListener("ended", () => URL.revokeObjectURL(url));
+  audio.addEventListener("error", () => URL.revokeObjectURL(url));
+  await audio.play();
+}
 
 // ---- View: Modelle -----------------------------------------------------------------
 
@@ -202,6 +223,74 @@ views.models = async () => {
         <thead><tr><th>Modell</th><th>Status</th><th></th></tr></thead>
         <tbody>${rows || "<tr><td colspan='3'>Keine Modelle gefunden.</td></tr>"}</tbody>
       </table>
+    </section>`;
+};
+
+// ---- View: Sprachausgabe ------------------------------------------------------------------
+
+views.tts = async () => {
+  const [data, voices] = await Promise.all([
+    api.get("/v1/admin/tts"),
+    api.get("/v1/admin/voices"),
+  ]);
+  const statusBadge = {
+    ok: '<span class="badge ok">erreichbar</span>',
+    loading: '<span class="badge warn">laedt Modell…</span>',
+    error: '<span class="badge warn">Fehler</span>',
+    unreachable: '<span class="badge off">nicht erreichbar</span>',
+  };
+
+  const rows = data.engines.map((engine) => {
+    const active = engine.id === data.active_engine;
+    const detail = engine.status.detail ? `<br><small>${esc(engine.status.detail)}</small>` : "";
+    return `<tr>
+      <td><strong>${esc(engine.label)}</strong><br><small>${esc(engine.description)}</small></td>
+      <td>${statusBadge[engine.status.status] || esc(engine.status.status)}${detail}</td>
+      <td>${active ? '<span class="badge ok">aktiv</span>' : '<span class="badge off">inaktiv</span>'}</td>
+      <td class="actions">
+        ${active ? "" : `<button class="small" data-action="activateTts" data-id="${esc(engine.id)}">Aktivieren</button>`}
+      </td>
+    </tr>`;
+  }).join("");
+
+  const engineOptions = data.engines.map((e) =>
+    `<option value="${esc(e.id)}" ${e.id === data.active_engine ? "selected" : ""}>${esc(e.label)}</option>`).join("");
+  const voiceOptions = voices.map((v) => {
+    const hint = v.sample_text ? "" : (v.has_sample ? " (ohne Transkript)" : " (ohne Sample)");
+    return `<option value="${esc(v.id)}">${esc(v.name)}${esc(hint)}</option>`;
+  }).join("");
+
+  return `
+    <h1>Sprachausgabe</h1>
+    <p class="hint">Welche TTS-Engine die gesprochenen Antworten erzeugt - server-weit, wie das aktive LLM. Faellt eine andere Engine als XTTS aus, bevor Audio geflossen ist (Container gestoppt, Modell laedt noch), spricht automatisch XTTS. Filler behalten ihre eigene Engine (Filler &amp; Trigger) - fuer eine einheitliche Stimme dort dieselbe Engine waehlen und neu generieren.</p>
+    <section class="block">
+      <table>
+        <thead><tr><th>Engine</th><th>Dienst</th><th>Status</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </section>
+    <section class="block">
+      <h2>Probehoeren &amp; vergleichen</h2>
+      <p class="hint">Spricht einen Testsatz mit genau dieser Engine und Stimme (ohne XTTS-Fallback) und misst die Zeit bis zur ersten Sekunde Audio sowie fuer die komplette Synthese. Echtzeitfaktor unter 1 = schneller als Echtzeit.</p>
+      <form class="grid" data-submit="previewTts" id="tts-preview-form">
+        <label>Engine <select name="engine">${engineOptions}</select></label>
+        <label>Stimme <select name="voice_id">${voiceOptions}</select></label>
+        <label class="full">Text
+          <input name="text" required maxlength="500" value="Hallo! Ich bin deine Heim-Assistenz. Soll ich das Licht im Wohnzimmer einschalten?">
+        </label>
+        <div><button type="submit">Anhoeren</button></div>
+        <p class="hint full" id="tts-preview-result"></p>
+      </form>
+    </section>
+    <section class="block">
+      <h2>Breeze TTS 2</h2>
+      <p class="hint">Breeze klont eine Stimme nur mit Sample <strong>und</strong> exaktem Transkript (unter "Stimmen" pflegen); ohne Transkript spricht es mit seiner eingebauten Stimme. Offiziell unterstuetzt das Open-Weight-Modell nur Englisch und Chinesisch - deutsche Antworten koennen mit Akzent oder falsch ausgesprochen klingen. Der Container laeuft getrennt vom Voice-Stack (<code>docker-compose.breeze.yml</code>) und belegt ~7,7 GB VRAM, solange er laeuft.</p>
+      <form class="grid" data-submit="saveTtsSettings">
+        <label class="full">Sprechanweisung (optional, "Voice Direction") - steuert Tonfall, Tempo und Emotion; die Beispiele von Breeze sind auf Englisch
+          <textarea name="breeze_instruction" rows="2" placeholder="Speak in a warm, calm and friendly tone.">${esc(data.breeze_instruction)}</textarea>
+        </label>
+        <div><button type="submit">Speichern</button></div>
+      </form>
     </section>`;
 };
 
@@ -244,9 +333,8 @@ views.gpus = async () => {
   const rows = data.services.map((service) => {
     let control;
     if (!service.controllable) {
-      control = service.external
-        ? '<span class="badge off">extern (Host)</span>'
-        : '<span class="badge off">CPU (fest)</span>';
+      const fixed = service.control_hint || (service.external ? "extern (Host)" : "CPU (fest)");
+      control = `<span class="badge off">${esc(fixed)}</span>`;
     } else if (service.reachable) {
       control = `<select data-action-change="assignDevice" data-service="${esc(service.name)}">${deviceOptions(service.assigned)}</select>`;
     } else {
@@ -393,39 +481,59 @@ views.users = async () => {
 
 views.voices = async () => {
   const voices = await api.get("/v1/admin/voices");
-  const rows = voices.map((voice) => `
+  const rows = voices.map((voice) => {
+    let transcript;
+    if (voice.sample_text) {
+      const text = voice.sample_text.length > 90 ? `${voice.sample_text.slice(0, 90)}…` : voice.sample_text;
+      transcript = `<small>"${esc(text)}"</small>`;
+    } else {
+      transcript = voice.has_sample
+        ? '<span class="badge warn">fehlt</span>'
+        : '<span class="badge off">-</span>';
+    }
+    return `
     <tr>
       <td>${esc(voice.id)}</td>
       <td>${esc(voice.name)}</td>
       <td>${esc(voice.language)}</td>
       <td>${voice.has_sample ? '<span class="badge ok">Sample vorhanden</span>' : '<span class="badge warn">kein Sample</span>'}</td>
+      <td>${transcript}</td>
       <td class="actions">
         <label style="display:inline-block">
           <input type="file" accept=".wav,audio/wav" class="hidden" data-upload="${esc(voice.id)}">
           <button type="button" class="small" data-action="pickSample" data-id="${esc(voice.id)}">Sample hochladen</button>
         </label>
+        ${voice.has_sample ? `<button class="small ghost" data-action="transcribeVoice" data-id="${esc(voice.id)}" title="Transkript per Whisper neu vorschlagen">Transkribieren</button>` : ""}
+        <button class="small ghost" data-action="editVoice" data-id="${esc(voice.id)}">Bearbeiten</button>
         <button class="small danger" data-action="deleteVoice" data-id="${esc(voice.id)}">Loeschen</button>
       </td>
-    </tr>`).join("");
+    </tr>`;
+  }).join("");
 
   return `
     <h1>Stimmen</h1>
-    <p class="hint">Jede Stimme braucht ein WAV-Sample (~6-30s sauberes, deutsches Sprechmaterial) fuer das XTTS-Voice-Cloning. Nach dem Austausch eines Samples: Filler neu generieren.</p>
+    <p class="hint">Jede Stimme braucht ein WAV-Sample (~6-30s sauberes, deutsches Sprechmaterial) fuer das Voice-Cloning. Breeze TTS 2 braucht zusaetzlich das <strong>exakte Transkript</strong> des Samples: Es wird beim Upload per Whisper vorgeschlagen und laesst sich unter "Bearbeiten" korrigieren (Wiederholungen und Versprecher mit aufschreiben). Nach dem Austausch eines Samples: Filler neu generieren.</p>
     <section class="block">
       <table>
-        <thead><tr><th>ID</th><th>Name</th><th>Sprache</th><th>Status</th><th></th></tr></thead>
+        <thead><tr><th>ID</th><th>Name</th><th>Sprache</th><th>Status</th><th>Transkript (Breeze)</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </section>
     <section class="block">
-      <h2>Neue Stimme</h2>
-      <form class="grid" data-submit="createVoice">
+      <h2 id="voice-form-title">Neue Stimme</h2>
+      <form class="grid" data-submit="saveVoice" id="voice-form">
+        <input type="hidden" name="editing">
         <label>ID (Dateiname, z. B. "papa") <input name="id" required pattern="[A-Za-z0-9_\\-]+"></label>
         <label>Name <input name="name" required></label>
         <label>Sprache <input name="language" value="de"></label>
-        <div><button type="submit">Anlegen</button></div>
+        <label class="full hidden" id="voice-transcript-label">Transkript des Samples - Wort fuer Wort, was im Sample gesprochen wird (leer = keins)
+          <textarea name="sample_text" rows="3"></textarea>
+        </label>
+        <div><button type="submit">Speichern</button>
+        <button type="button" class="ghost" data-action="resetVoiceForm">Neu</button></div>
       </form>
-    </section>`;
+    </section>
+    <script type="application/json" id="voices-data">${JSON.stringify(voices)}</script>`;
 };
 
 // ---- View: Filler & Trigger ------------------------------------------------------------------
@@ -541,7 +649,7 @@ views.fillers = async () => {
 
   return `
     <h1>Filler &amp; Trigger</h1>
-    <p class="hint">Trigger bestimmen, WANN ein Filler gespielt wird - der Orchestrator kennt seinen Zustand selbst: "Nachdenken" (LLM langsam), "Suche/RAG", "Tool-Aufruf" (optional per Muster auf bestimmte Tools, z. B. <code>Calendar-*</code>; greift ab Tool-Calling 1.12). Filler werden per XTTS in jeder Stimme vorgeneriert - kein Stimmbruch mehr zwischen Filler und Antwort.</p>
+    <p class="hint">Trigger bestimmen, WANN ein Filler gespielt wird - der Orchestrator kennt seinen Zustand selbst: "Nachdenken" (LLM langsam), "Suche/RAG", "Tool-Aufruf" (optional per Muster auf bestimmte Tools, z. B. <code>Calendar-*</code>; greift ab Tool-Calling 1.12). Filler werden pro Stimme vorgeneriert - mit derselben Engine wie die Hauptstimme (Sprachausgabe) gibt es keinen hoerbaren Stimmbruch zwischen Filler und Antwort.</p>
     <section class="block">
       <h2>Filler</h2>
       <div class="chips" role="group" aria-label="Nach Trigger filtern">${chips}</div>
@@ -795,8 +903,48 @@ const formActions = {
     }
   },
 
-  createVoice: (form) => api.post("/v1/admin/voices", {
-    id: form.id.value, name: form.name.value, language: form.language.value || "de",
+  async saveVoice(form) {
+    if (form.editing.value) {
+      await api.put(`/v1/admin/voices/${encodeURIComponent(form.id.value)}`, {
+        name: form.name.value,
+        language: form.language.value || "de",
+        sample_text: form.sample_text.value,
+      });
+    } else {
+      await api.post("/v1/admin/voices", {
+        id: form.id.value, name: form.name.value, language: form.language.value || "de",
+      });
+    }
+  },
+
+  async previewTts(form) {
+    const result = document.getElementById("tts-preview-result");
+    const button = form.querySelector("button[type=submit]");
+    button.disabled = true;
+    result.textContent = "Erzeuge Audio…";
+    try {
+      const response = await api.binary("POST", "/v1/admin/tts/preview", {
+        engine: form.engine.value,
+        voice_id: form.voice_id.value,
+        text: form.text.value,
+      });
+      const first = Number(response.headers.get("X-TTS-First-Chunk-Ms"));
+      const total = Number(response.headers.get("X-TTS-Total-Ms"));
+      const audio = Number(response.headers.get("X-Audio-Ms"));
+      const rtf = audio ? (total / audio).toFixed(2) : "-";
+      result.textContent = `${form.engine.selectedOptions[0].textContent}: erste Sekunde Audio nach ${first} ms, `
+        + `komplette Synthese ${total} ms fuer ${(audio / 1000).toFixed(1)} s Audio (Echtzeitfaktor ${rtf}).`;
+      await playBlob(await response.blob());
+    } catch (err) {
+      result.textContent = "";
+      throw err;
+    } finally {
+      button.disabled = false;
+    }
+  },
+
+  saveTtsSettings: (form) => api.put("/v1/admin/tts/settings", {
+    breeze_instruction: form.breeze_instruction.value,
   }),
 
   createTrigger: (form) => api.post("/v1/admin/triggers", {
@@ -858,6 +1006,11 @@ const formActions = {
 const buttonActions = {
   activateModel: (data) => api.post("/v1/admin/models/activate", { model: data.id }),
 
+  async activateTts(data) {
+    const result = await api.post("/v1/admin/tts/activate", { engine: data.id });
+    if (result.warning) alert(result.warning);
+  },
+
   async assignDevice(data, element) {
     // Das Neuladen des Modells dauert - Zeile sichtbar "beschaeftigt"
     // stellen, sonst wirkt das Panel eingefroren.
@@ -909,13 +1062,44 @@ const buttonActions = {
       const body = new FormData();
       body.append("file", input.files[0]);
       try {
-        await api.request("POST", `/v1/admin/voices/${data.id}/sample`, body, true);
+        const result = await api.request("POST", `/v1/admin/voices/${data.id}/sample`, body, true);
+        if (result.transcript_error) {
+          alert("Sample gespeichert, aber kein Transkript-Vorschlag moeglich: "
+            + `${result.transcript_error}\nFuer Breeze bitte unter "Bearbeiten" von Hand eintragen.`);
+        }
         render();
       } catch (err) {
         alert(err.message);
       }
     };
     input.click();
+  },
+
+  transcribeVoice: (data) =>
+    api.post(`/v1/admin/voices/${encodeURIComponent(data.id)}/transcribe`, {}),
+
+  editVoice(data) {
+    const voices = JSON.parse(document.getElementById("voices-data").textContent);
+    const voice = voices.find((v) => v.id === data.id);
+    const form = document.getElementById("voice-form");
+    form.editing.value = "1";
+    form.id.value = voice.id;
+    form.id.readOnly = true;
+    form.name.value = voice.name;
+    form.language.value = voice.language;
+    form.sample_text.value = voice.sample_text || "";
+    document.getElementById("voice-transcript-label").classList.remove("hidden");
+    document.getElementById("voice-form-title").textContent = `Stimme bearbeiten: ${voice.name}`;
+    form.scrollIntoView({ behavior: "smooth" });
+  },
+
+  resetVoiceForm() {
+    const form = document.getElementById("voice-form");
+    form.reset();
+    form.editing.value = "";
+    form.id.readOnly = false;
+    document.getElementById("voice-transcript-label").classList.add("hidden");
+    document.getElementById("voice-form-title").textContent = "Neue Stimme";
   },
 
   async deleteVoice(data) {
@@ -984,15 +1168,9 @@ const buttonActions = {
   /* Generiertes Audio anhoeren - deckt misslungene Generierungen auf,
    * bevor sie im Realtime-Talk auffallen. */
   async playFiller(data) {
-    const blob = await api.blob(
+    await playBlob(await api.blob(
       `/v1/admin/fillers/${data.id}/audio?voice_id=${encodeURIComponent(data.voice)}`
-    );
-    const url = URL.createObjectURL(blob);
-    const audio = new Audio(url);
-    // Blob-URL wieder freigeben, sonst sammeln sich die Objekte im Tab an.
-    audio.addEventListener("ended", () => URL.revokeObjectURL(url));
-    audio.addEventListener("error", () => URL.revokeObjectURL(url));
-    await audio.play();
+    ));
   },
 
   async deleteFiller(data) {

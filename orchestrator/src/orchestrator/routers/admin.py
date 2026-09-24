@@ -21,7 +21,12 @@ from ..security import hash_password, require_admin
 from ..services import filler_service, gpu_manager, tts_engines
 from ..services.litellm_client import litellm_client
 from ..services.stt_client import stt_client
-from ..services.tts_client import BREEZE_INSTRUCTION_SETTING
+from ..services.tts_client import (
+    BREEZE_INSTRUCTION_SETTING,
+    BREEZE_URL_SETTING,
+    breeze_base_url,
+    normalize_base_url,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/admin", dependencies=[Depends(require_admin)])
@@ -429,9 +434,13 @@ class TtsPreviewPayload(BaseModel):
 
 
 class TtsSettingsPayload(BaseModel):
+    # Nur mitgeschickte Felder werden geaendert.
     # Optionale Sprechanweisung fuer Breeze ("Voice Direction"), z. B.
     # "Speak in a warm, calm tone." - leer = keine.
-    breeze_instruction: str = ""
+    breeze_instruction: str | None = None
+    # Adresse des Breeze-Servers (v1.18): Container-Name, IP:Port oder
+    # Domain - leer = BREEZE_BASE_URL aus der .env.
+    breeze_url: str | None = None
 
 
 @router.get("/tts")
@@ -440,6 +449,9 @@ async def tts_overview() -> dict:
         "active_engine": tts_engines.active_engine(),
         "engines": await tts_engines.overview(),
         "breeze_instruction": repos.get_setting(BREEZE_INSTRUCTION_SETTING) or "",
+        "breeze_url": repos.get_setting(BREEZE_URL_SETTING) or "",
+        "breeze_url_default": settings.breeze_base_url.rstrip("/"),
+        "breeze_url_effective": breeze_base_url(),
     }
 
 
@@ -494,9 +506,19 @@ async def preview_tts(payload: TtsPreviewPayload) -> Response:
 
 @router.put("/tts/settings")
 def save_tts_settings(payload: TtsSettingsPayload) -> dict:
-    instruction = payload.breeze_instruction.strip()
-    repos.set_setting(BREEZE_INSTRUCTION_SETTING, instruction)
-    return {"breeze_instruction": instruction}
+    if payload.breeze_url is not None:
+        try:
+            url = normalize_base_url(payload.breeze_url)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Breeze-Adresse ungueltig: {exc}")
+        repos.set_setting(BREEZE_URL_SETTING, url)
+    if payload.breeze_instruction is not None:
+        repos.set_setting(BREEZE_INSTRUCTION_SETTING, payload.breeze_instruction.strip())
+    return {
+        "breeze_instruction": repos.get_setting(BREEZE_INSTRUCTION_SETTING) or "",
+        "breeze_url": repos.get_setting(BREEZE_URL_SETTING) or "",
+        "breeze_url_effective": breeze_base_url(),
+    }
 
 
 # ---- Karten-Layouts ---------------------------------------------------------------

@@ -85,7 +85,7 @@ Die Wahl greift ab dem naechsten Sprach-Turn, ohne Neustart.
 |---|---|---|---|
 | XTTS-v2 (Default) | klont die Nutzerstimme aus dem Sample, Deutsch | ~3 GB VRAM | bewaehrte Hauptstimme |
 | Piper | eine feste deutsche Stimme | CPU | robuster Notbetrieb, z. B. wenn die GPUs fuer einen LLM-Test gebraucht werden |
-| Breeze TTS 2 | klont aus Sample **+ exaktem Transkript**, sonst eingebaute Stimme | ~7,7 GB VRAM | Test-Engine (eigener Container, s. u.) |
+| Breeze TTS 2 | klont aus Sample **+ exaktem Transkript**, sonst eingebaute Stimme | ~7,7 GB (PyTorch) bzw. ~4 GB (Breeze-TTS-2.cpp) | Test-Engine (eigener Server, s. u.) |
 
 Wie es funktioniert:
 
@@ -113,61 +113,169 @@ stehen unter der *BreezeBlue Research and Non-Commercial License* (privat ok,
 kommerziell nicht). Die Cloud-API von breezeblue.ai (mehr Sprachen) ist
 bewusst **nicht** angebunden: Jede Antwort wuerde das Haus verlassen.
 
-1. **Deploy anlegen:** Coolify -> New Resource -> Docker Compose, dasselbe
-   Repo, Base Directory `/orchestrator`, Compose-Datei
-   `docker-compose.breeze.yml`. Getrennt vom Voice-Stack, weil der Container
-   das Modell beim Start laedt und dann dauerhaft ~7,7 GB VRAM belegt - er
-   soll nur laufen, solange du testest.
-2. **Karte waehlen:** Env-Variable `BREEZE_GPU` (Index wie im GPU-Panel,
-   Default `0`). Bei 11 GB + 8 GB ist die grosse Karte die realistische Wahl
-   (auf 8 GB bleibt neben ~7,7 GB praktisch nichts) - vorher im GPU-Panel
-   XTTS/STT auf die andere Karte schieben und das LLM in LM Studio dort
-   entladen bzw. umziehen.
-3. **Deployen:** Der erste Start laedt die Gewichte (mehrere GB) ins Volume
-   `breeze-models`; danach laedt der Server das Modell (`/health` meldet so
-   lange 503, das Panel zeigt "laedt Modell..."). Verlangt Hugging Face eine
-   Lizenz-Zustimmung, bricht der Download mit einem Hinweis ab: auf der
-   Modellseite zustimmen und `HF_TOKEN` setzen.
-4. **Transkripte pflegen:** Breeze klont eine Stimme nur mit dem exakten
+Es gibt zwei Server-Varianten mit **derselben HTTP-Schnittstelle** - der
+Orchestrator merkt keinen Unterschied, im Panel wird nur die Adresse
+eingetragen (Sprachausgabe -> Breeze-Server):
+
+| | A: offizieller PyTorch-Server | B: Breeze-TTS-2.cpp |
+|---|---|---|
+| Ordner / Compose | `tts-breeze/`, `docker-compose.breeze.yml` | `tts-breeze-cpp/`, `docker-compose.breeze-cpp.yml` - oder nativ (B2) |
+| Adresse im Panel | `http://tts-breeze:7860` (Standard) | `http://tts-breeze-cpp:7860` bzw. `http://<ip>:7860` |
+| VRAM | ~7,7 GB (bf16) | ~4 GB (Q8_0), ~3 GB (Q4_K) |
+| Tempo | offen: die 2080 Ti (Turing) kann bf16 nicht nativ | laut Projekt ~1,25x Echtzeit auf einer RTX 3060 (Q8_0) |
+| Gewichte | `BreezeBlue/breeze-tts-2`, ~6,5 GB | `HoppouAI/Breeze-TTS-2.cpp`, Q8_0 ~3,3 GB |
+| Erster Build | grosses Image (PyTorch + CUDA-Bibliotheken) | CUDA-Kompilierung, dauert |
+| Herkunft | offizieller Code | Community-Portierung auf ggml, jung |
+
+Ein Unterschied im Verhalten: Ohne Sprechanweisung konditioniert B auf ein
+eingebautes "Speak clearly and naturally.", A klont dann ohne Anweisung.
+Beide nehmen genau **einen** Request zur Zeit an (weitere bekommen 409, der
+Orchestrator wartet bis ~5 s, danach springt XTTS ein) und kodieren die
+Referenz bei jedem Request neu.
+
+#### Vorbereitung (beide Varianten)
+
+1. **Karte planen** (GPU-Panel): A braucht ~7,7 GB am Stueck - auf 11 GB +
+   8 GB heisst das die grosse Karte freiraeumen (XTTS/STT auf die andere
+   Karte, das LLM in LM Studio entladen bzw. umziehen). B passt mit ~4 GB
+   auch auf die 8-GB-Karte neben Whisper.
+2. **Transkripte pflegen:** Breeze klont eine Stimme nur mit dem exakten
    Wortlaut des Samples. Unter **Stimmen** bei vorhandenen Samples
-   "Transkribieren" klicken (Whisper schlaegt den Text vor) und ggf. unter
+   "Transkribieren" klicken (Whisper schlaegt den Text vor) und unter
    "Bearbeiten" korrigieren. Ohne Transkript spricht Breeze mit seiner
    eingebauten Stimme.
-5. **Probehoeren:** Sprachausgabe -> Probehoeren, Engine "Breeze TTS 2",
-   denselben Satz auch mit XTTS - Klang und Latenz direkt vergleichen.
-   Optional eine Sprechanweisung setzen ("Voice Direction", z. B. *Speak in a
-   warm, calm tone.*).
-6. **Aktivieren**, wenn es ueberzeugt - oder den Breeze-Deploy in Coolify
-   stoppen, um das VRAM wieder freizugeben (XTTS bleibt aktiv bzw. springt
-   ein).
+
+#### Variante A: offizieller PyTorch-Server (Docker)
+
+1. Coolify -> New Resource -> Docker Compose: dasselbe Repo und derselbe
+   Branch wie der Voice-Stack, Base Directory `/orchestrator`, Docker
+   Compose Location `/docker-compose.breeze.yml`.
+2. Environment Variables: `BREEZE_GPU` = Index der Karte (wie im GPU-Panel,
+   Default `0`); `HF_TOKEN` nur, falls Hugging Face eine Lizenz-Zustimmung
+   verlangt (auf der Modellseite zustimmen, Lese-Token anlegen).
+3. Deploy. Der erste Start laedt die Gewichte (~6,5 GB) ins Volume
+   `breeze-models`, danach das Modell auf die Karte - das Panel zeigt so
+   lange "laedt Modell...". Verfolgen mit `docker logs -f heimai-tts-breeze`.
+4. Im Panel unter Sprachausgabe -> Breeze-Server nichts eintragen (Standard
+   `http://tts-breeze:7860`) - die Tabelle zeigt Breeze als "erreichbar".
+
+#### Variante B1: Breeze-TTS-2.cpp im Container
+
+1. Coolify -> New Resource -> Docker Compose: gleiches Repo/Branch, Base
+   Directory `/orchestrator`, Docker Compose Location
+   `/docker-compose.breeze-cpp.yml`.
+2. Environment Variables:
+   - `BREEZE_GPU` = Index der Karte (Default `0`)
+   - `BREEZE_CUDA_ARCHS` = Compute-Capability der Karte(n) ohne Punkt, z. B.
+     `75` fuer die 2080 Ti allein (baut am schnellsten). Nachsehen mit
+     `nvidia-smi --query-gpu=index,name,compute_cap --format=csv`. Default
+     `61;75;86;89` deckt Pascal bis Ada ab.
+   - optional `BREEZE_GGUF_QUANT` = `q8_0` (Default, empfohlen) oder `q4_k`
+     (~3 GB, etwas schlechter), `HF_TOKEN` wie bei A, `BREEZE_BUILD_JOBS`
+     (Default 4 - kleiner, falls der VM beim Build der RAM ausgeht)
+3. Deploy. Der Build kompiliert ggml mit CUDA (hier gemessen: ~30 Minuten fuer
+   die vier Standard-Architekturen auf 4 Kernen, mit nur `75` deutlich
+   schneller). Der erste Start laedt die GGUF-Datei ins Volume
+   `breeze-cpp-models`.
+   `docker logs -f heimai-tts-breeze-cpp` zeigt am Ende
+   `backend: CUDA0, sample rate: 24000` und `listening on http://0.0.0.0:7860`.
+   Steht dort `backend: CPU`, hat der Container keine GPU bekommen.
+4. Im Panel unter Sprachausgabe -> Breeze-Server `http://tts-breeze-cpp:7860`
+   eintragen und speichern.
+
+#### Variante B2: Breeze-TTS-2.cpp nativ (ohne Docker)
+
+Fuer einen Rechner ausserhalb von Coolify - die VM selbst oder ein anderer
+Linux-Rechner (hier Ubuntu 24.04) mit NVIDIA-Karte. Fertige Binaries gibt es
+(noch) nicht; gebaut wird mit dem Vulkan-Backend, das nur den NVIDIA-Treiber
+braucht (hier getestet: ~3 Minuten auf 4 Kernen):
+
+```bash
+sudo apt install build-essential cmake ninja-build git libvulkan-dev glslc spirv-headers vulkan-tools
+vulkaninfo --summary        # muss die NVIDIA-Karte auflisten (sonst fehlt der Vulkan-Teil des Treibers)
+git clone https://github.com/HoppouAI/Breeze-TTS-2.cpp.git && cd Breeze-TTS-2.cpp
+git checkout a5436642d4c64304b398ceeda9b8fce4577bfdb1   # derselbe Stand wie im Container
+git submodule update --init --recursive
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+cmake --build build --target breeze-server -j4
+```
+
+`-DBUILD_SHARED_LIBS=OFF` macht `build/breeze-server` zu einem eigenstaendigen
+Binary, das man auch verschieben kann. Mit installiertem CUDA-Toolkit geht
+statt Vulkan `-DBREEZE_CUDA=ON -DBREEZE_VULKAN=OFF` - fuer CUDA ist aber
+Variante B1 der einfachere Weg (Toolkit steckt im Build-Image).
+
+Gewichte: auf https://huggingface.co/HoppouAI/Breeze-TTS-2.cpp/tree/main die
+`...q8_0.gguf` (ohne `-dd` im Namen) laden, z. B.
+`wget https://huggingface.co/HoppouAI/Breeze-TTS-2.cpp/resolve/main/<datei>`.
+
+Starten - der Server hat **keine Authentifizierung**, deshalb nur an eine
+interne Adresse binden:
+
+```bash
+# Auf der VM selbst: an das Gateway des ai-lab-Netzes - dann erreichen ihn nur Container
+docker network inspect ai-lab -f '{{(index .IPAM.Config 0).Gateway}}'    # z. B. 172.18.0.1
+./build/breeze-server <datei>.gguf --host 172.18.0.1 --port 7860 --ws-port -1
+# Auf einem anderen Rechner: an dessen LAN-IP, Port 7860 per Firewall nur fuer die VM freigeben
+```
+
+Im Panel dann `http://172.18.0.1:7860` bzw. `http://<lan-ip>:7860` eintragen.
+Damit der Server den Neustart ueberlebt, z. B. als systemd-Dienst:
+
+```ini
+# /etc/systemd/system/breeze-tts.service
+[Unit]
+Description=Breeze-TTS-2.cpp
+After=network-online.target docker.service
+
+[Service]
+WorkingDirectory=/opt/Breeze-TTS-2.cpp
+ExecStart=/opt/Breeze-TTS-2.cpp/build/breeze-server /opt/Breeze-TTS-2.cpp/<datei>.gguf --host 172.18.0.1 --port 7860 --ws-port -1
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`sudo systemctl enable --now breeze-tts`. Unter Windows baut das Projekt mit
+MSVC oder mingw plus Vulkan SDK (siehe `docs/build.md` im Projekt), der
+Server-Aufruf ist derselbe.
+
+#### Testen und aktivieren (alle Varianten)
+
+1. Sprachausgabe -> Probehoeren: Engine "Breeze TTS 2" und denselben Satz mit
+   XTTS - Klang und Latenz direkt vergleichen (Echtzeitfaktor unter 1 =
+   schneller als Echtzeit). Optional eine Sprechanweisung setzen ("Voice
+   Direction", z. B. *Speak in a warm, calm tone.*).
+2. **Aktivieren**, wenn es ueberzeugt. Zum Aufhoeren den Breeze-Deploy in
+   Coolify stoppen (bzw. den nativen Dienst) - das VRAM ist dann wieder frei,
+   bis dahin bzw. danach spricht XTTS.
 
 **Panel zeigt Breeze als "nicht erreichbar"?** Die Meldung nennt die Ursache:
 
-- *Container nicht gefunden* - der Name `tts-breeze` ist im Netzwerk
-  unbekannt, der Breeze-Deploy laeuft also (noch) nicht. In Coolify pruefen,
-  ob die Resource aus Schritt 1 existiert und fertig deployt ist (der erste
-  Build dauert). Auf der VM:
+- *Server nicht gefunden* - den Namen aus der eingetragenen Adresse kennt das
+  Netzwerk nicht: Der Breeze-Deploy laeuft (noch) nicht oder die Adresse
+  stimmt nicht. In Coolify pruefen, ob die Resource existiert und fertig
+  deployt ist (der erste Build dauert). Auf der VM:
   ```bash
-  docker ps --filter name=heimai-tts-breeze          # laeuft der Container?
+  docker ps --filter name=heimai-tts-breeze          # laeuft ein Breeze-Container (A oder B1)?
   docker network inspect ai-lab --format '{{range .Containers}}{{.Name}} {{end}}'
   docker exec heimai-orchestrator python -c "import socket; print(socket.gethostbyname('tts-breeze'))"
   ```
-- *nimmt keine Verbindungen an* - der Container laeuft, der Server aber
-  (noch) nicht: `docker logs -f heimai-tts-breeze` zeigt Download,
-  Modell-Laden oder den Fehler (z. B. Lizenz-Zustimmung -> `HF_TOKEN`,
-  CUDA out of memory -> Karte freiraeumen).
+- *nimmt keine Verbindungen an* - der Container/Rechner ist da, der Server
+  aber (noch) nicht: `docker logs -f heimai-tts-breeze` bzw.
+  `heimai-tts-breeze-cpp` (nativ: die Konsole von breeze-server) zeigen
+  Download, Modell-Laden oder den Fehler (z. B. Lizenz-Zustimmung ->
+  `HF_TOKEN`, CUDA out of memory -> Karte freiraeumen).
 - *laedt Modell...* - einfach warten, danach steht dort "erreichbar".
 
 Aktivieren geht trotzdem (nach Rueckfrage) - bis Breeze antwortet, spricht
 XTTS.
 
-Grenzen des offiziellen Servers: genau **ein** Request zur Zeit (weitere
-bekommen 409 - der Orchestrator wartet bis ~5 s, danach springt XTTS ein)
-und die Referenz wird bei jedem Request neu kodiert. Das offizielle
-Dockerfile baut FlashAttention (nur ab Ampere) - `tts-breeze/` verzichtet
-darauf, der Server rechnet ohnehin "eager". Ob die RTX 2080 Ti (Turing, ohne
-natives bf16) Breeze schnell genug rechnet, zeigt erst der Test - genau
-dafuer misst das Probehoeren den Echtzeitfaktor.
+Zu Variante A: Das offizielle Dockerfile baut FlashAttention (laeuft erst ab
+Ampere) - `tts-breeze/` verzichtet darauf, der Server rechnet ohnehin
+"eager". Ob die 2080 Ti ohne natives bf16 schnell genug ist, zeigt der
+Echtzeitfaktor im Probehoeren; ist sie zu langsam, ist B die Alternative.
 
 ## 1. Lokal testen (ohne echtes LiteLLM/Weaviate)
 

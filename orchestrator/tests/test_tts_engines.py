@@ -18,7 +18,9 @@ from orchestrator.routers import stream as stream_module
 from orchestrator.services import filler_service, tts_engines
 from orchestrator.services.tts_client import (
     BREEZE_INSTRUCTION_SETTING,
+    BREEZE_URL_SETTING,
     breeze_client,
+    normalize_base_url,
     piper_client,
     xtts_client,
 )
@@ -165,9 +167,10 @@ async def test_unknown_host_says_the_container_is_missing(monkeypatch):
     status = await tts_engines.engine_status("breeze")
 
     assert status["status"] == "unreachable"
-    assert "Container nicht gefunden" in status["detail"]
+    assert "Server nicht gefunden" in status["detail"]
     assert "'tts-breeze'" in status["detail"]
     assert "docker-compose.breeze.yml" in status["detail"]
+    assert "docker-compose.breeze-cpp.yml" in status["detail"]
 
 
 async def test_refused_connection_points_to_the_logs(monkeypatch):
@@ -183,6 +186,7 @@ async def test_refused_connection_points_to_the_logs(monkeypatch):
 
     assert status["status"] == "unreachable"
     assert "docker logs heimai-tts-breeze" in status["detail"]
+    assert "breeze-server" in status["detail"]  # auch der native Weg
 
 
 async def test_timeout_is_named_as_such(monkeypatch):
@@ -195,6 +199,81 @@ async def test_timeout_is_named_as_such(monkeypatch):
 
     assert status == {"status": "unreachable",
                       "detail": "'tts-xtts' antwortet nicht innerhalb von 3 s."}
+
+
+# ---- Breeze-Server-Adresse (v1.18) ------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("", ""),
+    ("   ", ""),
+    ("http://tts-breeze-cpp:7860", "http://tts-breeze-cpp:7860"),
+    ("192.168.2.105:7860/", "http://192.168.2.105:7860"),
+    ("breeze.example.org", "http://breeze.example.org"),
+    ("https://ai.example.org/breeze/", "https://ai.example.org/breeze"),
+])
+def test_breeze_url_is_normalized(raw, expected):
+    assert normalize_base_url(raw) == expected
+
+
+@pytest.mark.parametrize("raw", [
+    "ftp://breeze:21", "http://", "http://breeze:99999", "http://breeze:7860/?x=1",
+])
+def test_invalid_breeze_url_is_rejected(raw):
+    with pytest.raises(ValueError):
+        normalize_base_url(raw)
+
+
+def test_breeze_url_can_be_set_and_reset_in_the_panel(client, admin_headers, monkeypatch):
+    _ok_status(monkeypatch)
+    body = client.get("/v1/admin/tts", headers=admin_headers).json()
+    assert body["breeze_url"] == ""
+    assert body["breeze_url_effective"] == "http://tts-breeze:7860"  # .env-Standard
+
+    saved = client.put("/v1/admin/tts/settings", json={"breeze_url": "192.168.2.105:7860"},
+                       headers=admin_headers)
+    assert saved.status_code == 200
+    assert saved.json()["breeze_url_effective"] == "http://192.168.2.105:7860"
+    # Nur mitgeschickte Felder aendern sich
+    client.put("/v1/admin/tts/settings", json={"breeze_instruction": "Speak calmly."},
+               headers=admin_headers)
+    body = client.get("/v1/admin/tts", headers=admin_headers).json()
+    assert body["breeze_url"] == "http://192.168.2.105:7860"
+    assert body["breeze_instruction"] == "Speak calmly."
+
+    # Leeren = zurueck zur .env
+    client.put("/v1/admin/tts/settings", json={"breeze_url": ""}, headers=admin_headers)
+    body = client.get("/v1/admin/tts", headers=admin_headers).json()
+    assert body["breeze_url_effective"] == "http://tts-breeze:7860"
+
+
+def test_invalid_breeze_url_is_refused_and_keeps_the_old_one(client, admin_headers):
+    client.put("/v1/admin/tts/settings", json={"breeze_url": "http://tts-breeze-cpp:7860"},
+               headers=admin_headers)
+    response = client.put("/v1/admin/tts/settings", json={"breeze_url": "ftp://x"},
+                          headers=admin_headers)
+    assert response.status_code == 400
+    assert repos.get_setting(BREEZE_URL_SETTING) == "http://tts-breeze-cpp:7860"
+
+
+async def test_breeze_client_and_status_use_the_configured_url(monkeypatch):
+    repos.set_setting(BREEZE_URL_SETTING, "http://breeze.lan:8137/prefix")
+    urls: list[str] = []
+
+    def handler(request):
+        urls.append(str(request.url))
+        if request.url.path.endswith("/health"):
+            return httpx.Response(200, json={"status": "ok", "sample_rate": 24000})
+        return httpx.Response(200, headers={"x-sample-rate": "24000"}, content=b"\x01\x02")
+
+    _mock_http(monkeypatch, handler)
+
+    [c async for c in breeze_client.stream("Hallo.", "default-de-female")]
+    status = await tts_engines.engine_status("breeze")
+
+    assert urls == ["http://breeze.lan:8137/prefix/v1/audio/speech",
+                    "http://breeze.lan:8137/prefix/health"]
+    assert status["status"] == "ok"
 
 
 def test_tts_routes_require_admin(client):

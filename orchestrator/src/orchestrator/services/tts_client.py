@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -11,6 +12,34 @@ from ..config import settings
 # app_settings-Schluessel der optionalen Breeze-Sprechanweisung (Admin-Panel
 # "Sprachausgabe"), z. B. "Speak in a warm, calm tone."
 BREEZE_INSTRUCTION_SETTING = "breeze_instruction"
+# ... und der Breeze-Server-Adresse (v1.18). Leer = BREEZE_BASE_URL aus der .env.
+BREEZE_URL_SETTING = "breeze_base_url"
+
+
+def breeze_base_url() -> str:
+    """Adresse des Breeze-Servers: im Panel gesetzt, sonst .env. Beide
+    Varianten - der offizielle PyTorch-Server und Breeze-TTS-2.cpp - sprechen
+    dieselbe Schnittstelle, der Orchestrator muss nicht wissen, welche laeuft."""
+    return (repos.get_setting(BREEZE_URL_SETTING) or settings.breeze_base_url).rstrip("/")
+
+
+def normalize_base_url(value: str) -> str:
+    """Eingabe aus dem Panel -> Basis-URL ('' = Standard aus der .env).
+    Ohne Schema wird http:// ergaenzt ("192.168.2.105:7860",
+    "breeze.example.org"); erlaubt sind http/https mit Host, optional Port und
+    Pfad-Praefix (Reverse-Proxy)."""
+    value = value.strip()
+    if not value:
+        return ""
+    if "://" not in value:
+        value = "http://" + value
+    parts = urlsplit(value)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError("Adresse braucht die Form http(s)://host[:port][/pfad]")
+    if parts.query or parts.fragment:
+        raise ValueError("Adresse ohne ?-Parameter oder #-Anker angeben")
+    parts.port  # wirft ValueError bei ungueltigem Port
+    return value.rstrip("/")
 
 
 class PiperClient:
@@ -88,8 +117,9 @@ class XttsClient:
 
 
 class BreezeClient:
-    """Client gegen den offiziellen Streaming-Server von Breeze TTS 2
-    (Test-Engine, v1.17 - Container siehe tts-breeze/).
+    """Client gegen einen Breeze-TTS-2-Server (Test-Engine, v1.17): den
+    offiziellen PyTorch-Server (tts-breeze/) oder Breeze-TTS-2.cpp
+    (tts-breeze-cpp/ bzw. nativ, v1.18) - gleiche HTTP-Schnittstelle.
 
     Anders als XTTS kennt Breeze keine voice_id: Fuers Voice-Cloning gehen
     das Sample UND sein exaktes Transkript in jedem Request mit (Multipart).
@@ -108,7 +138,7 @@ class BreezeClient:
         """Text -> async Iterator von (Samplerate, PCM16-Chunk). language
         wird ignoriert: Breeze erkennt die Sprache am Text."""
         data, files = self._form(text, voice_id)
-        async with httpx.AsyncClient(base_url=settings.breeze_base_url.rstrip("/"), timeout=300.0) as client:
+        async with httpx.AsyncClient(base_url=breeze_base_url(), timeout=300.0) as client:
             for attempt in range(self.busy_retries + 1):
                 async with client.stream("POST", "/v1/audio/speech", data=data, files=files) as response:
                     if response.status_code == 409 and attempt < self.busy_retries:

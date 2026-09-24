@@ -26,6 +26,7 @@ import httpx
 
 from .. import repos
 from ..config import settings
+from .tts_client import breeze_base_url
 
 logger = logging.getLogger(__name__)
 
@@ -53,15 +54,15 @@ SERVICES: dict[str, dict] = {
     },
     "tts-breeze": {
         "label": "Sprachausgabe-Test (Breeze TTS 2)",
-        "base_url": lambda: settings.breeze_base_url,
+        "base_url": breeze_base_url,
         "controllable": False,
-        # Der offizielle Breeze-Server laedt sein Modell beim Start auf eine
-        # feste Karte und kann nicht zur Laufzeit wechseln.
+        # Beide Breeze-Server laden ihr Modell beim Start auf eine feste Karte
+        # und koennen nicht zur Laufzeit wechseln.
         "control_hint": "per Compose (BREEZE_GPU)",
         "note": (
-            "Nur aktiv, solange docker-compose.breeze.yml laeuft: laedt das Modell "
-            "schon beim Start und belegt dann ~7,7 GB VRAM. Karte ueber BREEZE_GPU "
-            "in Coolify waehlen, nicht hier."
+            "Nur aktiv, solange ein Breeze-Server laeuft; laedt das Modell beim Start: "
+            "docker-compose.breeze.yml (PyTorch) ~7,7 GB VRAM, docker-compose.breeze-cpp.yml "
+            "(Q8_0) ~4 GB. Karte ueber BREEZE_GPU in Coolify waehlen, nicht hier."
         ),
     },
     "tts-piper": {

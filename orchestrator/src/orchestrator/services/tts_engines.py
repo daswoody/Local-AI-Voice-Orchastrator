@@ -23,7 +23,7 @@ import httpx
 
 from .. import repos
 from ..config import settings
-from .tts_client import breeze_client, piper_client, xtts_client
+from .tts_client import breeze_base_url, breeze_client, piper_client, xtts_client
 
 logger = logging.getLogger(__name__)
 
@@ -68,16 +68,19 @@ ENGINES: dict[str, dict] = {
         "per_voice": True,
         "needs_sample": False,
         "container": "heimai-tts-breeze",
-        "deploy_hint": "Breeze laeuft als eigener Deploy: docker-compose.breeze.yml in "
-                       "Coolify anlegen bzw. starten (der erste Start baut das Image und "
-                       "laedt mehrere GB Gewichte - das dauert).",
-        "base_url": lambda: settings.breeze_base_url,
+        "deploy_hint": "Breeze laeuft separat: als Container (docker-compose.breeze.yml "
+                       "oder docker-compose.breeze-cpp.yml, in Coolify anlegen bzw. starten - "
+                       "der erste Start dauert) oder als breeze-server auf einem Rechner im "
+                       "Netz. Laeuft er, die Adresse unter 'Breeze-Server' pruefen.",
+        "logs_hint": "Logs pruefen: 'docker logs heimai-tts-breeze' bzw. "
+                     "'heimai-tts-breeze-cpp', nativ die Konsole von breeze-server",
+        "base_url": breeze_base_url,
         # Offizieller Server: /health antwortet 503, solange das Modell laedt.
         "health_path": "/health",
         "description": "Open-Weight-Modell: klont die Stimme aus Sample + exaktem "
                        "Transkript, sonst eingebaute Stimme. Offiziell nur "
-                       "Englisch/Chinesisch. ~7,7 GB VRAM, eigener Container "
-                       "(docker-compose.breeze.yml).",
+                       "Englisch/Chinesisch. Eigener Server: PyTorch (~7,7 GB VRAM) "
+                       "oder Breeze-TTS-2.cpp (~4 GB), Adresse unter 'Breeze-Server'.",
     },
 }
 
@@ -191,11 +194,12 @@ def _unreachable_detail(exc: Exception, spec: dict) -> str:
     Programmfehler aus, heisst aber schlicht: der Container laeuft nicht."""
     host = urlsplit(spec["base_url"]()).hostname or "?"
     if _caused_by(exc, socket.gaierror):
-        return (f"Container nicht gefunden - den Namen '{host}' gibt es im Netzwerk "
-                f"nicht. {spec['deploy_hint']}")
+        return (f"Server nicht gefunden - den Namen '{host}' kennt das Netzwerk nicht. "
+                f"{spec['deploy_hint']}")
     if _caused_by(exc, ConnectionRefusedError):
+        logs = spec.get("logs_hint") or f"'docker logs {spec['container']}'"
         return (f"'{host}' ist da, nimmt aber keine Verbindungen an - der Dienst startet "
-                f"noch oder ist abgestuerzt ('docker logs {spec['container']}').")
+                f"noch oder ist abgestuerzt ({logs}).")
     if isinstance(exc, httpx.TimeoutException):
         return f"'{host}' antwortet nicht innerhalb von 3 s."
     return str(exc)[:200] or type(exc).__name__

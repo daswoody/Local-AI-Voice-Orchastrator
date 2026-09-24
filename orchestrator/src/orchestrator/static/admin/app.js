@@ -284,9 +284,18 @@ views.tts = async () => {
     </section>
     <section class="block">
       <h2>Breeze TTS 2</h2>
-      <p class="hint">Breeze klont eine Stimme nur mit Sample <strong>und</strong> exaktem Transkript (unter "Stimmen" pflegen); ohne Transkript spricht es mit seiner eingebauten Stimme. Offiziell unterstuetzt das Open-Weight-Modell nur Englisch und Chinesisch - deutsche Antworten koennen mit Akzent oder falsch ausgesprochen klingen. Der Container laeuft getrennt vom Voice-Stack (<code>docker-compose.breeze.yml</code>) und belegt ~7,7 GB VRAM, solange er laeuft.</p>
+      <p class="hint">Breeze klont eine Stimme nur mit Sample <strong>und</strong> exaktem Transkript (unter "Stimmen" pflegen); ohne Transkript spricht es mit seiner eingebauten Stimme. Offiziell unterstuetzt das Open-Weight-Modell nur Englisch und Chinesisch - deutsche Antworten koennen mit Akzent oder falsch ausgesprochen klingen. Der Server laeuft getrennt vom Voice-Stack, in einer von zwei Varianten mit derselben Schnittstelle: <strong>offizieller PyTorch-Server</strong> (<code>docker-compose.breeze.yml</code>, ~7,7 GB VRAM) oder <strong>Breeze-TTS-2.cpp</strong> (<code>docker-compose.breeze-cpp.yml</code> oder nativ, Q8_0 ~4 GB VRAM).</p>
       <form class="grid" data-submit="saveTtsSettings">
-        <label class="full">Sprechanweisung (optional, "Voice Direction") - steuert Tonfall, Tempo und Emotion; die Beispiele von Breeze sind auf Englisch
+        <label class="full"><span>Breeze-Server - Container-Name, IP:Port oder Domain (leer = Standard aus der .env: ${esc(data.breeze_url_default)})</span>
+          <input name="breeze_url" list="breeze-url-suggestions" value="${esc(data.breeze_url)}" placeholder="${esc(data.breeze_url_default)}" autocomplete="off" spellcheck="false">
+          <datalist id="breeze-url-suggestions">
+            <option value="http://tts-breeze:7860" label="Container: offizieller PyTorch-Server (docker-compose.breeze.yml)"></option>
+            <option value="http://tts-breeze-cpp:7860" label="Container: Breeze-TTS-2.cpp (docker-compose.breeze-cpp.yml)"></option>
+            <option value="http://192.168.2.105:7860" label="breeze-server nativ auf einem Rechner im LAN (IP anpassen)"></option>
+          </datalist>
+        </label>
+        <p class="hint full">Genutzt wird gerade: <code>${esc(data.breeze_url_effective)}</code>. Nach dem Speichern zeigt die Tabelle oben, ob der Server unter dieser Adresse antwortet.</p>
+        <label class="full">Sprechanweisung (optional, "Voice Direction") - steuert Tonfall, Tempo und Emotion; die Beispiele von Breeze sind auf Englisch. Breeze-TTS-2.cpp nutzt ohne Angabe "Speak clearly and naturally."
           <textarea name="breeze_instruction" rows="2" placeholder="Speak in a warm, calm and friendly tone.">${esc(data.breeze_instruction)}</textarea>
         </label>
         <div><button type="submit">Speichern</button></div>
@@ -945,6 +954,7 @@ const formActions = {
   },
 
   saveTtsSettings: (form) => api.put("/v1/admin/tts/settings", {
+    breeze_url: form.breeze_url.value,
     breeze_instruction: form.breeze_instruction.value,
   }),
 

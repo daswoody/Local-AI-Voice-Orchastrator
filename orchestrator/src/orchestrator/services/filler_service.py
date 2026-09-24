@@ -273,12 +273,12 @@ async def _generate_with_engine(filler: dict, voice_ids: list[str], engine_id: s
             # gestorben (RAM-/VRAM-Knappheit) - wie bei XTTS sagen, wo man
             # nachsehen muss.
             logger.exception("%s-Stream fuer Stimme %s abgerissen", spec["name"], voice_id)
+            logs = spec.get("logs_hint") or f"Logs pruefen: 'docker logs {spec['container']}'"
             results.append({
                 "voice_id": voice_id, "ok": False,
                 "error": f"{spec['name']}-Service waehrend der Generierung abgestuerzt. "
-                         f"Auf der VM pruefen: 'docker logs {spec['container']}' "
-                         "(Fehlertext/Traceback) sowie nvidia-smi (VRAM). Alternativ "
-                         "diesen Filler auf die Engine 'Piper' umstellen.",
+                         f"{logs} (Fehlertext/Traceback), dazu nvidia-smi (VRAM). "
+                         "Alternativ diesen Filler auf die Engine 'Piper' umstellen.",
             })
         except Exception as exc:
             logger.exception("Filler-Generierung (%s) fuer Stimme %s fehlgeschlagen",

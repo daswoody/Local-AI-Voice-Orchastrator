@@ -1,0 +1,53 @@
+# Breeze TTS 2 als Breeze-TTS-2.cpp (v1.18) - EIGENER Coolify-Deploy, wie
+# docker-compose.breeze.yml, aber quantisiert: Q8_0 belegt ~4 GB VRAM statt
+# ~7,7 GB. Gleiche HTTP-Schnittstelle; im Admin-Panel unter Sprachausgabe ->
+# Breeze-Server die Adresse http://tts-breeze-cpp:7860 eintragen.
+#
+# Nur eine Breeze-Variante gleichzeitig laufen lassen (VRAM). Build-Context
+# relativ zum Repo-Root (Coolify baut mit --project-directory <repo-root>).
+# Lokal vom Repo-Root aus:
+#   docker compose -f orchestrator/docker-compose.breeze-cpp.yml --project-directory . up
+
+services:
+  tts-breeze-cpp:
+    build:
+      context: ./tts-breeze-cpp
+      dockerfile: Dockerfile
+      args:
+        # Compute-Capabilities der eigenen Karten ohne Punkt (nvidia-smi
+        # --query-gpu=compute_cap --format=csv) - weniger = schnellerer Build.
+        CUDA_ARCHS: "${BREEZE_CUDA_ARCHS:-61;75;86;89}"
+        BUILD_JOBS: "${BREEZE_BUILD_JOBS:-4}"
+    container_name: heimai-tts-breeze-cpp
+    restart: unless-stopped
+    environment:
+      # Karte waehlen - Index wie in nvidia-smi bzw. im GPU-Panel.
+      CUDA_VISIBLE_DEVICES: ${BREEZE_GPU:-0}
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      # Quantisierung: q8_0 (~4 GB, empfohlen) oder q4_k (~3 GB, etwas
+      # schlechter). Alternativ BREEZE_GGUF_FILE = exakter Dateiname im Repo
+      # oder absoluter Pfad zu einer eigenen GGUF im Volume.
+      BREEZE_GGUF_QUANT: ${BREEZE_GGUF_QUANT:-q8_0}
+      BREEZE_GGUF_FILE: ${BREEZE_GGUF_FILE:-}
+      # Nur noetig, falls Hugging Face eine Lizenz-Zustimmung verlangt.
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      # GGUF-Gewichte (+ gespeicherte Stimmen), Download beim ersten Start
+      - breeze-cpp-models:/models
+    networks:
+      - ai-lab
+    deploy:
+      resources:
+        reservations:
+          devices:
+            # Alle Karten sichtbar, CUDA_VISIBLE_DEVICES waehlt eine aus.
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+networks:
+  ai-lab:
+    external: true
+
+volumes:
+  breeze-cpp-models:

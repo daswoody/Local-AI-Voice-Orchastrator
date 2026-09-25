@@ -1,0 +1,33 @@
+[project]
+name = "heimai-tts-qwen3"
+version = "0.1.0"
+description = "Qwen3-TTS als Heim-AI-Sprachausgabe nach dem Engine-Vertrag v1 (v1.20)"
+requires-python = ">=3.11"
+dependencies = [
+    "tts-engine-kit",
+    "huggingface_hub>=0.34",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+engine = [
+    "qwen-tts==0.1.1",
+    # Dieselbe torch-Version wie tts-xtts (siehe dessen uv.lock) - laeuft
+    # nachweislich mit dem Treiber der VM. Das neueste Wheel kann einen
+    # neueren Treiber verlangen.
+    "torch==2.12.1",
+]
+dev = [
+    "pytest>=8.3",
+    "httpx>=0.27",
+]
+
+[tool.uv.sources]
+tts-engine-kit = { path = "../tts-engine-kit" }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tts_qwen3"]

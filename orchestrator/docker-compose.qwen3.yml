@@ -1,0 +1,52 @@
+# Qwen3-TTS (v1.20) - erste Engine nach dem Engine-Vertrag (tts-engine-kit),
+# als EIGENER Coolify-Deploy wie Breeze: Base Directory `/`, Docker Compose
+# Location `/orchestrator/docker-compose.qwen3.yml` (Coolify nimmt das Base
+# Directory als --project-directory, der Build-Context ist das Repo-Root).
+# Der Orchestrator kennt die Engine unter http://tts-qwen3:8000 (vorbelegt,
+# Admin-Panel -> Sprachausgabe); Laden/Entladen und Karte steuert das Panel.
+#
+# Lokal vom Repo-Root aus:
+#   docker compose -f orchestrator/docker-compose.qwen3.yml --project-directory . up
+
+services:
+  tts-qwen3:
+    build:
+      context: .
+      dockerfile: tts-qwen3/Dockerfile
+    container_name: heimai-tts-qwen3
+    restart: unless-stopped
+    environment:
+      # Karte beim Start; zur Laufzeit weist das Admin-Panel (GPUs) eine
+      # andere zu oder schaltet aus - wie bei XTTS sieht der Container alle
+      # Karten, das Modell laeuft in einem eigenen Prozess.
+      ENGINE_DEVICE: ${QWEN3_DEVICE:-cuda:0}
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      # Modell schon beim Start laden? Default nein: laedt beim Aktivieren im
+      # Panel (entlaedt dann andere Engines auf derselben Karte) bzw. beim
+      # ersten Probehoeren.
+      ENGINE_PRELOAD: ${QWEN3_PRELOAD:-false}
+      # 1.7B klingt besser (~5 GB VRAM), Qwen/Qwen3-TTS-12Hz-0.6B-Base braucht
+      # ~2,5 GB. Download beim ersten Start ins Volume.
+      QWEN3_MODEL: ${QWEN3_MODEL:-Qwen/Qwen3-TTS-12Hz-1.7B-Base}
+      # auto = bfloat16 ab Ampere, float16 auf aelteren Karten (2080 Ti);
+      # float32, falls das Audio kaputt klingt (doppeltes VRAM).
+      QWEN3_DTYPE: ${QWEN3_DTYPE:-auto}
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - qwen3-models:/models
+    networks:
+      - ai-lab
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+networks:
+  ai-lab:
+    external: true
+
+volumes:
+  qwen3-models:

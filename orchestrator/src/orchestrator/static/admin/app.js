@@ -238,6 +238,7 @@ views.tts = async () => {
     loading: '<span class="badge warn">laedt Modell…</span>',
     error: '<span class="badge warn">Fehler</span>',
     unreachable: '<span class="badge off">nicht erreichbar</span>',
+    off: '<span class="badge off">ausgeschaltet</span>',
   };
 
   const rows = data.engines.map((engine) => {
@@ -248,7 +249,9 @@ views.tts = async () => {
       <td>${statusBadge[engine.status.status] || esc(engine.status.status)}${detail}</td>
       <td>${active ? '<span class="badge ok">aktiv</span>' : '<span class="badge off">inaktiv</span>'}</td>
       <td class="actions">
-        ${active ? "" : `<button class="small" data-action="activateTts" data-id="${esc(engine.id)}">Aktivieren</button>`}
+        ${active ? "" : engine.status.status === "off"
+          ? '<small>erst unter GPUs einschalten</small>'
+          : `<button class="small" data-action="activateTts" data-id="${esc(engine.id)}">Aktivieren</button>`}
       </td>
     </tr>`;
   }).join("");
@@ -262,7 +265,7 @@ views.tts = async () => {
 
   return `
     <h1>Sprachausgabe</h1>
-    <p class="hint">Welche TTS-Engine die gesprochenen Antworten erzeugt - server-weit, wie das aktive LLM. Faellt eine andere Engine als XTTS aus, bevor Audio geflossen ist (Container gestoppt, Modell laedt noch), spricht automatisch XTTS. Filler behalten ihre eigene Engine (Filler &amp; Trigger) - fuer eine einheitliche Stimme dort dieselbe Engine waehlen und neu generieren.</p>
+    <p class="hint">Welche TTS-Engine die gesprochenen Antworten erzeugt - server-weit, wie das aktive LLM. Faellt eine andere Engine als XTTS aus, bevor Audio geflossen ist (Container gestoppt, Modell laedt noch), spricht automatisch XTTS &ndash; bzw. Piper, solange XTTS unter GPUs ausgeschaltet ist. Filler behalten ihre eigene Engine (Filler &amp; Trigger) - fuer eine einheitliche Stimme dort dieselbe Engine waehlen und neu generieren.</p>
     <section class="block">
       <table>
         <thead><tr><th>Engine</th><th>Dienst</th><th>Status</th><th></th></tr></thead>
@@ -301,7 +304,7 @@ views.tts = async () => {
         <div><button type="submit">Speichern</button></div>
       </form>
     </section>
-    <script type="application/json" id="tts-data">${JSON.stringify(data.engines)}</script>`;
+    <script type="application/json" id="tts-data">${JSON.stringify({ engines: data.engines, fallback: data.fallback_engine })}</script>`;
 };
 
 // ---- View: GPUs ------------------------------------------------------------------------
@@ -335,9 +338,14 @@ views.gpus = async () => {
       }))
     : [0, 1].map((index) => ({ device: `cuda:${index}`, label: `GPU ${index}` }));
 
-  const deviceOptions = (selected) =>
-    [{ device: "cpu", label: "CPU" }, ...choices].map((choice) =>
-      `<option value="${esc(choice.device)}" ${choice.device === selected ? "selected" : ""}>${esc(choice.label)}</option>`
+  // "Aus" (v1.19) nur fuer Dienste, die ihr Modell entladen koennen (XTTS).
+  const deviceOptions = (service) =>
+    [
+      ...(service.can_disable ? [{ device: "off", label: "Aus (Modell entladen)" }] : []),
+      { device: "cpu", label: "CPU" },
+      ...choices,
+    ].map((choice) =>
+      `<option value="${esc(choice.device)}" ${choice.device === service.assigned ? "selected" : ""}>${esc(choice.label)}</option>`
     ).join("");
 
   const rows = data.services.map((service) => {
@@ -346,13 +354,15 @@ views.gpus = async () => {
       const fixed = service.control_hint || (service.external ? "extern (Host)" : "CPU (fest)");
       control = `<span class="badge off">${esc(fixed)}</span>`;
     } else if (service.reachable) {
-      control = `<select data-action-change="assignDevice" data-service="${esc(service.name)}">${deviceOptions(service.assigned)}</select>`;
+      control = `<select data-action-change="assignDevice" data-service="${esc(service.name)}" data-label="${esc(service.label)}">${deviceOptions(service)}</select>`;
     } else {
       control = '<span class="badge warn">nicht erreichbar</span>';
     }
 
     let running = "&ndash;";
-    if (service.effective) {
+    if (service.assigned === "off") {
+      running = '<span class="badge off">aus &ndash; kein Modell geladen</span>';
+    } else if (service.effective) {
       const deviates = service.assigned && service.effective !== service.assigned;
       running = `<code>${esc(service.effective)}</code>`;
       if (deviates) {
@@ -376,7 +386,7 @@ views.gpus = async () => {
 
   return `
     <h1>GPUs &amp; Dienste</h1>
-    <p class="hint">Verteilt die Dienste auf die vorhandenen Karten (VRAM-Budget 4.2). Der Wechsel laedt das Modell auf der neuen Karte neu &ndash; das dauert einige Sekunden, ein Container-Neustart ist nicht noetig, und die Zuweisung wird nach einem Neustart automatisch wiederhergestellt. Reicht das VRAM nicht, weicht der Dienst auf die CPU aus und die Spalte "Laeuft auf" zeigt "weicht ab".</p>
+    <p class="hint">Verteilt die Dienste auf die vorhandenen Karten (VRAM-Budget 4.2). Der Wechsel laedt das Modell auf der neuen Karte neu &ndash; das dauert einige Sekunden, ein Container-Neustart ist nicht noetig, und die Zuweisung wird nach einem Neustart automatisch wiederhergestellt. Reicht das VRAM nicht, weicht der Dienst auf die CPU aus und die Spalte "Laeuft auf" zeigt "weicht ab". XTTS laesst sich auch ganz ausschalten ("Aus"), solange eine andere Engine die Hauptstimme spricht.</p>
     ${notice}
     <section class="block">
       <h2>Grafikkarten</h2>
@@ -1020,13 +1030,15 @@ const buttonActions = {
   /* Eine gerade nicht erreichbare Engine erst nach Rueckfrage aktivieren -
    * vorab waehlen bleibt moeglich, aber nicht aus Versehen. */
   async activateTts(data) {
-    const engines = JSON.parse(document.getElementById("tts-data").textContent);
+    const { engines, fallback } = JSON.parse(document.getElementById("tts-data").textContent);
     const engine = engines.find((e) => e.id === data.id);
+    const fallbackEngine = engines.find((e) => e.id === fallback);
     let confirmed = false;
     if (engine && engine.status.status !== "ok") {
-      const meanwhile = engine.id === "xtts"
+      // Rueckfallebene ist XTTS - oder Piper, solange XTTS ausgeschaltet ist.
+      const meanwhile = engine.id === fallback
         ? "Bis dahin liest die App die Antworten selbst vor."
-        : "Bis der Dienst laeuft, spricht weiter XTTS.";
+        : `Bis der Dienst laeuft, spricht ${fallbackEngine ? fallbackEngine.label : fallback}.`;
       if (!confirm(`${engine.label} ist gerade nicht erreichbar:\n\n${engine.status.detail}`
         + `\n\nTrotzdem aktivieren? ${meanwhile}`)) return;
       confirmed = true;
@@ -1036,6 +1048,11 @@ const buttonActions = {
   },
 
   async assignDevice(data, element) {
+    // Abbrechen rendert neu - die Auswahl springt dann zurueck.
+    if (element.value === "off" && !confirm(
+      `${data.label} ausschalten?\n\nDas Modell wird entladen und gibt sein VRAM frei. `
+      + "Faellt die aktive Sprachausgabe aus, springt dann Piper ein; vorhandene Filler "
+      + "bleiben abspielbar. Wieder einschalten: hier eine Karte waehlen.")) return;
     // Das Neuladen des Modells dauert - Zeile sichtbar "beschaeftigt"
     // stellen, sonst wirkt das Panel eingefroren.
     element.disabled = true;

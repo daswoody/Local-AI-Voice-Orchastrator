@@ -226,3 +226,73 @@ async def test_restore_ignores_unreachable_services(monkeypatch):
     monkeypatch.setattr(gpu_manager, "set_service_device", boom)
 
     await gpu_manager.restore_assignments()  # darf nicht werfen
+
+
+# ---- XTTS ausschalten (v1.19) ----------------------------------------------------
+
+
+def _recording_set(monkeypatch) -> list:
+    calls = []
+
+    async def fake_set(name, device, compute_type=None):
+        calls.append((name, device))
+        return {"assigned": device, "effective": None, "loaded": False}
+
+    monkeypatch.setattr(gpu_manager, "set_service_device", fake_set)
+    return calls
+
+
+def test_xtts_stays_on_while_it_speaks_the_main_answer(client, admin_headers, monkeypatch):
+    """Ohne aktive Alternative waere die Assistenz stumm - erst eine andere
+    Engine aktivieren, dann ausschalten."""
+    calls = _recording_set(monkeypatch)
+
+    response = client.put("/v1/admin/gpus/tts-xtts", headers=admin_headers, json={"device": "off"})
+
+    assert response.status_code == 409
+    assert "aktive Hauptstimme" in response.json()["detail"]
+    assert calls == []
+    assert not gpu_manager.is_off("tts-xtts")
+
+
+def test_xtts_can_be_switched_off_and_the_choice_is_remembered(client, admin_headers, monkeypatch):
+    from orchestrator.services import tts_engines
+
+    tts_engines.set_active_engine("breeze")
+    calls = _recording_set(monkeypatch)
+    _unreachable_services(monkeypatch)
+
+    response = client.put("/v1/admin/gpus/tts-xtts", headers=admin_headers, json={"device": "off"})
+
+    assert response.status_code == 200
+    assert calls == [("tts-xtts", "off")]
+    assert gpu_manager.is_off("tts-xtts")
+    services = {s["name"]: s for s in client.get("/v1/admin/gpus", headers=admin_headers).json()["services"]}
+    assert services["tts-xtts"]["can_disable"] is True
+    assert services["stt"]["can_disable"] is False
+
+
+def test_only_services_that_can_unload_accept_off(client, admin_headers, monkeypatch):
+    calls = _recording_set(monkeypatch)
+
+    response = client.put("/v1/admin/gpus/stt", headers=admin_headers, json={"device": "off"})
+
+    assert response.status_code == 400
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_restore_switches_xtts_off_again_after_a_restart(monkeypatch):
+    """Nach einem Neustart meldet XTTS seinen Default (noch nichts geladen) -
+    die Zuweisung "off" wird nachgezogen."""
+    repos.set_setting("gpu_device_tts-xtts", "off")
+    calls = _recording_set(monkeypatch)
+
+    async def fake_status(name):
+        return {"reachable": True, "assigned": "cuda:0", "effective": None, "loaded": False}
+
+    monkeypatch.setattr(gpu_manager, "service_status", fake_status)
+
+    await gpu_manager.restore_assignments()
+
+    assert ("tts-xtts", "off") in calls

@@ -336,6 +336,74 @@ def test_no_fallback_once_audio_is_flowing(client, monkeypatch):
     assert frames[-1]["type"] == "done"
 
 
+def _xtts_off():
+    repos.set_setting("gpu_device_tts-xtts", "off")
+
+
+def test_piper_steps_in_while_xtts_is_switched_off(client, monkeypatch):
+    """XTTS im Panel aus (v1.19) und Breeze faellt aus -> Piper spricht,
+    XTTS wird gar nicht erst gefragt."""
+    xtts_calls: list = []
+
+    async def stopped(text, voice_id=None, language=None):
+        raise httpx.ConnectError("Name or service not known")
+        yield  # pragma: no cover
+
+    tts_engines.set_active_engine("breeze")
+    _xtts_off()
+    monkeypatch.setattr(breeze_client, "stream", stopped)
+    monkeypatch.setattr(xtts_client, "stream", _fake_engine(b"\x0a\x0a", xtts_calls))
+    monkeypatch.setattr(piper_client, "stream", _fake_engine(b"\x0c\x0c"))
+
+    frames = _voice_turn(client, monkeypatch)
+
+    assert _spoken(frames) == b"\x0c\x0c" * 1200
+    assert xtts_calls == []
+    assert tts_engines.fallback_engine() == "piper"
+
+
+def test_switched_off_xtts_is_not_activatable_and_shows_as_off(client, admin_headers):
+    tts_engines.set_active_engine("breeze")
+    _xtts_off()
+
+    response = client.post("/v1/admin/tts/activate", json={"engine": "xtts"}, headers=admin_headers)
+
+    assert response.status_code == 409
+    assert "ausgeschaltet" in response.json()["detail"]
+    assert tts_engines.active_engine() == "breeze"
+
+
+async def test_switched_off_xtts_reports_off_without_asking_the_service():
+    _xtts_off()
+
+    assert (await tts_engines.engine_status("xtts"))["status"] == "off"
+
+
+async def test_preview_and_fillers_leave_a_switched_off_xtts_alone(client, admin_headers, monkeypatch):
+    tts_engines.set_active_engine("breeze")
+    _xtts_off()
+    calls: list = []
+    monkeypatch.setattr(xtts_client, "stream", _fake_engine(b"\x03\x04", calls))
+
+    async def no_synthesis(*args, **kwargs):
+        calls.append(args)
+        return b"", 24000
+
+    monkeypatch.setattr(xtts_client, "synthesize", no_synthesis)
+
+    preview = client.post("/v1/admin/tts/preview", headers=admin_headers,
+                          json={"engine": "xtts", "voice_id": "default-de-male", "text": "Hallo"})
+    trigger = repos.create_trigger("T-xtts-off", "thinking", None)
+    filler = repos.create_filler("Titel", "Moment bitte.", trigger["id"], True,
+                                 delay_ms=0, engine="xtts")
+    results = await filler_service.generate_audio(filler["id"])
+
+    assert preview.status_code == 409
+    assert "ausgeschaltet" in preview.json()["detail"]
+    assert results and all(not r["ok"] and "ausgeschaltet" in r["error"] for r in results)
+    assert calls == []
+
+
 def test_piper_can_speak_the_main_answer(client, monkeypatch):
     """Piper liefert 22,05 kHz am Stueck - fuer den Stream auf 24 kHz
     gebracht und in 1-s-Chunks geteilt."""

@@ -94,3 +94,26 @@ def test_busy_engine_is_503_on_both_endpoints(client, fake_engine):
         response = client.post(path, json=payload)
         assert response.status_code == 503
         assert "belegt" in response.json()["detail"]
+
+
+def test_disabled_engine_is_503_on_both_endpoints(client, fake_engine):
+    """Im Panel ausgeschaltet (v1.19): klares 503 mit Grund, kein Laden."""
+    from tts_xtts.engine import EngineDisabled
+
+    message = "XTTS ist im Admin-Panel ausgeschaltet (GPUs -> XTTS)"
+
+    def off_stream(text, voice_id, language=None):
+        raise EngineDisabled(message)
+        yield  # pragma: no cover - macht die Funktion zum Generator
+
+    def off_synthesize(*args, **kwargs):
+        raise EngineDisabled(message)
+
+    fake_engine.stream = off_stream
+    fake_engine.synthesize = off_synthesize
+    payload = {"text": "Hallo", "voice_id": "default-de-female"}
+
+    for path in ("/v1/synthesize", "/v1/synthesize/full"):
+        response = client.post(path, json=payload)
+        assert response.status_code == 503
+        assert "ausgeschaltet" in response.json()["detail"]

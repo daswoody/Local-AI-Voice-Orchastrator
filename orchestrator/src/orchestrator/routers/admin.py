@@ -447,6 +447,9 @@ class TtsSettingsPayload(BaseModel):
 async def tts_overview() -> dict:
     return {
         "active_engine": tts_engines.active_engine(),
+        # Wer einspringt, wenn die aktive Engine ausfaellt (XTTS, oder Piper,
+        # solange XTTS ausgeschaltet ist) - fuer die Rueckfrage im Panel.
+        "fallback_engine": tts_engines.fallback_engine(),
         "engines": await tts_engines.overview(),
         "breeze_instruction": repos.get_setting(BREEZE_INSTRUCTION_SETTING) or "",
         "breeze_url": repos.get_setting(BREEZE_URL_SETTING) or "",
@@ -459,16 +462,20 @@ async def tts_overview() -> dict:
 async def activate_tts_engine(payload: TtsActivatePayload) -> dict:
     if payload.engine not in tts_engines.engine_ids():
         raise HTTPException(status_code=404, detail=f"Unbekannte TTS-Engine '{payload.engine}'")
-    tts_engines.set_active_engine(payload.engine)
+    try:
+        tts_engines.set_active_engine(payload.engine)
+    except tts_engines.EngineOff as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     status = await tts_engines.engine_status(payload.engine)
     result: dict[str, Any] = {"active_engine": payload.engine, "status": status}
     if status["status"] != "ok":
         # Nicht blockieren (man darf eine Engine vorab waehlen), aber klar
         # sagen, was bis dahin passiert.
         name = tts_engines.get_engine(payload.engine)["name"]
+        fallback = tts_engines.fallback_engine()
         meanwhile = (
-            "Bis der Dienst laeuft, spricht XTTS die Antworten."
-            if payload.engine != tts_engines.DEFAULT_ENGINE
+            f"Bis der Dienst laeuft, spricht {tts_engines.get_engine(fallback)['name']} die Antworten."
+            if payload.engine != fallback
             else "Bis dahin liest die App die Antworten selbst vor (TTS-Fallback)."
         )
         result["warning"] = (
@@ -487,6 +494,8 @@ async def preview_tts(payload: TtsPreviewPayload) -> Response:
     name = tts_engines.get_engine(payload.engine)["name"]
     try:
         result = await tts_engines.synthesize(payload.engine, text, payload.voice_id)
+    except tts_engines.EngineOff as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     except tts_engines.STREAM_ABORTED:
         logger.exception("Probehoeren mit %s: Stream abgerissen", payload.engine)
         raise HTTPException(status_code=502, detail=tts_engines.stream_abort_detail(payload.engine))
@@ -625,8 +634,8 @@ def delete_agent(slug: str) -> None:
 
 
 class DeviceAssignPayload(BaseModel):
-    # "cpu", "cuda:0", "cuda:1", ...
-    device: str = Field(pattern=r"^(cpu|cuda(:\d+)?)$")
+    # "cpu", "cuda:0", "cuda:1", ... oder "off" (v1.19: Modell entladen)
+    device: str = Field(pattern=r"^(off|cpu|cuda(:\d+)?)$")
 
 
 @router.get("/gpus")
@@ -651,6 +660,13 @@ async def assign_device(service: str, payload: DeviceAssignPayload) -> dict:
             status_code=400,
             detail=f"{spec['label']} ist nicht umschaltbar: {spec.get('note', '')}",
         )
+    if payload.device == gpu_manager.OFF:
+        if not spec.get("can_disable"):
+            raise HTTPException(status_code=400,
+                                detail=f"{spec['label']} laesst sich nicht ausschalten.")
+        blocker = tts_engines.disable_blocker(service)
+        if blocker:
+            raise HTTPException(status_code=409, detail=blocker)
     try:
         return await gpu_manager.apply_device(service, payload.device)
     except Exception as exc:

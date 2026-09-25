@@ -93,6 +93,30 @@ def test_full_card_falls_back_to_cpu_and_reports_deviation(engine, monkeypatch):
     assert status["effective"] == "cpu"
 
 
+def test_off_unloads_the_model_and_blocks_synthesis(engine, monkeypatch):
+    """Aus (v1.19): Modell und Latents weg, keine Synthese mehr - bis wieder
+    eine Karte zugewiesen wird."""
+    from tts_xtts.engine import EngineDisabled
+
+    loaded = _patch_loader(engine, monkeypatch)
+    engine.load()
+    engine._latents_cache["papa"] = (123, ("latent", "embedding"))
+
+    status = engine.set_device("off")
+
+    assert status == {"assigned": "off", "effective": None, "loaded": False,
+                      "model": status["model"]}
+    assert engine._latents_cache == {}
+    with pytest.raises(EngineDisabled, match="ausgeschaltet"):
+        engine.load()
+    with pytest.raises(EngineDisabled):
+        engine.synthesize("Hallo", "papa")
+    assert loaded == ["cuda:0"]
+
+    assert engine.set_device("cuda:1")["effective"] == "cuda:1"
+    assert loaded == ["cuda:0", "cuda:1"]
+
+
 def test_device_endpoints(monkeypatch):
     from tts_xtts import engine as engine_module
     from tts_xtts.main import app
@@ -113,4 +137,5 @@ def test_device_endpoints(monkeypatch):
 
     assert client.get("/v1/device").json()["assigned"] == "cuda:0"
     assert client.post("/v1/device", json={"device": "cuda:1"}).json()["effective"] == "cuda:1"
+    assert client.post("/v1/device", json={"device": "off"}).json()["assigned"] == "off"
     assert client.post("/v1/device", json={"device": "quatsch"}).status_code == 422

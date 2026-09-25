@@ -14,9 +14,17 @@ SAMPLE_RATE = 24000  # XTTS-v2 gibt fest 24 kHz aus (passt zum Protokoll, 4.13)
 
 _DONE = object()  # Ende-Markierung in der Chunk-Queue von stream()
 
+# Device-Wert fuer "ausgeschaltet" (v1.19): kein Modell, kein VRAM.
+OFF = "off"
+
 
 class EngineBusy(RuntimeError):
     """Eine andere Synthese belegt das Modell laenger als erlaubt."""
+
+
+class EngineDisabled(RuntimeError):
+    """Im Admin-Panel ausgeschaltet (GPUs -> Aus): Das Modell bleibt
+    entladen, bis wieder eine Karte (oder die CPU) zugewiesen wird."""
 
 
 class XttsEngine:
@@ -27,7 +35,8 @@ class XttsEngine:
     (~1-2s Latent-Berechnung) nur einmal pro Stimme anfaellt.
 
     Umschaltbares Device (v1.14): Das Admin-Panel weist zur Laufzeit eine
-    Karte zu ("cuda:0", "cuda:1", "cpu"). `assigned` ist die Zuweisung,
+    Karte zu ("cuda:0", "cuda:1", "cpu") oder schaltet XTTS aus ("off",
+    v1.19: Modell entladen, Synthesen bekommen 503). `assigned` ist die Zuweisung,
     `effective` das tatsaechlich genutzte Device - weichen sie ab, hat der
     Fallback gegriffen (Karte voll). ACHTUNG: Die gecachten Latents sind
     Tensoren auf der alten Karte und muessen beim Wechsel mit weg.
@@ -67,6 +76,11 @@ class XttsEngine:
 
     def load(self) -> None:
         with self._lock:
+            if self._assigned == OFF:
+                raise EngineDisabled(
+                    "XTTS ist im Admin-Panel ausgeschaltet (GPUs -> XTTS) - "
+                    "erst wieder eine Karte zuweisen"
+                )
             self._load_locked()
 
     def _load_locked(self) -> None:
@@ -96,7 +110,9 @@ class XttsEngine:
         self._effective = target
 
     def set_device(self, device: str) -> dict:
-        """Weist zur Laufzeit ein Device zu und laedt das Modell dort neu.
+        """Weist zur Laufzeit ein Device zu und laedt das Modell dort neu -
+        bei "off" bleibt es entladen (VRAM frei bis auf den CUDA-Kontext des
+        Prozesses, den erst ein Container-Neustart freigibt).
 
         Wartet auf eine laufende Synthese: Modell und Latents mitten in
         einer Generierung auszutauschen, waere derselbe Fehler in Gruen."""
@@ -108,7 +124,8 @@ class XttsEngine:
             # knallt die naechste Synthese mit einem Device-Mismatch.
             self._latents_cache.clear()
             self._free_memory()
-            self._load_locked()
+            if device != OFF:
+                self._load_locked()
             return self._status_locked()
 
     @staticmethod

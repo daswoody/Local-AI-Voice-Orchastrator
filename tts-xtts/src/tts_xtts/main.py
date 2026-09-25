@@ -10,14 +10,14 @@ from pydantic import BaseModel, Field
 
 from . import engine as engine_module
 from .config import settings
-from .engine import SAMPLE_RATE, EngineBusy
+from .engine import OFF, SAMPLE_RATE, EngineBusy, EngineDisabled
 
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if settings.preload:
+    if settings.preload and settings.device != OFF:
         await run_in_threadpool(engine_module.engine.load)
     yield
 
@@ -51,7 +51,8 @@ def health() -> dict[str, str]:
 
 
 class DevicePayload(BaseModel):
-    device: str = Field(pattern=r"^(cpu|cuda(:\d+)?)$")
+    # "off" (v1.19): ausschalten - Modell entladen, VRAM/RAM frei.
+    device: str = Field(pattern=r"^(off|cpu|cuda(:\d+)?)$")
 
 
 @app.get("/v1/device")
@@ -62,7 +63,7 @@ def get_device() -> dict:
 @app.post("/v1/device")
 async def set_device(payload: DevicePayload) -> dict:
     """Laedt XTTS auf dem gewuenschten Device neu. Dauert einige Sekunden
-    (Modell + Latents), laeuft deshalb im Threadpool."""
+    (Modell + Latents), laeuft deshalb im Threadpool. "off" entlaedt nur."""
     try:
         return await run_in_threadpool(engine_module.engine.set_device, payload.device)
     except Exception as exc:
@@ -89,7 +90,7 @@ def _validate(payload: SynthesizeRequest) -> None:
         )
 
 
-def _busy(exc: EngineBusy) -> HTTPException:
+def _busy(exc: EngineBusy | EngineDisabled) -> HTTPException:
     return HTTPException(status_code=503, detail=str(exc))
 
 
@@ -111,7 +112,7 @@ async def synthesize(payload: SynthesizeRequest) -> StreamingResponse:
     # Hier wartet der Request auch, falls gerade eine andere Synthese laeuft.
     try:
         first_chunk = await run_in_threadpool(next, stream, None)
-    except EngineBusy as exc:
+    except (EngineBusy, EngineDisabled) as exc:
         raise _busy(exc)
     except Exception as exc:
         logger.exception("XTTS-Synthese fuer voice_id=%s fehlgeschlagen", payload.voice_id)
@@ -138,7 +139,7 @@ async def synthesize_full(payload: FullSynthesizeRequest) -> Response:
             engine_module.engine.synthesize,
             payload.text, payload.voice_id, payload.language, payload.temperature,
         )
-    except EngineBusy as exc:
+    except (EngineBusy, EngineDisabled) as exc:
         raise _busy(exc)
     except Exception as exc:
         logger.exception("XTTS-Synthese (full) fuer voice_id=%s fehlgeschlagen", payload.voice_id)

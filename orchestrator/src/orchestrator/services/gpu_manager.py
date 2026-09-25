@@ -31,6 +31,10 @@ from .tts_client import breeze_base_url
 logger = logging.getLogger(__name__)
 
 _SETTING_PREFIX = "gpu_device_"
+# Zuweisung "ausgeschaltet" (v1.19): Der Dienst entlaedt sein Modell und gibt
+# VRAM/RAM frei. Der Container laeuft weiter - ihn zu stoppen, hiesse wieder
+# Docker-Socket (siehe oben).
+OFF = "off"
 
 # Ab Turing (Compute Capability 7.0) rechnen die Tensor Cores float16
 # schnell; Pascal und aelter (z. B. GTX 1080) emulieren es und sind damit
@@ -50,7 +54,13 @@ SERVICES: dict[str, dict] = {
         "label": "Sprachausgabe (XTTS-v2)",
         "base_url": lambda: settings.xtts_base_url,
         "controllable": True,
-        "note": "~3 GB VRAM. Auf CPU technisch moeglich, aber sehr langsam (Sekunden pro Satz).",
+        "can_disable": True,
+        "note": (
+            "~3 GB VRAM. Auf CPU technisch moeglich, aber sehr langsam (Sekunden pro Satz). "
+            "'Aus' entlaedt das Modell, z. B. fuer einen Breeze-Test auf derselben Karte; "
+            "den Rest (CUDA-Kontext, einige hundert MB) gibt erst "
+            "'docker restart heimai-tts-xtts' frei."
+        ),
     },
     "tts-breeze": {
         "label": "Sprachausgabe-Test (Breeze TTS 2)",
@@ -188,6 +198,13 @@ def store_assignment(name: str, device: str) -> None:
     repos.set_setting(_SETTING_PREFIX + name, device)
 
 
+def is_off(name: str) -> bool:
+    """Im Panel ausgeschaltet? Massgeblich ist die gespeicherte Zuweisung,
+    nicht der Live-Status: Nach einem Neustart meldet der Dienst kurz seinen
+    Default, bis restore_assignments ihn wieder ausschaltet."""
+    return assigned_device(name) == OFF
+
+
 async def service_status(name: str) -> dict:
     """Was meldet der Dienst selbst? assigned = ihm zugewiesen, effective =
     wo das Modell wirklich liegt (kann per CPU-Fallback abweichen)."""
@@ -239,6 +256,7 @@ async def overview() -> dict:
             "name": name,
             "label": spec["label"],
             "controllable": spec["controllable"],
+            "can_disable": spec.get("can_disable", False),
             "external": spec.get("external", False),
             "control_hint": spec.get("control_hint", ""),
             "note": spec.get("note", ""),

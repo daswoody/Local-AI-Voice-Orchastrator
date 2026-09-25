@@ -23,6 +23,7 @@ import httpx
 
 from .. import repos
 from ..config import settings
+from . import gpu_manager
 from .tts_client import breeze_base_url, breeze_client, piper_client, xtts_client
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,13 @@ logger = logging.getLogger(__name__)
 ACTIVE_ENGINE_SETTING = "tts_engine"
 # Bewaehrte Hauptstimme und Rueckfallebene, wenn eine andere Engine ausfaellt.
 DEFAULT_ENGINE = "xtts"
+# Rueckfallebene, solange XTTS im Panel ausgeschaltet ist (v1.19): Piper
+# laeuft auf der CPU und ist immer da.
+OFF_FALLBACK_ENGINE = "piper"
+
+
+class EngineOff(RuntimeError):
+    """Engine ist im Admin-Panel ausgeschaltet (GPUs -> Aus, v1.19)."""
 
 ENGINES: dict[str, dict] = {
     "xtts": {
@@ -41,6 +49,9 @@ ENGINES: dict[str, dict] = {
         "per_voice": True,
         "needs_sample": True,
         "container": "heimai-tts-xtts",
+        # Im GPU-Panel ausschaltbar (v1.19) - dann weder Hauptstimme noch
+        # Rueckfallebene.
+        "gpu_service": "tts-xtts",
         "deploy_hint": "Laeuft der Voice-Stack (docker-compose.yml) in Coolify?",
         "base_url": lambda: settings.xtts_base_url,
         "health_path": "/v1/health",
@@ -123,7 +134,36 @@ def active_engine() -> str:
 def set_active_engine(engine_id: str) -> None:
     if engine_id not in ENGINES:
         raise ValueError(f"Unbekannte TTS-Engine '{engine_id}'")
+    if not engine_enabled(engine_id):
+        raise EngineOff(off_detail(engine_id))
     repos.set_setting(ACTIVE_ENGINE_SETTING, engine_id)
+
+
+def engine_enabled(engine_id: str) -> bool:
+    service = ENGINES[engine_id].get("gpu_service")
+    return not (service and gpu_manager.is_off(service))
+
+
+def off_detail(engine_id: str) -> str:
+    name = ENGINES[engine_id]["name"]
+    return f"{name} ist unter GPUs ausgeschaltet - dort erst wieder eine Karte zuweisen."
+
+
+def fallback_engine() -> str:
+    """Wer einspringt, wenn die aktive Engine vor dem ersten Audio scheitert:
+    XTTS, solange es an ist, sonst Piper."""
+    return DEFAULT_ENGINE if engine_enabled(DEFAULT_ENGINE) else OFF_FALLBACK_ENGINE
+
+
+def disable_blocker(service: str) -> str | None:
+    """Grund, warum sich ein GPU-Dienst gerade nicht ausschalten laesst:
+    Er spricht die aktive Hauptstimme. Sonst None."""
+    engine_id = active_engine()
+    if ENGINES[engine_id].get("gpu_service") != service:
+        return None
+    name = ENGINES[engine_id]["name"]
+    return (f"{name} ist die aktive Hauptstimme - erst unter Sprachausgabe eine andere "
+            "Engine aktivieren, dann ausschalten.")
 
 
 async def stream_main(text: str, voice_id: str) -> AsyncIterator[tuple[int, bytes]]:
@@ -131,8 +171,14 @@ async def stream_main(text: str, voice_id: str) -> AsyncIterator[tuple[int, byte
     XTTS, BEVOR Audio geflossen ist (Container gestoppt, Modell laedt noch,
     belegt), spricht XTTS - eine ausgefallene Test-Engine soll die
     Assistenz nicht stumm machen. Nach dem ersten Chunk ist kein Wechsel
-    mehr moeglich (sonst doppeltes Audio): der Fehler geht an den Aufrufer."""
+    mehr moeglich (sonst doppeltes Audio): der Fehler geht an den Aufrufer.
+    Ist XTTS im Panel ausgeschaltet, springt Piper ein (v1.19)."""
     engine_id = active_engine()
+    fallback = fallback_engine()
+    if not engine_enabled(engine_id):
+        # Sollte das Panel verhindern (aktive Engine ist nicht ausschaltbar),
+        # z. B. aber TTS_ENGINE=xtts aus der .env ohne Admin-Wahl.
+        engine_id = fallback
     started = False
     try:
         async for item in ENGINES[engine_id]["client"].stream(text, voice_id):
@@ -140,12 +186,12 @@ async def stream_main(text: str, voice_id: str) -> AsyncIterator[tuple[int, byte
             yield item
         return
     except Exception:
-        if started or engine_id == DEFAULT_ENGINE:
+        if started or engine_id == fallback:
             raise
         logger.exception(
-            "TTS-Engine '%s' fehlgeschlagen - Hauptantwort kommt von '%s'", engine_id, DEFAULT_ENGINE
+            "TTS-Engine '%s' fehlgeschlagen - Hauptantwort kommt von '%s'", engine_id, fallback
         )
-    async for item in ENGINES[DEFAULT_ENGINE]["client"].stream(text, voice_id):
+    async for item in ENGINES[fallback]["client"].stream(text, voice_id):
         yield item
 
 
@@ -167,6 +213,8 @@ async def synthesize(engine_id: str, text: str, voice_id: str | None) -> Synthes
     """Komplette Synthese mit GENAU dieser Engine - ohne Fallback, denn
     Filler-Generierung und Probehoeren sollen die gewaehlte Engine hoeren
     lassen, nicht die Rueckfallebene."""
+    if not engine_enabled(engine_id):
+        raise EngineOff(off_detail(engine_id))
     started = time.perf_counter()
     first_chunk_ms = 0.0
     pcm = bytearray()
@@ -180,7 +228,9 @@ async def synthesize(engine_id: str, text: str, voice_id: str | None) -> Synthes
 
 
 async def engine_status(engine_id: str) -> dict:
-    """Erreichbarkeit fuers Panel: ok | loading | error | unreachable."""
+    """Erreichbarkeit fuers Panel: ok | loading | error | unreachable | off."""
+    if not engine_enabled(engine_id):
+        return {"status": "off", "detail": "Modell entladen"}
     spec = ENGINES[engine_id]
     url = spec["base_url"]().rstrip("/") + spec["health_path"]
     try:

@@ -113,13 +113,38 @@ async def piper_synthesize(payload: dict) -> Response:
 xtts = FastAPI()
 
 
+# Zuweisung wie im echten Dienst (v1.14): "cuda:N", "cpu" oder "off" (v1.19).
+_xtts_device = {"assigned": "cuda:0"}
+
+
 @xtts.get("/v1/health")
 async def xtts_health() -> dict:
     return {"status": "ok"}
 
 
+@xtts.get("/v1/device")
+async def xtts_device() -> dict:
+    assigned = _xtts_device["assigned"]
+    off = assigned == "off"
+    return {"assigned": assigned, "effective": None if off else assigned,
+            "loaded": not off, "model": "fake-xtts"}
+
+
+@xtts.post("/v1/device")
+async def xtts_set_device(payload: dict) -> dict:
+    _xtts_device["assigned"] = payload["device"]
+    return await xtts_device()
+
+
+def _xtts_off() -> None:
+    if _xtts_device["assigned"] == "off":
+        raise HTTPException(503, "XTTS ist im Admin-Panel ausgeschaltet (GPUs -> XTTS)")
+
+
 @xtts.post("/v1/synthesize")
 async def xtts_synthesize(payload: dict) -> StreamingResponse:
+    _xtts_off()
+
     async def generate():
         for freq in (440, 550, 660):
             yield _sine_pcm16(0.3, 24000, freq=freq)
@@ -134,6 +159,7 @@ async def xtts_synthesize_full(payload: dict) -> Response:
     # Komplettes WAV fuer die Filler-Vorgenerierung (v1.16). Laenge grob wie
     # gesprochen (~14 Zeichen/s), damit die Plausibilitaetspruefung passt;
     # die Pause macht den Busy-Zustand im Panel sichtbar.
+    _xtts_off()
     await asyncio.sleep(0.8)
     seconds = 0.2 + len(payload.get("text", "")) / 14
     buffer = io.BytesIO()

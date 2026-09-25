@@ -127,6 +127,11 @@ async def generate_audio(filler_id: int, voice_id: str | None = None) -> list[di
             raise ValueError("Filler existiert nicht")
         Path(settings.filler_cache_dir).mkdir(parents=True, exist_ok=True)
         engine_id = filler.get("engine") or "xtts"
+        if engine_id in tts_engines.ENGINES and not tts_engines.engine_enabled(engine_id):
+            # Vorhandenes Filler-Audio bleibt abspielbar, nur neu erzeugen geht nicht.
+            error = (tts_engines.off_detail(engine_id)
+                     + " Oder den Filler auf eine andere Engine umstellen.")
+            return [{"voice_id": v, "ok": False, "error": error} for v in voice_ids]
         if engine_id == "piper":
             return await _generate_with_piper(filler, voice_ids)
         if engine_id == "xtts":

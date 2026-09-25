@@ -4,8 +4,9 @@
 # Breeze-Server die Adresse http://tts-breeze-cpp:7860 eintragen.
 #
 # Nur eine Breeze-Variante gleichzeitig laufen lassen (VRAM). Build-Context
-# relativ zum Repo-Root (Coolify baut mit --project-directory <repo-root>).
-# Lokal vom Repo-Root aus:
+# relativ zum Repo-Root - in Coolify daher Base Directory `/` und Docker
+# Compose Location `/orchestrator/docker-compose.breeze-cpp.yml` (Coolify
+# nimmt das Base Directory als --project-directory). Lokal vom Repo-Root aus:
 #   docker compose -f orchestrator/docker-compose.breeze-cpp.yml --project-directory . up
 
 services:

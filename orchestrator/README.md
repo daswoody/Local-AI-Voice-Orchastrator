@@ -148,39 +148,55 @@ Referenz bei jedem Request neu.
 #### Variante A: offizieller PyTorch-Server (Docker)
 
 1. Coolify -> New Resource -> Docker Compose: dasselbe Repo und derselbe
-   Branch wie der Voice-Stack, Base Directory `/orchestrator`, Docker
-   Compose Location `/docker-compose.breeze.yml`.
+   Branch wie der Voice-Stack, **Base Directory `/`** und Docker Compose
+   Location `/orchestrator/docker-compose.breeze.yml`. Nicht `/orchestrator`
+   als Base Directory: Coolify nimmt es als Projektordner und sucht den
+   Build-Context `tts-breeze/` dann unter `orchestrator/` (Deploy bricht ab
+   mit `unable to prepare context: path ".../orchestrator/tts-breeze" not
+   found`).
 2. Environment Variables: `BREEZE_GPU` = Index der Karte (wie im GPU-Panel,
    Default `0`); `HF_TOKEN` nur, falls Hugging Face eine Lizenz-Zustimmung
    verlangt (auf der Modellseite zustimmen, Lese-Token anlegen).
-3. Deploy. Der erste Start laedt die Gewichte (~6,5 GB) ins Volume
+3. Advanced -> Build arguments -> "Managed manually in Dockerfile". Sonst
+   schreibt Coolify jede Variable als `ARG` ins Dockerfile: Eine geaenderte
+   Laufzeit-Einstellung wie `BREEZE_GPU` loest dann einen kompletten Neubau
+   aus, und `HF_TOKEN` landet in der Build-History des Images.
+4. Deploy. Der erste Start laedt die Gewichte (~6,5 GB) ins Volume
    `breeze-models`, danach das Modell auf die Karte - das Panel zeigt so
    lange "laedt Modell...". Verfolgen mit `docker logs -f heimai-tts-breeze`.
-4. Im Panel unter Sprachausgabe -> Breeze-Server nichts eintragen (Standard
+5. Im Panel unter Sprachausgabe -> Breeze-Server nichts eintragen (Standard
    `http://tts-breeze:7860`) - die Tabelle zeigt Breeze als "erreichbar".
 
 #### Variante B1: Breeze-TTS-2.cpp im Container
 
-1. Coolify -> New Resource -> Docker Compose: gleiches Repo/Branch, Base
-   Directory `/orchestrator`, Docker Compose Location
-   `/docker-compose.breeze-cpp.yml`.
+1. Coolify -> New Resource -> Docker Compose: gleiches Repo/Branch, **Base
+   Directory `/`** und Docker Compose Location
+   `/orchestrator/docker-compose.breeze-cpp.yml` (warum nicht
+   `/orchestrator`: siehe A).
 2. Environment Variables:
    - `BREEZE_GPU` = Index der Karte (Default `0`)
    - `BREEZE_CUDA_ARCHS` = Compute-Capability der Karte(n) ohne Punkt, z. B.
-     `75` fuer die 2080 Ti allein (baut am schnellsten). Nachsehen mit
+     `75` fuer die 2080 Ti allein (baut am schnellsten). Die Karte aus
+     `BREEZE_GPU` muss dabei sein (fehlt z. B. `61` fuer eine Pascal-Karte,
+     bricht der Server mit "no kernel image is available" ab). Nachsehen mit
      `nvidia-smi --query-gpu=index,name,compute_cap --format=csv`. Default
      `61;75;86;89` deckt Pascal bis Ada ab.
    - optional `BREEZE_GGUF_QUANT` = `q8_0` (Default, empfohlen) oder `q4_k`
      (~3 GB, etwas schlechter), `HF_TOKEN` wie bei A, `BREEZE_BUILD_JOBS`
      (Default 4 - kleiner, falls der VM beim Build der RAM ausgeht)
-3. Deploy. Der Build kompiliert ggml mit CUDA (hier gemessen: ~30 Minuten fuer
+   - `BREEZE_CUDA_ARCHS` und `BREEZE_BUILD_JOBS` brauchen "Available during
+     build", alle anderen nur zur Laufzeit.
+3. Advanced -> Build arguments -> "Managed manually in Dockerfile" (wie bei
+   A) - hier besonders wichtig, sonst kompiliert jede geaenderte Variable
+   CUDA neu.
+4. Deploy. Der Build kompiliert ggml mit CUDA (hier gemessen: ~30 Minuten fuer
    die vier Standard-Architekturen auf 4 Kernen, mit nur `75` deutlich
    schneller). Der erste Start laedt die GGUF-Datei ins Volume
    `breeze-cpp-models`.
    `docker logs -f heimai-tts-breeze-cpp` zeigt am Ende
    `backend: CUDA0, sample rate: 24000` und `listening on http://0.0.0.0:7860`.
    Steht dort `backend: CPU`, hat der Container keine GPU bekommen.
-4. Im Panel unter Sprachausgabe -> Breeze-Server `http://tts-breeze-cpp:7860`
+5. Im Panel unter Sprachausgabe -> Breeze-Server `http://tts-breeze-cpp:7860`
    eintragen und speichern.
 
 #### Variante B2: Breeze-TTS-2.cpp nativ (ohne Docker)
@@ -359,8 +375,10 @@ ihre Compose-Service-Namen erreichen, genau wie die anderen Container.
 
 1. **Coolify -> New Resource -> Docker Compose**, GitHub-Repo
    `daswoody/Local-AI-Voice-Orchastrator` verbinden, Branch waehlen.
-2. **Base Directory** auf `/orchestrator` setzen (dort liegen
-   `docker-compose.yml` und `Dockerfile`).
+2. **Base Directory** `/` lassen und **Docker Compose Location**
+   `/orchestrator/docker-compose.yml` eintragen. Coolify nimmt das Base
+   Directory als Projektordner (`--project-directory`), und alle
+   Build-Contexts in der Compose-Datei sind relativ zum Repo-Root.
 3. **Netzwerk-Name pruefen:** `docker network ls` auf der AI-VM ausfuehren
    und nachsehen, wie das Netzwerk heisst, in dem `litellm`/`weaviate` laufen.
    Falls es nicht `ai-lab` heisst, in `docker-compose.yml` anpassen.

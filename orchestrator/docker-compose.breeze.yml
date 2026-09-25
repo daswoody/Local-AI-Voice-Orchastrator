@@ -6,8 +6,11 @@
 # Rest anzufassen. Der Orchestrator erreicht ihn ueber das gemeinsame
 # ai-lab-Netzwerk unter http://tts-breeze:7860 (BREEZE_BASE_URL).
 #
-# Build-Context ist wie im Haupt-Stack relativ zum Repo-Root (Coolify baut mit
-# --project-directory <repo-root>). Lokal vom Repo-Root aus:
+# Build-Context ist wie im Haupt-Stack relativ zum Repo-Root. Coolify nimmt
+# das Base Directory als --project-directory, deshalb: Base Directory `/`,
+# Docker Compose Location `/orchestrator/docker-compose.breeze.yml` (mit
+# `/orchestrator` sucht der Build `tts-breeze/` unter orchestrator/).
+# Lokal vom Repo-Root aus:
 #   docker compose -f orchestrator/docker-compose.breeze.yml --project-directory . up
 
 services:

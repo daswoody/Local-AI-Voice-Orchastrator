@@ -1,7 +1,8 @@
 # Voice-Stack: Orchestrator + STT + beide TTS-Engines als EIN Coolify-Deploy.
-# Alle build-contexts sind relativ zum Repo-Root, weil Coolify den Build mit
-# --project-directory <repo-root> ausfuehrt, auch wenn diese Datei in
-# orchestrator/ liegt. Lokales `docker compose up` daher vom Repo-Root aus:
+# Alle build-contexts sind relativ zum Repo-Root. Coolify nimmt das Base
+# Directory als --project-directory, deshalb in Coolify: Base Directory `/`,
+# Docker Compose Location `/orchestrator/docker-compose.yml`. Lokales
+# `docker compose up` entsprechend vom Repo-Root aus:
 #   docker compose -f orchestrator/docker-compose.yml --project-directory . up
 
 services:

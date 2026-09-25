@@ -28,8 +28,6 @@ import wave
 from dataclasses import dataclass
 from pathlib import Path
 
-import httpx
-
 from .. import repos
 from ..audio import speech_segments, trim_silence
 from ..config import settings
@@ -224,7 +222,7 @@ async def _generate_with_xtts(filler: dict, voice_ids: list[str]) -> list[dict]:
                 result["warning"] = (f"nach {attempts} Versuchen weiter {take.problem} - bitte "
                                      "probehoeren, ggf. nur diese Stimme neu generieren")
             results.append(result)
-        except httpx.RemoteProtocolError:
+        except tts_engines.STREAM_ABORTED:
             # Verbindung ohne Antwort weg = der XTTS-Container ist waehrend
             # der Generierung gestorben (haeufigste Ursachen: RAM-/VRAM-
             # Knappheit, OOM-Kill). Dem Admin sagen, wo er nachsehen muss,
@@ -268,17 +266,14 @@ async def _generate_with_engine(filler: dict, voice_ids: list[str], engine_id: s
                 result["warning"] = (f"{take.problem} - bitte probehoeren, ggf. nur diese "
                                      "Stimme neu generieren")
             results.append(result)
-        except httpx.RemoteProtocolError:
-            # Stream mitten in der Generierung abgerissen = Container
-            # gestorben (RAM-/VRAM-Knappheit) - wie bei XTTS sagen, wo man
-            # nachsehen muss.
+        except tts_engines.STREAM_ABORTED:
+            # Stream mitten in der Generierung abgerissen = Server gestorben
+            # (RAM-/VRAM-Knappheit) - wie bei XTTS sagen, wo man nachsehen muss.
             logger.exception("%s-Stream fuer Stimme %s abgerissen", spec["name"], voice_id)
-            logs = spec.get("logs_hint") or f"Logs pruefen: 'docker logs {spec['container']}'"
             results.append({
                 "voice_id": voice_id, "ok": False,
-                "error": f"{spec['name']}-Service waehrend der Generierung abgestuerzt. "
-                         f"{logs} (Fehlertext/Traceback), dazu nvidia-smi (VRAM). "
-                         "Alternativ diesen Filler auf die Engine 'Piper' umstellen.",
+                "error": tts_engines.stream_abort_detail(engine_id)
+                         + " Alternativ diesen Filler auf die Engine 'Piper' umstellen.",
             })
         except Exception as exc:
             logger.exception("Filler-Generierung (%s) fuer Stimme %s fehlgeschlagen",

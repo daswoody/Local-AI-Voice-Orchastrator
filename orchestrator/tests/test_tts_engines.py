@@ -4,6 +4,7 @@ import base64
 import io
 import math
 import socket
+import threading
 import wave
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -424,6 +425,100 @@ async def test_breeze_waits_while_the_server_is_busy(monkeypatch):
     chunks = [c async for c in breeze_client.stream("Hallo.", "default-de-female")]
 
     assert chunks == [(24000, b"\x01\x02")]
+
+
+def _multipart_file(request: httpx.Request, field: str) -> bytes:
+    boundary = request.headers["content-type"].split("boundary=")[1].encode()
+    for part in request.content.split(b"--" + boundary):
+        head, _, body = part.partition(b"\r\n\r\n")
+        if f'name="{field}"'.encode() in head:
+            return body.removesuffix(b"\r\n")
+    raise AssertionError(f"kein Feld {field} im Request")
+
+
+async def test_breeze_gets_the_sample_as_mono_pcm16_24k(monkeypatch):
+    """Breeze-TTS-2.cpp liest nur 16/32-Bit-WAVs - ein 24-Bit-Sample kaeme
+    dort als Stille an. Der Client schickt deshalb immer mono PCM16, 24 kHz."""
+    path = Path(settings.voices_dir) / "default-de-female.wav"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frames = b"".join(
+        int(0.5 * 8388607 * math.sin(2 * math.pi * 220 * i / 48000)).to_bytes(3, "little", signed=True) * 2
+        for i in range(48000)
+    )  # 1 s Ton, 24 Bit, stereo, 48 kHz
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(2)
+        wav.setsampwidth(3)
+        wav.setframerate(48000)
+        wav.writeframes(frames)
+    repos.update_voice("default-de-female", {"sample_text": "Das ist mein Sample."})
+    requests: list[httpx.Request] = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, headers={"x-sample-rate": "24000"}, content=b"\x01\x02")
+
+    _mock_http(monkeypatch, handler)
+
+    [c async for c in breeze_client.stream("Hallo.", "default-de-female")]
+
+    with wave.open(io.BytesIO(_multipart_file(requests[0], "ref_audio")), "rb") as ref:
+        assert (ref.getnchannels(), ref.getsampwidth(), ref.getframerate()) == (1, 2, 24000)
+        pcm = ref.readframes(ref.getnframes())
+    assert abs(len(pcm) / 2 / 24000 - 1.0) < 0.01
+    samples = [int.from_bytes(pcm[i:i + 2], "little", signed=True) for i in range(0, len(pcm), 2)]
+    assert max(samples) > 12000  # Ton kommt an (0,5 Vollaussteuerung), keine Stille
+
+
+def _crashing_breeze_server() -> str:
+    """Echter Socket-Server wie Breeze-TTS-2.cpp bei einem CUDA-Absturz:
+    Header (chunked) sind raus, dann endet der Prozess mitten im Stream."""
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+
+    def serve():
+        conn, _ = server.accept()
+        with conn, server:
+            conn.recv(65536)
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: audio/pcm\r\n"
+                         b"X-Sample-Rate: 24000\r\nTransfer-Encoding: chunked\r\n\r\n")
+
+    threading.Thread(target=serve, daemon=True).start()
+    return f"http://127.0.0.1:{server.getsockname()[1]}"
+
+
+def test_preview_explains_an_aborted_breeze_stream(client, admin_headers):
+    repos.set_setting(BREEZE_URL_SETTING, _crashing_breeze_server())
+
+    response = client.post(
+        "/v1/admin/tts/preview",
+        json={"engine": "breeze", "voice_id": "default-de-female", "text": "Hallo"},
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert "mitten in der Synthese abgebrochen" in detail
+    assert "docker logs heimai-tts-breeze" in detail and "BREEZE_CUDA_ARCHS" in detail
+    assert "incomplete chunked read" not in detail
+
+
+async def test_breeze_filler_names_an_aborted_stream(client, monkeypatch):
+    trigger = repos.create_trigger("T-breeze-abort", "thinking", None)
+    filler = repos.create_filler("Titel", "Moment bitte.", trigger["id"], True,
+                                 delay_ms=0, engine="breeze")
+
+    async def aborted(text, voice_id=None, language=None):
+        raise httpx.ReadError("[Errno 104] Connection reset by peer")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(breeze_client, "stream", aborted)
+
+    results = await filler_service.generate_audio(filler["id"], "default-de-male")
+
+    assert results[0]["ok"] is False
+    assert "mitten in der Synthese abgebrochen" in results[0]["error"]
+    assert "Piper" in results[0]["error"]
 
 
 async def test_breeze_error_carries_server_detail(monkeypatch):

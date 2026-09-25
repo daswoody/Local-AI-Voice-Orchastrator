@@ -487,6 +487,9 @@ async def preview_tts(payload: TtsPreviewPayload) -> Response:
     name = tts_engines.get_engine(payload.engine)["name"]
     try:
         result = await tts_engines.synthesize(payload.engine, text, payload.voice_id)
+    except tts_engines.STREAM_ABORTED:
+        logger.exception("Probehoeren mit %s: Stream abgerissen", payload.engine)
+        raise HTTPException(status_code=502, detail=tts_engines.stream_abort_detail(payload.engine))
     except Exception as exc:
         logger.exception("Probehoeren mit %s fehlgeschlagen", payload.engine)
         raise HTTPException(status_code=502, detail=f"{name}: {str(exc)[:400] or type(exc).__name__}")

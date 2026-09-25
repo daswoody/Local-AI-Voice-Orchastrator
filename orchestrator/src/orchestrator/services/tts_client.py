@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -6,8 +7,13 @@ from urllib.parse import urlsplit
 import httpx
 
 from .. import repos
-from ..audio import chunk_pcm, resample_pcm16, wav_to_pcm16
+from ..audio import chunk_pcm, pcm16_to_wav, resample_pcm16, wav_to_pcm16
 from ..config import settings
+
+logger = logging.getLogger(__name__)
+
+# Breeze rechnet intern mit 24 kHz; die Referenz geht schon passend hin.
+BREEZE_SAMPLE_RATE = 24000
 
 # app_settings-Schluessel der optionalen Breeze-Sprechanweisung (Admin-Panel
 # "Sprachausgabe"), z. B. "Speak in a warm, calm tone."
@@ -161,7 +167,7 @@ class BreezeClient:
         voice = repos.get_voice(voice_id) or {}
         transcript = (voice.get("sample_text") or "").strip()
         if sample.exists() and transcript:
-            files = {"ref_audio": (sample.name, sample.read_bytes(), "audio/wav")}
+            files = {"ref_audio": (sample.name, _reference_wav(sample.read_bytes()), "audio/wav")}
             data["ref_text"] = transcript
         instruction = (repos.get_setting(BREEZE_INSTRUCTION_SETTING) or "").strip()
         if instruction:
@@ -170,6 +176,23 @@ class BreezeClient:
             # deutlich besser (Server-Default 1.0).
             data["cfg_scale"] = "4"
         return data, files
+
+
+def _reference_wav(raw: bytes) -> bytes:
+    """Voice-Sample -> mono PCM16 mit 24 kHz fuer Breeze.
+
+    Der Upload nimmt jedes PCM-WAV an (XTTS liest alles), der WAV-Leser von
+    Breeze-TTS-2.cpp kennt aber nur 16/32 Bit: Ein 24-Bit-Sample kaeme dort
+    als reine Stille an, geklont wuerde dann ein stummes Sample. Deshalb
+    hier einheitlich umwandeln - das spart dem Server nebenbei das
+    Resampling. Kann der Orchestrator das Sample selbst nicht lesen, geht
+    es unveraendert raus."""
+    try:
+        pcm, rate = wav_to_pcm16(raw)
+    except Exception as exc:
+        logger.warning("Voice-Sample fuer Breeze nicht umwandelbar, sende Original: %s", exc)
+        return raw
+    return pcm16_to_wav(resample_pcm16(pcm, rate, BREEZE_SAMPLE_RATE), BREEZE_SAMPLE_RATE)
 
 
 piper_client = PiperClient()

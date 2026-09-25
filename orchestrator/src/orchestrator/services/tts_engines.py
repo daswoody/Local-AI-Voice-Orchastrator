@@ -74,6 +74,13 @@ ENGINES: dict[str, dict] = {
                        "Netz. Laeuft er, die Adresse unter 'Breeze-Server' pruefen.",
         "logs_hint": "Logs pruefen: 'docker logs heimai-tts-breeze' bzw. "
                      "'heimai-tts-breeze-cpp', nativ die Konsole von breeze-server",
+        # Breeze-TTS-2.cpp schickt die Antwort-Header schon vor dem Kodieren
+        # der Referenz - ein CUDA-Fehler danach beendet den Prozess mitten
+        # im Stream.
+        "crash_hint": "Haeufigste Ursachen: VRAM der Karte voll (Log: 'out of memory' - "
+                      "andere Dienste von der Karte nehmen oder ein kuerzeres Sample) "
+                      "oder BREEZE_CUDA_ARCHS deckt die Karte nicht ab (Log: 'no kernel "
+                      "image is available').",
         "base_url": breeze_base_url,
         # Offizieller Server: /health antwortet 503, solange das Modell laedt.
         "health_path": "/health",
@@ -203,6 +210,24 @@ def _unreachable_detail(exc: Exception, spec: dict) -> str:
     if isinstance(exc, httpx.TimeoutException):
         return f"'{host}' antwortet nicht innerhalb von 3 s."
     return str(exc)[:200] or type(exc).__name__
+
+
+# Verbindung mitten in der Synthese weg ("incomplete chunked read",
+# "Server disconnected", Reset): Der Dienst ist dabei so gut wie immer
+# abgestuerzt - Fehler innerhalb der Synthese melden alle Server sauber.
+STREAM_ABORTED = (httpx.RemoteProtocolError, httpx.ReadError)
+
+
+def stream_abort_detail(engine_id: str) -> str:
+    """Was der Admin nach einem abgerissenen Stream tun kann - statt des
+    httpx-Wortlauts, der wie ein Fehler des Orchestrators aussieht."""
+    spec = ENGINES[engine_id]
+    logs = spec.get("logs_hint") or f"Logs pruefen: 'docker logs {spec['container']}'"
+    detail = (f"{spec['name']}-Server hat die Verbindung mitten in der Synthese abgebrochen - "
+              f"er ist dabei vermutlich abgestuerzt. {logs} (Fehlertext), dazu nvidia-smi (VRAM).")
+    if spec.get("crash_hint"):
+        detail += " " + spec["crash_hint"]
+    return detail
 
 
 def _caused_by(exc: BaseException, kind: type) -> bool:

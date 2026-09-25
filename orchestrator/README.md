@@ -17,7 +17,7 @@ aus `ADMIN_USERNAME`/`ADMIN_PASSWORD` in die leere DB geschrieben.
 |---|---|
 | Modelle | In LiteLLM registrierte Modelle anzeigen und das aktive Modell setzen (LM Studio laedt per JIT beim ersten Request, Entladen per Idle-TTL) |
 | Sprachausgabe | TTS-Engine der gesprochenen Antworten waehlen (XTTS / Piper / Breeze TTS 2) mit Live-Status; Probehoeren pro Engine + Stimme mit Latenzmessung (Vergleich auf der echten Hardware); optionale Breeze-Sprechanweisung |
-| GPUs | Karten mit Name, Compute-Capability und live belegtem VRAM; pro Dienst die Karte waehlen (CPU / GPU 0 / GPU 1). STT und XTTS laden ihr Modell dabei zur Laufzeit neu - kein Container-Neustart. Piper ist CPU-only, LM Studio laeuft auf dem Host und wird dort eingestellt (4.2) |
+| GPUs | Karten mit Name, Compute-Capability und live belegtem VRAM; pro Dienst die Karte waehlen (CPU / GPU 0 / GPU 1), XTTS auch ganz ausschalten ("Aus"). STT und XTTS laden ihr Modell dabei zur Laufzeit neu - kein Container-Neustart. Piper ist CPU-only, LM Studio laeuft auf dem Host und wird dort eingestellt (4.2) |
 | Charakter | Globaler System-Prompt; pro Nutzer ueberschreibbar (Nutzer-Formular) |
 | Nutzer | Anlegen/Bearbeiten/Loeschen, Tier 1-3, Standard-Stimme, Charakter-Override |
 | Stimmen | Anlegen + WAV-Sample-Upload (landet im XTTS-Voices-Volume, kein docker cp mehr); Transkript des Samples (fuer Breeze), beim Upload per Whisper vorgeschlagen und editierbar |
@@ -52,6 +52,17 @@ Karte waehlen oder in LM Studio Platz schaffen. Fehlt die VRAM-Anzeige
 ganz, hat der Orchestrator-Container keinen GPU-Zugriff: den
 `devices`-Block mit `capabilities: [utility]` in der Compose pruefen und
 neu deployen.
+
+**XTTS ausschalten (v1.19):** In der Zeile von XTTS "Aus (Modell entladen)"
+waehlen - z. B. um fuer einen Breeze-Test Platz auf der Karte zu schaffen.
+Der Dienst entlaedt sein Modell (~3 GB), der Container laeuft weiter (der
+Orchestrator hat bewusst keinen Docker-Zugriff, 4.2). Die Einstellung
+ueberlebt Neustarts. Einige hundert MB (CUDA-Kontext) gibt erst
+`docker restart heimai-tts-xtts` frei. Regeln: Ausschalten geht nur, wenn
+unter Sprachausgabe eine andere Engine aktiv ist; faellt die aus, springt
+Piper statt XTTS ein. Vorhandene XTTS-Filler bleiben abspielbar, neue
+lassen sich erst nach dem Einschalten erzeugen. Wieder an: eine Karte
+waehlen.
 
 Ablauf fuer die erste Stimme: Stimme anlegen -> Sample hochladen (6-30s
 sauberes Deutsch) -> unter "Filler & Trigger" bei jedem Filler "Audio
@@ -95,8 +106,8 @@ Wie es funktioniert:
   mit `stream()` plus ein Registry-Eintrag.
 - **Sicherheitsnetz:** Faellt eine andere Engine als XTTS aus, bevor Audio
   geflossen ist (Container gestoppt, Modell laedt noch, belegt), spricht XTTS
-  die Antwort. Nach dem ersten Chunk wird nicht mehr gewechselt (sonst
-  doppeltes Audio).
+  die Antwort - bzw. Piper, solange XTTS unter GPUs ausgeschaltet ist. Nach
+  dem ersten Chunk wird nicht mehr gewechselt (sonst doppeltes Audio).
 - **Probehoeren & vergleichen:** Testsatz + Stimme waehlen, "Anhoeren" -
   ohne Fallback, damit du wirklich die gewaehlte Engine hoerst. Das Panel
   zeigt die Zeit bis zur ersten Sekunde Audio, die Gesamtdauer und den
@@ -138,12 +149,16 @@ Referenz bei jedem Request neu.
 1. **Karte planen** (GPU-Panel): A braucht ~7,7 GB am Stueck - auf 11 GB +
    8 GB heisst das die grosse Karte freiraeumen (XTTS/STT auf die andere
    Karte, das LLM in LM Studio entladen bzw. umziehen). B passt mit ~4 GB
-   auch auf die 8-GB-Karte neben Whisper.
+   auch auf die 8-GB-Karte neben Whisper - aber nicht zusaetzlich neben
+   XTTS: Beim Klonen braucht Breeze kurzzeitig mehr als im Leerlauf (langes
+   Sample = mehr). Fuer den Test XTTS unter GPUs ausschalten ("Aus") oder
+   auf die andere Karte legen - vorher Breeze unter Sprachausgabe aktivieren.
 2. **Transkripte pflegen:** Breeze klont eine Stimme nur mit dem exakten
    Wortlaut des Samples. Unter **Stimmen** bei vorhandenen Samples
    "Transkribieren" klicken (Whisper schlaegt den Text vor) und unter
    "Bearbeiten" korrigieren. Ohne Transkript spricht Breeze mit seiner
-   eingebauten Stimme.
+   eingebauten Stimme. Das Sample geht als mono 16 Bit/24 kHz an Breeze -
+   auch 24-Bit-Aufnahmen, die Breeze-TTS-2.cpp sonst als Stille liest.
 
 #### Variante A: offizieller PyTorch-Server (Docker)
 
@@ -285,8 +300,23 @@ Server-Aufruf ist derselbe.
   `HF_TOKEN`, CUDA out of memory -> Karte freiraeumen).
 - *laedt Modell...* - einfach warten, danach steht dort "erreichbar".
 
+**Probehoeren meldet "Verbindung mitten in der Synthese abgebrochen"?**
+Breeze hat die Antwort begonnen und ist dann abgestuerzt (Container startet
+neu). Den Grund zeigen die letzten Log-Zeilen direkt danach:
+
+```bash
+docker logs --tail 40 heimai-tts-breeze-cpp      # bzw. heimai-tts-breeze
+nvidia-smi                                        # VRAM der Breeze-Karte
+```
+
+- `out of memory` / `cudaMalloc failed` / `failed to allocate` - die Karte
+  ist voll: XTTS unter GPUs ausschalten oder umziehen, das LLM entladen, ein
+  kuerzeres Sample (~10 s) nehmen oder `BREEZE_GPU` auf die freiere Karte.
+- `no kernel image is available` - `BREEZE_CUDA_ARCHS` enthaelt die Karte
+  aus `BREEZE_GPU` nicht (Compute-Capability pruefen, neu bauen).
+
 Aktivieren geht trotzdem (nach Rueckfrage) - bis Breeze antwortet, spricht
-XTTS.
+XTTS (bzw. Piper, solange XTTS ausgeschaltet ist).
 
 Zu Variante A: Das offizielle Dockerfile baut FlashAttention (laeuft erst ab
 Ampere) - `tts-breeze/` verzichtet darauf, der Server rechnet ohnehin

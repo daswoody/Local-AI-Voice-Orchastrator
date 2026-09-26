@@ -4,7 +4,9 @@ Siehe `../docs/heim-ai-projektspezifikation.md` fuer den Gesamtkontext.
 Die Nachbar-Services der Voice-Pipeline liegen im selben Repo:
 `../stt-service` (1.8, faster-whisper), `../tts-piper` (1.9, Filler),
 `../tts-xtts` (1.10, Hauptstimme), `../tts-breeze` (v1.17, Test-Engine
-Breeze TTS 2, eigener Deploy).
+Breeze TTS 2, eigener Deploy), `../tts-engine-kit` (v1.20, gemeinsamer
+Engine-Vertrag fuer weitere Sprachausgaben) und `../tts-qwen3` (v1.20,
+Qwen3-TTS, erste Engine nach diesem Vertrag, eigener Deploy).
 
 ## Admin-Panel (/admin)
 
@@ -16,12 +18,12 @@ aus `ADMIN_USERNAME`/`ADMIN_PASSWORD` in die leere DB geschrieben.
 | Bereich | Funktion |
 |---|---|
 | Modelle | In LiteLLM registrierte Modelle anzeigen und das aktive Modell setzen (LM Studio laedt per JIT beim ersten Request, Entladen per Idle-TTL) |
-| Sprachausgabe | TTS-Engine der gesprochenen Antworten waehlen (XTTS / Piper / Breeze TTS 2) mit Live-Status; Probehoeren pro Engine + Stimme mit Latenzmessung (Vergleich auf der echten Hardware); optionale Breeze-Sprechanweisung |
-| GPUs | Karten mit Name, Compute-Capability und live belegtem VRAM; pro Dienst die Karte waehlen (CPU / GPU 0 / GPU 1), XTTS auch ganz ausschalten ("Aus"). STT und XTTS laden ihr Modell dabei zur Laufzeit neu - kein Container-Neustart. Piper ist CPU-only, LM Studio laeuft auf dem Host und wird dort eingestellt (4.2) |
+| Sprachausgabe | TTS-Engine der gesprochenen Antworten waehlen (XTTS / Piper / Breeze TTS 2 / Qwen3-TTS und jede weitere Engine nach dem Engine-Vertrag) mit Live-Status; Aktivieren laedt die Engine und entlaedt andere Sprachausgaben auf derselben Karte; Probehoeren pro Engine + Stimme mit Latenzmessung (Vergleich auf der echten Hardware); Vertrags-Engines per ID + Adresse eintragen; optionale Breeze-Sprechanweisung |
+| GPUs | Karten mit Name, Compute-Capability und live belegtem VRAM; pro Dienst die Karte waehlen (CPU / GPU 0 / GPU 1), XTTS und Vertrags-Engines (z. B. Qwen3) auch ganz ausschalten ("Aus"). STT, XTTS und Vertrags-Engines laden ihr Modell dabei zur Laufzeit neu - kein Container-Neustart. Piper ist CPU-only, LM Studio laeuft auf dem Host und wird dort eingestellt (4.2) |
 | Charakter | Globaler System-Prompt; pro Nutzer ueberschreibbar (Nutzer-Formular) |
 | Nutzer | Anlegen/Bearbeiten/Loeschen, Tier 1-3, Standard-Stimme, Charakter-Override |
-| Stimmen | Anlegen + WAV-Sample-Upload (landet im XTTS-Voices-Volume, kein docker cp mehr); Transkript des Samples (fuer Breeze), beim Upload per Whisper vorgeschlagen und editierbar |
-| Filler & Trigger | Eigene Trigger (Nachdenken/Suche/Tool inkl. Tool-Muster wie `Calendar-*`), Filler mit Titel+Text, Engine pro Filler (XTTS = Nutzerstimme, Piper = feste Stimme/robust, Breeze = Test), "Alle generieren" rendert vor, pro Stimme Play-Button zum Probehoeren und &#8635; zum Neu-Generieren nur dieser Stimme, Filter-Chips nach Trigger |
+| Stimmen | Anlegen + WAV-Sample-Upload (landet im XTTS-Voices-Volume, kein docker cp mehr); Transkript des Samples (fuer Breeze und Qwen3), beim Upload per Whisper vorgeschlagen und editierbar |
+| Filler & Trigger | Eigene Trigger (Nachdenken/Suche/Tool inkl. Tool-Muster wie `Calendar-*`), Filler mit Titel+Text, Engine pro Filler (XTTS = Nutzerstimme, Piper = feste Stimme/robust, Breeze/Qwen3 = Test), "Alle generieren" rendert vor, pro Stimme Play-Button zum Probehoeren und &#8635; zum Neu-Generieren nur dieser Stimme, Filter-Chips nach Trigger |
 | Agenten | Spezial-Agenten (4.16) mit eigener ID, Beschreibung, System-Prompt und eigenem LiteLLM-Modell; erscheinen der Haupt-KI als Tool `agent-<id>` - z. B. Websuche/Coding an Cloud-Modelle delegieren. Reservierte ID `code-card`: schreibt automatisch die HTML-Layouts fuer Karten ohne passendes Template |
 | Karten | Layout-Templates (4.12) anlegen/bearbeiten/loeschen, Version zaehlt automatisch hoch; Format JSON (Layout-Baum) oder HTML (Fragment mit `{{data.*}}`-Platzhaltern, sandboxed gerendert) |
 
@@ -64,6 +66,14 @@ Piper statt XTTS ein. Vorhandene XTTS-Filler bleiben abspielbar, neue
 lassen sich erst nach dem Einschalten erzeugen. Wieder an: eine Karte
 waehlen.
 
+**Qwen3 und andere Vertrags-Engines (v1.20)** stehen hier als eigene Zeile
+("Sprachausgabe (Qwen3-TTS)", ...) mit denselben Optionen. "Aus" beendet
+dort den ganzen Modell-Prozess - das VRAM ist danach komplett frei, auch der
+CUDA-Kontext, ohne Container-Neustart. Meist musst du hier aber nur die
+Karte festlegen: Unter Sprachausgabe **Aktivieren** laedt die Engine auf
+diese Karte und entlaedt dafuer die anderen Sprachausgaben auf derselben
+Karte (siehe unten).
+
 Ablauf fuer die erste Stimme: Stimme anlegen -> Sample hochladen (6-30s
 sauberes Deutsch) -> unter "Filler & Trigger" bei jedem Filler "Audio
 generieren" klicken. Ab dann spielt der Orchestrator Filler in der
@@ -97,21 +107,50 @@ Die Wahl greift ab dem naechsten Sprach-Turn, ohne Neustart.
 | XTTS-v2 (Default) | klont die Nutzerstimme aus dem Sample, Deutsch | ~3 GB VRAM | bewaehrte Hauptstimme |
 | Piper | eine feste deutsche Stimme | CPU | robuster Notbetrieb, z. B. wenn die GPUs fuer einen LLM-Test gebraucht werden |
 | Breeze TTS 2 | klont aus Sample **+ exaktem Transkript**, sonst eingebaute Stimme | ~7,7 GB (PyTorch) bzw. ~4 GB (Breeze-TTS-2.cpp) | Test-Engine (eigener Server, s. u.) |
+| Qwen3-TTS (v1.20) | klont aus Sample, mit exaktem Transkript am aehnlichsten; 10 Sprachen inkl. Deutsch | ~5 GB (1.7B) bzw. ~2,5 GB (0.6B) | Test-Engine nach dem Engine-Vertrag (eigener Deploy, s. u.) |
 
 Wie es funktioniert:
 
 - **Gemeinsame Schnittstelle:** Jede Engine liefert `(Samplerate, PCM16-Chunk)`,
   deshalb kennen Antwort-Pipeline, Filler-Generierung und Probehoeren nur die
-  Engine-ID (`services/tts_engines.py`). Eine weitere Engine ist ein Client
-  mit `stream()` plus ein Registry-Eintrag.
+  Engine-ID (`services/tts_engines.py`).
+- **Engine-Vertrag (v1.20):** Neue Sprachausgaben brauchen keinen
+  Orchestrator-Code mehr. Ein Container, der den Vertrag aus
+  `../tts-engine-kit` spricht (Steckbrief `/v1/info`, Laden/Entladen ueber
+  `/v1/device`, Synthese `/v1/synthesize`), wird unter Sprachausgabe ->
+  *Engines nach dem Engine-Vertrag* nur mit ID und Adresse eingetragen - Name,
+  Sprachen und Faehigkeiten meldet er selbst. Danach steht er in der
+  Engine-Tabelle, beim Probehoeren, bei den Fillern und unter GPUs. Qwen3-TTS
+  ist dort als `qwen3` -> `http://tts-qwen3:8000` schon vorbelegt. Wie man
+  eine Engine baut: `../tts-engine-kit/README.md`.
+- **Aktivieren laedt, was gebraucht wird:** Die Engine wird auf ihre Karte
+  (GPUs) geladen - war sie ausgeschaltet, auf die zuletzt genutzte. Andere
+  Sprachausgaben, die auf **derselben** Karte geladen sind (XTTS, andere
+  Vertrags-Engines), werden dafuer entladen; die andere Karte bleibt
+  unberuehrt. Breeze kann sein Modell nicht entladen - dafuer weiterhin den
+  Container stoppen. Solange geladen wird, zeigt der Button "laedt...",
+  danach nennt ein Hinweis, was entladen und geladen wurde; dauert das Laden
+  laenger als ~2,5 Minuten, meldet er "laedt noch" und bis dahin spricht die
+  Rueckfallebene. Zurueck zu XTTS: XTTS aktivieren - dann wird z. B. Qwen3
+  entladen und XTTS wieder eingeschaltet.
 - **Sicherheitsnetz:** Faellt eine andere Engine als XTTS aus, bevor Audio
   geflossen ist (Container gestoppt, Modell laedt noch, belegt), spricht XTTS
-  die Antwort - bzw. Piper, solange XTTS unter GPUs ausgeschaltet ist. Nach
-  dem ersten Chunk wird nicht mehr gewechselt (sonst doppeltes Audio).
+  die Antwort - bzw. Piper, solange XTTS unter GPUs ausgeschaltet ist (also
+  auch, nachdem das Aktivieren einer anderen Engine XTTS entladen hat). Nach
+  dem ersten Chunk wird nicht mehr gewechselt (sonst doppeltes Audio). Im
+  Live-Gespraech wartet der Orchestrator nie auf das Laden einer
+  Vertrags-Engine: Ist ihr Modell nicht geladen (z. B. nach einem
+  Container-Neustart), stoesst der Turn das Laden an und die Rueckfallebene
+  spricht, bis die Engine bereit ist.
 - **Probehoeren & vergleichen:** Testsatz + Stimme waehlen, "Anhoeren" -
   ohne Fallback, damit du wirklich die gewaehlte Engine hoerst. Das Panel
   zeigt die Zeit bis zur ersten Sekunde Audio, die Gesamtdauer und den
-  Echtzeitfaktor (< 1 = schneller als Echtzeit).
+  Echtzeitfaktor (< 1 = schneller als Echtzeit). Eine nicht geladene
+  Vertrags-Engine wird dafuer geladen (bis zu 4 Minuten Wartezeit, die
+  gemessene Zeit enthaelt das Laden - fuer echte Werte ein zweites Mal
+  anhoeren). Anders als Aktivieren entlaedt Probehoeren nichts: Ist die
+  Karte knapp, die Engine vorher unter GPUs auf eine andere Karte als XTTS
+  legen - oder sie direkt aktivieren (zurueck geht es mit XTTS aktivieren).
 - **Filler** behalten ihre eigene Engine (Filler & Trigger). Fuer eine
   einheitliche Stimme dort dieselbe Engine waehlen und neu generieren.
 
@@ -322,6 +361,105 @@ Zu Variante A: Das offizielle Dockerfile baut FlashAttention (laeuft erst ab
 Ampere) - `tts-breeze/` verzichtet darauf, der Server rechnet ohnehin
 "eager". Ob die 2080 Ti ohne natives bf16 schnell genug ist, zeigt der
 Echtzeitfaktor im Probehoeren; ist sie zu langsam, ist B die Alternative.
+
+### Qwen3-TTS testen (Engine-Vertrag, v1.20)
+
+[Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) (Qwen-Team, Apache-2.0)
+klont eine Stimme aus einem kurzen Sample und spricht 10 Sprachen, darunter
+**Deutsch**. Genutzt werden die *Base*-Modelle:
+
+| Modell (`QWEN3_MODEL`) | VRAM (Richtwert) | |
+|---|---|---|
+| `Qwen/Qwen3-TTS-12Hz-1.7B-Base` (Default) | ~5 GB | klingt besser |
+| `Qwen/Qwen3-TTS-12Hz-0.6B-Base` | ~2,5 GB | schneller, passt neben XTTS |
+
+Die Engine laeuft als eigener Container `heimai-tts-qwen3` auf Basis von
+`../tts-engine-kit`. Das Python-Paket von Qwen3 erzeugt ganze Aeusserungen
+(echtes Streaming gibt es nur ueber vLLM) - die Engine spricht deshalb
+**Satz fuer Satz**: Das erste Audio kommt nach dem ersten Satz. Mit exaktem
+Transkript des Samples klont sie am aehnlichsten; ohne Transkript nutzt sie
+nur den Stimm-Fingerabdruck (funktioniert, klingt weniger nach dem
+Original). Die Sprache kommt aus der Stimme (Stimmen -> Sprache, Default
+Deutsch).
+
+#### Deployen
+
+1. Coolify -> New Resource -> Docker Compose: dasselbe Repo und derselbe
+   Branch wie der Voice-Stack, **Base Directory `/`** und Docker Compose
+   Location `/orchestrator/docker-compose.qwen3.yml` (warum nicht
+   `/orchestrator`: siehe Breeze Variante A).
+2. Environment Variables - alle optional, alle nur zur Laufzeit (kein
+   "Available during build"):
+   - `QWEN3_DEVICE` = Karte beim Start, Nummer wie im GPU-Panel (`cuda:0`
+     Default, `cuda:1`, `cpu`, `off`). Spaeter waehlst du sie im GPU-Panel.
+   - `QWEN3_MODEL` = eines der Modelle aus der Tabelle.
+   - `QWEN3_DTYPE` = `auto` (Default: bfloat16 ab Ampere, float16 auf
+     aelteren Karten wie der 2080 Ti) oder `float32` (s. u.).
+   - `QWEN3_PRELOAD` = `true` laedt das Modell schon beim Container-Start.
+     Default `false`: Es laedt beim Aktivieren bzw. beim ersten
+     Probehoeren, damit ein frischer Deploy nicht ungefragt VRAM neben XTTS
+     belegt.
+   - `HF_TOKEN` braucht es nicht (die Modelle sind frei), nur falls Hugging
+     Face Downloads drosselt.
+3. Advanced -> Build arguments -> "Managed manually in Dockerfile" (wie bei
+   Breeze: sonst loest jede geaenderte Variable einen Neubau aus, und
+   `HF_TOKEN` landet in der Build-History).
+4. Deploy. Das Image ist gross (~6 GB, PyTorch mit CUDA-Bibliotheken - die
+   gleiche Version wie XTTS, es laeuft also auf jeder Karte, auf der XTTS
+   laeuft). Der erste Start laedt die Gewichte ins Volume `qwen3-models`
+   (1.7B: mehrere GB, wird nach Abbruch fortgesetzt); das Panel zeigt so
+   lange "laedt die Gewichte herunter", danach "nicht geladen". Verfolgen
+   mit `docker logs -f heimai-tts-qwen3`.
+5. Den **Voice-Stack neu deployen**, falls er noch auf einem Stand vor v1.20
+   ist. Im Panel ist Qwen3 unter Sprachausgabe -> *Engines nach dem
+   Engine-Vertrag* als `qwen3` -> `http://tts-qwen3:8000` schon eingetragen.
+
+#### Testen und aktivieren
+
+1. **Stimme vorbereiten:** Unter Stimmen ein Sample mit 5-15 s sauberer
+   Sprache, "Transkribieren" klicken und den Text Wort fuer Wort
+   korrigieren (wie bei Breeze).
+2. **Karte waehlen** (GPUs, Zeile "Sprachausgabe (Qwen3-TTS)"): z. B. die
+   Karte ohne XTTS, dann laufen beide nebeneinander. Die Wahl laedt das
+   Modell sofort.
+3. Sprachausgabe -> **Probehoeren**: Engine "Qwen3-TTS", deine Stimme,
+   ein deutscher Satz, danach derselbe mit XTTS. Das erste Mal laedt das
+   Modell (bis zu einer Minute, auf der CPU deutlich laenger) - fuer echte
+   Latenzwerte zweimal anhoeren.
+4. **Aktivieren**, wenn es ueberzeugt. Liegt XTTS auf derselben Karte, wird
+   es dafuer entladen (Hinweis im Panel); bis Qwen3 antwortet bzw. falls es
+   ausfaellt, spricht dann Piper. Zurueck: XTTS aktivieren - Qwen3 wird
+   entladen, XTTS laedt wieder.
+5. Optional die **Filler** auf Qwen3 umstellen und neu generieren, damit
+   alles in einer Stimme klingt.
+
+Zum Aufhoeren XTTS wieder aktivieren und Qwen3 - falls es auf der anderen
+Karte liegt und deshalb geladen bleibt - unter GPUs auf "Aus" stellen: Der
+Modell-Prozess endet, das VRAM ist komplett frei. Der Container kann laufen
+bleiben (braucht dann nur etwas RAM) oder in Coolify gestoppt werden.
+
+**Probleme:**
+
+- *Server nicht gefunden* - der Deploy laeuft (noch) nicht:
+  `docker ps --filter name=heimai-tts-qwen3`, Status in Coolify.
+- *Fehler "Vorbereitung fehlgeschlagen"* - der Download ist gescheitert
+  (Netz, Platte voll): Ursache beheben; die Engine versucht es nach einer
+  Minute von selbst oder sofort, wenn du unter GPUs eine Karte waehlst.
+- *"Laden fehlgeschlagen: ... CUDA out of memory"* - die Karte ist voll:
+  XTTS auf die andere Karte, das LLM entladen, eine andere Karte waehlen
+  oder das 0.6B-Modell nehmen.
+- *"Qwen3 hat ungueltiges Audio (NaN) erzeugt"* - float16 laeuft auf dieser
+  Karte ueber: `QWEN3_DTYPE=float32` setzen (doppeltes VRAM, beim 1.7B
+  also besser die 11-GB-Karte) oder das 0.6B-Modell.
+- *Stimme klingt fremd* - Transkript pruefen (muss exakt zum Sample passen),
+  ein ruhigeres Sample ohne Hall/Musik nehmen.
+- *"Verbindung mitten in der Synthese abgebrochen"* - der Modell-Prozess ist
+  abgestuerzt (der Container laeuft weiter, der naechste Aufruf laedt neu):
+  `docker logs --tail 40 heimai-tts-qwen3` und `nvidia-smi`.
+
+Eine weitere Engine nach demselben Vertrag einbinden:
+`../tts-engine-kit/README.md` - Container bauen und deployen, dann unter
+Sprachausgabe ID und Adresse eintragen.
 
 ## 1. Lokal testen (ohne echtes LiteLLM/Weaviate)
 

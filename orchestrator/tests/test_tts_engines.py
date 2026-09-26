@@ -113,7 +113,9 @@ def test_admin_overview_and_activation(client, admin_headers, monkeypatch):
     body = client.get("/v1/admin/tts", headers=admin_headers).json()
     assert body["active_engine"] == "xtts"
     by_id = {engine["id"]: engine for engine in body["engines"]}
-    assert set(by_id) == {"xtts", "piper", "breeze"}
+    assert set(by_id) == {"xtts", "piper", "breeze", "qwen3"}
+    assert body["contract_engines"] == [
+        {"id": "qwen3", "url": "http://tts-qwen3:8000", "label": "Qwen3-TTS"}]
     assert by_id["breeze"]["status"]["status"] == "ok"
 
     activated = client.post(
@@ -362,15 +364,33 @@ def test_piper_steps_in_while_xtts_is_switched_off(client, monkeypatch):
     assert tts_engines.fallback_engine() == "piper"
 
 
-def test_switched_off_xtts_is_not_activatable_and_shows_as_off(client, admin_headers):
+def test_activating_a_switched_off_xtts_turns_it_back_on(client, admin_headers, monkeypatch):
+    """v1.20: Aktivieren heisst "diese Engine soll sprechen" - eine
+    ausgeschaltete wird dafuer wieder auf ihre letzte Karte geladen."""
+    from orchestrator.services import gpu_manager
+
     tts_engines.set_active_engine("breeze")
     _xtts_off()
+    repos.set_setting("gpu_last_device_tts-xtts", "cuda:1")
+    loads = []
+
+    async def status(name):
+        return {"reachable": True, "assigned": "off", "effective": None, "loaded": False}
+
+    async def set_device(name, device, compute_type=None):
+        loads.append((name, device))
+        return {"assigned": device, "effective": device, "loaded": True}
+
+    monkeypatch.setattr(gpu_manager, "service_status", status)
+    monkeypatch.setattr(gpu_manager, "set_service_device", set_device)
 
     response = client.post("/v1/admin/tts/activate", json={"engine": "xtts"}, headers=admin_headers)
 
-    assert response.status_code == 409
-    assert "ausgeschaltet" in response.json()["detail"]
-    assert tts_engines.active_engine() == "breeze"
+    assert response.status_code == 200
+    assert tts_engines.active_engine() == "xtts"
+    assert loads == [("tts-xtts", "cuda:1")]
+    assert gpu_manager.assigned_device("tts-xtts") == "cuda:1"
+    assert "XTTS geladen auf cuda:1." in response.json()["notes"]
 
 
 async def test_switched_off_xtts_reports_off_without_asking_the_service():

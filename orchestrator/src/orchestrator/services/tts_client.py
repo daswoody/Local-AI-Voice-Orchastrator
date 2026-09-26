@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -176,6 +177,81 @@ class BreezeClient:
             # deutlich besser (Server-Default 1.0).
             data["cfg_scale"] = "4"
         return data, files
+
+
+class ContractEngineError(RuntimeError):
+    """Antwort einer Vertrags-Engine mit HTTP-Fehler (Text = ihr detail)."""
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(f"{detail} (HTTP {status_code})")
+        self.status_code = status_code
+
+
+class ContractClient:
+    """Client fuer jede Engine nach dem Engine-Vertrag v1 (tts-engine-kit,
+    v1.20) - ein Client fuer alle, die Engine sagt per /v1/info selbst, was
+    sie kann.
+
+    Pro Request gehen Text, Sprache der Stimme und - falls vorhanden - das
+    Voice-Sample (als mono PCM16 24 kHz) samt Transkript mit; die Engine
+    entscheidet, was sie davon nutzt, und cacht die Referenz selbst.
+    load_timeout_s: 0 = nicht aufs Laden warten (Live-Turn: dann springt die
+    Rueckfallebene ein), beim Probehoeren/Filler ein paar Minuten."""
+
+    # Die Engine wartet selbst auf eine laufende Synthese; 409 kommt erst,
+    # wenn das zu lange dauert - dann nur noch kurz nachfassen.
+    busy_retries = 2
+    busy_wait_s = 1.0
+
+    def __init__(self, base_url) -> None:
+        self._base_url = base_url
+
+    async def stream(
+        self, text: str, voice_id: str, language: str | None = None, load_timeout_s: float = 0.0
+    ) -> AsyncIterator[tuple[int, bytes]]:
+        data, files = self._form(text, voice_id, language, load_timeout_s)
+        timeout = httpx.Timeout(30.0, read=max(300.0, load_timeout_s + 60.0))
+        async with httpx.AsyncClient(base_url=self._base_url(), timeout=timeout) as client:
+            for attempt in range(self.busy_retries + 1):
+                async with client.stream("POST", "/v1/synthesize", data=data, files=files) as response:
+                    if response.status_code == 409 and attempt < self.busy_retries:
+                        await asyncio.sleep(self.busy_wait_s)
+                        continue
+                    if response.status_code >= 400:
+                        raise ContractEngineError(response.status_code, _detail(await response.aread()))
+                    rate = int(response.headers.get("x-sample-rate", "24000"))
+                    async for chunk in response.aiter_bytes(chunk_size=48000):
+                        if chunk:
+                            yield rate, chunk
+                    return
+
+    @staticmethod
+    def _form(text: str, voice_id: str, language: str | None, load_timeout_s: float) -> tuple[dict, dict | None]:
+        voice = repos.get_voice(voice_id) or {}
+        data = {
+            "text": text,
+            "voice_id": voice_id,
+            "language": language or voice.get("language") or "de",
+            "load_timeout_s": str(load_timeout_s),
+        }
+        files = None
+        sample = Path(settings.voices_dir) / f"{voice_id}.wav"
+        if sample.exists():
+            files = {"ref_audio": (sample.name, _reference_wav(sample.read_bytes()), "audio/wav")}
+            transcript = (voice.get("sample_text") or "").strip()
+            if transcript:
+                data["ref_text"] = transcript
+        return data, files
+
+
+def _detail(body: bytes) -> str:
+    """{"detail": "..."} der Engine lesbar machen."""
+    text = body.decode("utf-8", "replace")
+    try:
+        detail = json.loads(text).get("detail")
+    except (ValueError, AttributeError):
+        detail = None
+    return str(detail or text or "ohne Begruendung")[:400]
 
 
 def _reference_wav(raw: bytes) -> bytes:

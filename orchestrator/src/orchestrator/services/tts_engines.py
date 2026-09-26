@@ -1,10 +1,12 @@
-"""TTS-Engines und Wahl der Hauptstimme (v1.17).
+"""TTS-Engines und Wahl der Hauptstimme (v1.17, Engine-Vertrag v1.20).
 
 Eine Engine ist ein Dienst, der Text in PCM16 verwandelt. Alle Clients
 sprechen dieselbe Schnittstelle - stream(text, voice_id) liefert
 (Samplerate, PCM16-Chunk)-Tupel -, damit Antwort-Pipeline,
 Filler-Generierung und Probehoeren die Engine nur ueber ihre ID kennen.
-Eine weitere Engine = ein Client mit stream() + ein Eintrag in ENGINES.
+Fest eingebaut sind XTTS, Piper und Breeze (ENGINES); jede weitere Engine
+folgt dem Engine-Vertrag (tts-engine-kit) und wird im Admin-Panel nur mit
+ID + Adresse eingetragen - Client-Code braucht sie keinen (registry()).
 
 Welche Engine die Hauptantwort spricht, waehlt der Admin im Panel
 (app_settings, Fallback .env TTS_ENGINE) - server-weit wie das aktive LLM
@@ -24,7 +26,7 @@ import httpx
 from .. import repos
 from ..config import settings
 from . import gpu_manager
-from .tts_client import breeze_base_url, breeze_client, piper_client, xtts_client
+from .tts_client import ContractClient, breeze_base_url, breeze_client, piper_client, xtts_client
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,8 @@ OFF_FALLBACK_ENGINE = "piper"
 class EngineOff(RuntimeError):
     """Engine ist im Admin-Panel ausgeschaltet (GPUs -> Aus, v1.19)."""
 
+
+# Fest eingebaute Engines; Vertrags-Engines kommen per registry() dazu.
 ENGINES: dict[str, dict] = {
     "xtts": {
         "label": "XTTS-v2 (Stimme des Nutzers)",
@@ -103,24 +107,87 @@ ENGINES: dict[str, dict] = {
 }
 
 
+# ---- Vertrags-Engines (v1.20) ----------------------------------------------------------
+#
+# Engines nach dem Engine-Vertrag stehen nicht im Code, sondern in der
+# Datenbank (ID + Adresse, Admin-Panel -> Sprachausgabe). Was sie koennen,
+# melden sie per /v1/info selbst - zwischengespeichert, damit die Registry
+# ohne Netzwerk auskommt.
+
+# Beim Probehoeren und Filler-Erzeugen aufs Laden warten (das erste Laden
+# dauert ~1 Minute); im Live-Turn nie - dann spricht die Rueckfallebene.
+PREVIEW_LOAD_TIMEOUT_S = 240.0
+_INFO: dict[str, dict] = {}
+
+
+def registry() -> dict[str, dict]:
+    """Alle Engines: fest eingebaute + Vertrags-Engines aus der Datenbank."""
+    engines = dict(ENGINES)
+    for row in repos.list_contract_engines():
+        engines[row["id"]] = _contract_spec(row)
+    return engines
+
+
+def _contract_spec(row: dict) -> dict:
+    engine_id, url = row["id"], row["url"].rstrip("/")
+    info = _INFO.get(engine_id, {})
+    name = row.get("label") or info.get("name") or engine_id
+    description = info.get("description") or "Engine nach dem Engine-Vertrag."
+    if info.get("languages"):
+        description += f" Sprachen: {', '.join(info['languages'])}."
+    return {
+        "label": name,
+        "name": name,
+        "client": ContractClient(lambda: url),
+        "per_voice": True,
+        "needs_sample": bool(info.get("needs_sample", True)),
+        "container": f"heimai-tts-{engine_id}",
+        "gpu_service": gpu_manager.contract_service(engine_id),
+        "contract": True,
+        "url": url,
+        "deploy_hint": (f"Laeuft der Container der Engine (eigener Coolify-Deploy)? Die Adresse "
+                        f"{url} unter Sprachausgabe pruefen."),
+        "logs_hint": (f"Logs pruefen: 'docker logs heimai-tts-{engine_id}' "
+                      "(bzw. der Name des Engine-Containers)"),
+        "base_url": lambda: url,
+        "health_path": "/v1/health",
+        "preview_kwargs": {"load_timeout_s": PREVIEW_LOAD_TIMEOUT_S},
+        "description": f"{description} Adresse: {url}",
+    }
+
+
+async def refresh_info(engine_id: str, url: str) -> None:
+    """Steckbrief einer Vertrags-Engine holen - best effort; fehlt er,
+    gelten vorsichtige Annahmen (braucht ein Sample)."""
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.get(f"{url}/v1/info")
+        if response.status_code == 200:
+            _INFO[engine_id] = response.json()
+    except Exception:
+        pass
+
+
 def engine_ids() -> list[str]:
-    return list(ENGINES)
+    return list(registry())
 
 
 def get_engine(engine_id: str) -> dict:
-    return ENGINES[engine_id]
+    return registry()[engine_id]
 
 
-def public_engines() -> list[dict]:
+def public_engines(engines: dict[str, dict] | None = None) -> list[dict]:
     """Registry ohne Client-Objekte - so geht sie als JSON ans Panel."""
+    engines = engines if engines is not None else registry()
     return [
         {
             "id": engine_id,
             "label": spec["label"],
             "description": spec["description"],
             "per_voice": spec["per_voice"],
+            "contract": spec.get("contract", False),
         }
-        for engine_id, spec in ENGINES.items()
+        for engine_id, spec in engines.items()
     ]
 
 
@@ -128,11 +195,11 @@ def active_engine() -> str:
     """Engine der Hauptantwort: Admin-Wahl, sonst .env. Unbekanntes (z. B.
     eine inzwischen entfernte Engine) faellt auf XTTS zurueck."""
     engine_id = repos.get_setting(ACTIVE_ENGINE_SETTING) or settings.tts_engine
-    return engine_id if engine_id in ENGINES else DEFAULT_ENGINE
+    return engine_id if engine_id in registry() else DEFAULT_ENGINE
 
 
 def set_active_engine(engine_id: str) -> None:
-    if engine_id not in ENGINES:
+    if engine_id not in registry():
         raise ValueError(f"Unbekannte TTS-Engine '{engine_id}'")
     if not engine_enabled(engine_id):
         raise EngineOff(off_detail(engine_id))
@@ -140,13 +207,14 @@ def set_active_engine(engine_id: str) -> None:
 
 
 def engine_enabled(engine_id: str) -> bool:
-    service = ENGINES[engine_id].get("gpu_service")
+    service = get_engine(engine_id).get("gpu_service")
     return not (service and gpu_manager.is_off(service))
 
 
 def off_detail(engine_id: str) -> str:
-    name = ENGINES[engine_id]["name"]
-    return f"{name} ist unter GPUs ausgeschaltet - dort erst wieder eine Karte zuweisen."
+    name = get_engine(engine_id)["name"]
+    return (f"{name} ist unter GPUs ausgeschaltet - unter Sprachausgabe aktivieren oder unter "
+            "GPUs eine Karte zuweisen.")
 
 
 def fallback_engine() -> str:
@@ -158,12 +226,79 @@ def fallback_engine() -> str:
 def disable_blocker(service: str) -> str | None:
     """Grund, warum sich ein GPU-Dienst gerade nicht ausschalten laesst:
     Er spricht die aktive Hauptstimme. Sonst None."""
-    engine_id = active_engine()
-    if ENGINES[engine_id].get("gpu_service") != service:
+    spec = get_engine(active_engine())
+    if spec.get("gpu_service") != service:
         return None
-    name = ENGINES[engine_id]["name"]
-    return (f"{name} ist die aktive Hauptstimme - erst unter Sprachausgabe eine andere "
+    return (f"{spec['name']} ist die aktive Hauptstimme - erst unter Sprachausgabe eine andere "
             "Engine aktivieren, dann ausschalten.")
+
+
+async def activate(engine_id: str) -> list[str]:
+    """Engine zur Hauptstimme machen - und dafuer sorgen, dass sie auch
+    spricht (v1.20): Ausgeschaltet -> wieder an (auf ihrer letzten Karte);
+    andere ausschaltbare Engines, die auf DIESER Karte geladen sind, werden
+    entladen (VRAM); dann wird sie selbst geladen. Engines auf der anderen
+    Karte bleiben, wie sie sind. Rueckgabe: Hinweise fuers Panel."""
+    engines = registry()
+    spec = engines[engine_id]
+    notes: list[str] = []
+    service = spec.get("gpu_service")
+    if service:
+        target = await _target_device(service)
+        gpu_manager.store_assignment(service, target)
+        if target.startswith("cuda"):
+            for other_id, other in engines.items():
+                other_service = other.get("gpu_service")
+                if other_id == engine_id or not other_service or gpu_manager.is_off(other_service):
+                    continue
+                status = await gpu_manager.service_status(other_service)
+                if not (status.get("reachable") and status.get("loaded")
+                        and _same_card(status.get("effective"), target)):
+                    continue
+                try:
+                    await gpu_manager.apply_device(other_service, gpu_manager.OFF)
+                    notes.append(f"{other['name']} entladen (gleiche Karte, {target}).")
+                except Exception as exc:
+                    notes.append(f"{other['name']} liess sich nicht entladen: {str(exc)[:200]}")
+        status = await gpu_manager.service_status(service)
+        if status.get("reachable") and not (status.get("assigned") == target and status.get("loaded")):
+            try:
+                result = await gpu_manager.apply_device(service, target)
+                notes.append(_load_note(spec["name"], result, target))
+            except Exception as exc:
+                notes.append(f"{spec['name']} konnte nicht auf {target} laden: {str(exc)[:200]}")
+    set_active_engine(engine_id)
+    return notes
+
+
+def _load_note(name: str, result: dict, target: str) -> str:
+    if result.get("loaded"):
+        return f"{name} geladen auf {result.get('effective') or target}."
+    if result.get("state") == "error":
+        return f"{name}: {result.get('detail') or 'Laden fehlgeschlagen'}"
+    fallback = get_engine(fallback_engine())["name"]
+    return f"{name} laedt noch - bis es fertig ist, spricht {fallback}."
+
+
+async def _target_device(service: str) -> str:
+    """Karte fuers Aktivieren: die zugewiesene, sonst die vor dem
+    Ausschalten, sonst die, die der Dienst selbst meldet, sonst GPU 0."""
+    stored = gpu_manager.assigned_device(service)
+    if stored and stored != gpu_manager.OFF:
+        return stored
+    last = gpu_manager.last_device(service)
+    if last:
+        return last
+    status = await gpu_manager.service_status(service)
+    live = status.get("assigned") if status.get("reachable") else None
+    return live if live and live != gpu_manager.OFF else "cuda:0"
+
+
+def _same_card(device: str | None, target: str) -> bool:
+    def normalized(value: str) -> str:
+        return "cuda:0" if value == "cuda" else value
+
+    return device is not None and normalized(device) == normalized(target)
 
 
 async def stream_main(text: str, voice_id: str) -> AsyncIterator[tuple[int, bytes]]:
@@ -181,7 +316,7 @@ async def stream_main(text: str, voice_id: str) -> AsyncIterator[tuple[int, byte
         engine_id = fallback
     started = False
     try:
-        async for item in ENGINES[engine_id]["client"].stream(text, voice_id):
+        async for item in get_engine(engine_id)["client"].stream(text, voice_id):
             started = True
             yield item
         return
@@ -191,7 +326,7 @@ async def stream_main(text: str, voice_id: str) -> AsyncIterator[tuple[int, byte
         logger.exception(
             "TTS-Engine '%s' fehlgeschlagen - Hauptantwort kommt von '%s'", engine_id, fallback
         )
-    async for item in ENGINES[fallback]["client"].stream(text, voice_id):
+    async for item in get_engine(fallback)["client"].stream(text, voice_id):
         yield item
 
 
@@ -213,13 +348,16 @@ async def synthesize(engine_id: str, text: str, voice_id: str | None) -> Synthes
     """Komplette Synthese mit GENAU dieser Engine - ohne Fallback, denn
     Filler-Generierung und Probehoeren sollen die gewaehlte Engine hoeren
     lassen, nicht die Rueckfallebene."""
+    spec = get_engine(engine_id)
     if not engine_enabled(engine_id):
         raise EngineOff(off_detail(engine_id))
     started = time.perf_counter()
     first_chunk_ms = 0.0
     pcm = bytearray()
     rate = settings.target_sample_rate
-    async for chunk_rate, chunk in ENGINES[engine_id]["client"].stream(text, voice_id):
+    # Vertrags-Engines: aufs Laden des Modells warten statt sofort 503.
+    stream = spec["client"].stream(text, voice_id, **spec.get("preview_kwargs", {}))
+    async for chunk_rate, chunk in stream:
         if not pcm:
             first_chunk_ms = (time.perf_counter() - started) * 1000
         rate = chunk_rate
@@ -227,11 +365,23 @@ async def synthesize(engine_id: str, text: str, voice_id: str | None) -> Synthes
     return Synthesis(bytes(pcm), rate, first_chunk_ms, (time.perf_counter() - started) * 1000)
 
 
+# Zustaende einer Vertrags-Engine (GET /v1/device) -> Panel-Status
+_CONTRACT_STATES = {
+    "ready": ("ok", ""),
+    "loading": ("loading", "Modell wird geladen"),
+    "preparing": ("loading", "laedt die Gewichte herunter (erster Start, mehrere GB)"),
+    "idle": ("idle", "nicht geladen - laedt beim Aktivieren bzw. beim ersten Probehoeren"),
+    "off": ("off", "Modell entladen"),
+}
+
+
 async def engine_status(engine_id: str) -> dict:
-    """Erreichbarkeit fuers Panel: ok | loading | error | unreachable | off."""
+    """Erreichbarkeit fuers Panel: ok | loading | idle | error | unreachable | off."""
     if not engine_enabled(engine_id):
         return {"status": "off", "detail": "Modell entladen"}
-    spec = ENGINES[engine_id]
+    spec = get_engine(engine_id)
+    if spec.get("contract"):
+        return await _contract_status(spec)
     url = spec["base_url"]().rstrip("/") + spec["health_path"]
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
@@ -243,6 +393,24 @@ async def engine_status(engine_id: str) -> dict:
     if response.status_code == 503:
         return {"status": "loading", "detail": "Modell wird geladen"}
     return {"status": "error", "detail": f"HTTP {response.status_code}"}
+
+
+async def _contract_status(spec: dict) -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            response = await client.get(spec["base_url"]() + "/v1/device")
+    except Exception as exc:
+        return {"status": "unreachable", "detail": _unreachable_detail(exc, spec)}
+    if response.status_code != 200:
+        return {"status": "error", "detail": f"HTTP {response.status_code}"}
+    device = response.json()
+    state = device.get("state", "")
+    if state == "error":
+        return {"status": "error", "detail": device.get("detail") or "Laden fehlgeschlagen"}
+    status, detail = _CONTRACT_STATES.get(state, ("error", f"unbekannter Zustand '{state}'"))
+    if status == "ok" and device.get("effective"):
+        detail = f"geladen auf {device['effective']}"
+    return {"status": status, "detail": detail}
 
 
 def _unreachable_detail(exc: Exception, spec: dict) -> str:
@@ -271,7 +439,7 @@ STREAM_ABORTED = (httpx.RemoteProtocolError, httpx.ReadError)
 def stream_abort_detail(engine_id: str) -> str:
     """Was der Admin nach einem abgerissenen Stream tun kann - statt des
     httpx-Wortlauts, der wie ein Fehler des Orchestrators aussieht."""
-    spec = ENGINES[engine_id]
+    spec = get_engine(engine_id)
     logs = spec.get("logs_hint") or f"Logs pruefen: 'docker logs {spec['container']}'"
     detail = (f"{spec['name']}-Server hat die Verbindung mitten in der Synthese abgebrochen - "
               f"er ist dabei vermutlich abgestuerzt. {logs} (Fehlertext), dazu nvidia-smi (VRAM).")
@@ -292,9 +460,13 @@ def _caused_by(exc: BaseException, kind: type) -> bool:
 
 
 async def overview() -> list[dict]:
-    """Alle Engines mit Live-Status (parallel geprueft)."""
-    statuses = await asyncio.gather(*(engine_status(engine_id) for engine_id in ENGINES))
+    """Alle Engines mit Live-Status (parallel geprueft); Vertrags-Engines
+    liefern dabei auch ihren Steckbrief neu."""
+    contract = {eid: spec["url"] for eid, spec in registry().items() if spec.get("contract")}
+    await asyncio.gather(*(refresh_info(eid, url) for eid, url in contract.items()))
+    engines = registry()
+    statuses = await asyncio.gather(*(engine_status(engine_id) for engine_id in engines))
     return [
         {**entry, "status": status}
-        for entry, status in zip(public_engines(), statuses)
+        for entry, status in zip(public_engines(engines), statuses)
     ]

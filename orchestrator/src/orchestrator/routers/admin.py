@@ -433,6 +433,14 @@ class TtsPreviewPayload(BaseModel):
     text: str = Field(min_length=1, max_length=500)
 
 
+class ContractEnginePayload(BaseModel):
+    # Kurz, klein, ohne Sonderzeichen: wird auch Teil des GPU-Dienstnamens
+    # ("tts-<id>") und des erwarteten Containernamens.
+    id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,30}$")
+    url: str = Field(min_length=1, max_length=300)
+    label: str | None = Field(default=None, max_length=60)
+
+
 class TtsSettingsPayload(BaseModel):
     # Nur mitgeschickte Felder werden geaendert.
     # Optionale Sprechanweisung fuer Breeze ("Voice Direction"), z. B.
@@ -451,6 +459,8 @@ async def tts_overview() -> dict:
         # solange XTTS ausgeschaltet ist) - fuer die Rueckfrage im Panel.
         "fallback_engine": tts_engines.fallback_engine(),
         "engines": await tts_engines.overview(),
+        # Engines nach dem Engine-Vertrag (v1.20) - im Panel verwaltbar.
+        "contract_engines": repos.list_contract_engines(),
         "breeze_instruction": repos.get_setting(BREEZE_INSTRUCTION_SETTING) or "",
         "breeze_url": repos.get_setting(BREEZE_URL_SETTING) or "",
         "breeze_url_default": settings.breeze_base_url.rstrip("/"),
@@ -462,12 +472,11 @@ async def tts_overview() -> dict:
 async def activate_tts_engine(payload: TtsActivatePayload) -> dict:
     if payload.engine not in tts_engines.engine_ids():
         raise HTTPException(status_code=404, detail=f"Unbekannte TTS-Engine '{payload.engine}'")
-    try:
-        tts_engines.set_active_engine(payload.engine)
-    except tts_engines.EngineOff as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
+    # Laedt die Engine auf ihrer Karte und entlaedt andere auf derselben
+    # Karte (v1.20) - kann beim ersten Mal eine Minute dauern.
+    notes = await tts_engines.activate(payload.engine)
     status = await tts_engines.engine_status(payload.engine)
-    result: dict[str, Any] = {"active_engine": payload.engine, "status": status}
+    result: dict[str, Any] = {"active_engine": payload.engine, "status": status, "notes": notes}
     if status["status"] != "ok":
         # Nicht blockieren (man darf eine Engine vorab waehlen), aber klar
         # sagen, was bis dahin passiert.
@@ -482,6 +491,31 @@ async def activate_tts_engine(payload: TtsActivatePayload) -> dict:
             f"{name} ist aktiviert, antwortet aber gerade nicht: {status['detail']} {meanwhile}"
         )
     return result
+
+
+@router.post("/tts/engines", status_code=201)
+async def save_contract_engine(payload: ContractEnginePayload) -> dict:
+    """Engine nach dem Engine-Vertrag eintragen oder Adresse/Name aendern."""
+    if payload.id in tts_engines.ENGINES:
+        raise HTTPException(status_code=400, detail=f"'{payload.id}' ist eine eingebaute Engine")
+    try:
+        url = normalize_base_url(payload.url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Adresse ungueltig: {exc}")
+    if not url:
+        raise HTTPException(status_code=400, detail="Adresse fehlt")
+    entry = repos.upsert_contract_engine(payload.id, url, (payload.label or "").strip() or None)
+    await tts_engines.refresh_info(payload.id, url)
+    return {**entry, "status": await tts_engines.engine_status(payload.id)}
+
+
+@router.delete("/tts/engines/{engine_id}", status_code=204)
+def delete_contract_engine(engine_id: str) -> None:
+    if engine_id == tts_engines.active_engine():
+        raise HTTPException(status_code=409,
+                            detail="Das ist die aktive Hauptstimme - erst eine andere Engine aktivieren.")
+    if not repos.delete_contract_engine(engine_id):
+        raise HTTPException(status_code=404, detail="Engine nicht gefunden")
 
 
 @router.post("/tts/preview")
@@ -652,7 +686,7 @@ async def gpu_overview() -> dict:
 
 @router.put("/gpus/{service}")
 async def assign_device(service: str, payload: DeviceAssignPayload) -> dict:
-    spec = gpu_manager.SERVICES.get(service)
+    spec = gpu_manager.services().get(service)
     if spec is None:
         raise HTTPException(status_code=404, detail=f"Unbekannter Dienst '{service}'")
     if not spec["controllable"]:

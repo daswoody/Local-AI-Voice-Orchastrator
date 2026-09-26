@@ -135,6 +135,16 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, id);
+
+-- Sprachausgaben nach dem Engine-Vertrag (tts-engine-kit, v1.20): eine
+-- Engine = ID + Adresse; alles andere (Name, Sprachen, ...) meldet sie per
+-- /v1/info selbst.
+CREATE TABLE IF NOT EXISTS tts_contract_engines (
+    id TEXT PRIMARY KEY,
+    url TEXT NOT NULL,
+    label TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 _DEFAULT_CHARACTER_PROMPT = "Du bist eine hilfreiche, deutschsprachige Heim-Assistenz."
@@ -186,6 +196,7 @@ def init_db() -> None:
         _seed_voices(conn)
         _seed_triggers_and_fillers(conn)
         _seed_card_layouts(conn)
+        _seed_contract_engines(conn)
         conn.commit()
     finally:
         conn.close()
@@ -247,6 +258,20 @@ def _seed_voices(conn: sqlite3.Connection) -> None:
             ("default-de-male", "Standard (maennlich, DE)"),
         ],
     )
+
+
+def _seed_contract_engines(conn: sqlite3.Connection) -> None:
+    # Qwen3-TTS einmalig vorbelegen - NUR beim ersten Mal (Merker in
+    # app_settings), damit eine im Panel entfernte Engine nicht bei jedem
+    # Start wiederkommt.
+    marker = conn.execute(
+        "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('tts_contract_engines_seeded', '1')"
+    )
+    if marker.rowcount:
+        conn.execute(
+            "INSERT OR IGNORE INTO tts_contract_engines (id, url, label) VALUES ('qwen3', ?, 'Qwen3-TTS')",
+            (settings.qwen3_base_url.rstrip("/"),),
+        )
 
 
 def _seed_triggers_and_fillers(conn: sqlite3.Connection) -> None:

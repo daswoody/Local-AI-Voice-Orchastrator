@@ -31,6 +31,8 @@ from .tts_client import breeze_base_url
 logger = logging.getLogger(__name__)
 
 _SETTING_PREFIX = "gpu_device_"
+# Karte vor dem Ausschalten - dorthin laedt "Aktivieren" die Engine wieder.
+_LAST_PREFIX = "gpu_last_device_"
 # Zuweisung "ausgeschaltet" (v1.19): Der Dienst entlaedt sein Modell und gibt
 # VRAM/RAM frei. Der Container laeuft weiter - ihn zu stoppen, hiesse wieder
 # Docker-Socket (siehe oben).
@@ -95,11 +97,36 @@ SERVICES: dict[str, dict] = {
     },
 }
 
-CONTROLLABLE = [name for name, spec in SERVICES.items() if spec["controllable"]]
+def contract_service(engine_id: str) -> str:
+    """GPU-Dienstname einer Vertrags-Engine (v1.20)."""
+    return f"tts-{engine_id}"
+
+
+def services() -> dict[str, dict]:
+    """Feste Dienste + Engines nach dem Engine-Vertrag (Datenbank): Die
+    koennen alle Karte wechseln und ganz aus - ihr Modell laeuft in einem
+    eigenen Prozess, "Aus" beendet ihn."""
+    result = dict(SERVICES)
+    for row in repos.list_contract_engines():
+        url = row["url"].rstrip("/")
+        result[contract_service(row["id"])] = {
+            "label": f"Sprachausgabe ({row.get('label') or row['id']})",
+            "base_url": lambda url=url: url,
+            "controllable": True,
+            "can_disable": True,
+            "note": ("Engine nach dem Engine-Vertrag: 'Aus' beendet ihren Modell-Prozess, das VRAM "
+                     "ist danach komplett frei. 'Aktivieren' unter Sprachausgabe laedt sie auf ihre "
+                     "Karte und entlaedt andere Sprachausgaben auf derselben Karte."),
+        }
+    return result
+
+
+def controllable() -> list[str]:
+    return [name for name, spec in services().items() if spec["controllable"]]
 
 
 def _base_url(name: str) -> str:
-    return str(SERVICES[name]["base_url"]()).rstrip("/")
+    return str(services()[name]["base_url"]()).rstrip("/")
 
 
 # ---- Karten (NVML) ----------------------------------------------------------
@@ -195,7 +222,16 @@ def assigned_device(name: str) -> str | None:
 
 
 def store_assignment(name: str, device: str) -> None:
+    if device == OFF:
+        previous = assigned_device(name)
+        if previous and previous != OFF:
+            repos.set_setting(_LAST_PREFIX + name, previous)
     repos.set_setting(_SETTING_PREFIX + name, device)
+
+
+def last_device(name: str) -> str | None:
+    """Karte vor dem letzten Ausschalten (None = unbekannt)."""
+    return repos.get_setting(_LAST_PREFIX + name)
 
 
 def is_off(name: str) -> bool:
@@ -236,6 +272,12 @@ async def set_service_device(name: str, device: str, compute_type: str | None = 
 
 async def apply_device(name: str, device: str) -> dict:
     """Zuweisung setzen UND merken (ueberlebt Container-Neustarts)."""
+    if device == OFF and not assigned_device(name):
+        # Nie zugewiesen (laeuft auf seinem Compose-Default): die Karte fuers
+        # spaetere Wieder-Einschalten beim Dienst selbst erfragen.
+        live = await service_status(name)
+        if live.get("reachable") and live.get("assigned") not in (None, OFF):
+            repos.set_setting(_LAST_PREFIX + name, live["assigned"])
     gpus = list_gpus().get("gpus", [])
     status = await set_service_device(name, device, _compute_type_for(device, gpus))
     store_assignment(name, device)
@@ -245,13 +287,12 @@ async def apply_device(name: str, device: str) -> dict:
 async def overview() -> dict:
     """Alles, was das Panel braucht: Karten + Dienste nebeneinander."""
     gpu_info = list_gpus()
-    statuses = await asyncio.gather(
-        *(service_status(name) for name in CONTROLLABLE), return_exceptions=True
-    )
-    live = dict(zip(CONTROLLABLE, statuses))
+    names = controllable()
+    statuses = await asyncio.gather(*(service_status(name) for name in names), return_exceptions=True)
+    live = dict(zip(names, statuses))
 
-    services = []
-    for name, spec in SERVICES.items():
+    entries = []
+    for name, spec in services().items():
         entry = {
             "name": name,
             "label": spec["label"],
@@ -272,12 +313,16 @@ async def overview() -> dict:
                 entry["effective"] = status.get("effective")
                 entry["loaded"] = status.get("loaded", False)
                 entry["compute_type"] = status.get("compute_type")
+                # Vertrags-Engines melden zusaetzlich ihren Zustand (laedt,
+                # Fehler beim Laden ...).
+                entry["state"] = status.get("state")
+                entry["detail"] = status.get("detail")
             else:
                 entry["error"] = status.get("error")
-        services.append(entry)
+        entries.append(entry)
 
     return {"nvml": {k: v for k, v in gpu_info.items() if k != "gpus"},
-            "gpus": gpu_info["gpus"], "services": services}
+            "gpus": gpu_info["gpus"], "services": entries}
 
 
 async def restore_assignments() -> None:
@@ -286,7 +331,7 @@ async def restore_assignments() -> None:
     zugewiesen hat als gespeichert - ist er per CPU-Fallback ausgewichen,
     stimmt `assigned` weiterhin und wir fassen ihn nicht an (sonst wuerden
     wir den Fallback in einer Endlosschleife zurueckdrehen)."""
-    for name in CONTROLLABLE:
+    for name in controllable():
         stored = assigned_device(name)
         if not stored:
             continue

@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     # Breeze TTS 2 (Test-Engine, v1.17): offizieller Streaming-Server aus
     # tts-breeze/, eigener Deploy ueber docker-compose.breeze.yml.
     breeze_base_url: str = "http://tts-breeze:7860"
+    # Qwen3-TTS (v1.20): erste Engine nach dem Engine-Vertrag (tts-qwen3/,
+    # docker-compose.qwen3.yml). Nur der Startwert - Vertrags-Engines und
+    # ihre Adressen verwaltet das Admin-Panel (Sprachausgabe).
+    qwen3_base_url: str = "http://tts-qwen3:8000"
 
     # Engine der Hauptantwort, solange im Admin-Panel keine gewaehlt wurde
     # (v1.17): xtts | breeze | piper.

@@ -53,7 +53,9 @@ def test_overview_lists_all_services(client, admin_headers, monkeypatch):
     body = client.get("/v1/admin/gpus", headers=admin_headers).json()
 
     services = {entry["name"]: entry for entry in body["services"]}
-    assert set(services) == {"stt", "tts-xtts", "tts-breeze", "tts-piper", "llm"}
+    # tts-qwen3: vorbelegte Engine nach dem Engine-Vertrag (v1.20)
+    assert set(services) == {"stt", "tts-xtts", "tts-breeze", "tts-piper", "llm", "tts-qwen3"}
+    assert services["tts-qwen3"]["controllable"] is True and services["tts-qwen3"]["can_disable"] is True
     assert services["tts-breeze"]["controllable"] is False
     assert "BREEZE_GPU" in services["tts-breeze"]["control_hint"]
     assert services["stt"]["controllable"] is True

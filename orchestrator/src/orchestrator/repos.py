@@ -184,6 +184,33 @@ def voice_summary_prompt() -> str:
     return get_setting("voice_summary_prompt") or DEFAULT_VOICE_SUMMARY_PROMPT
 
 
+# ---- Sprachausgaben nach dem Engine-Vertrag (v1.20) ---------------------------------
+
+
+def list_contract_engines() -> list[dict]:
+    with db_session() as conn:
+        rows = conn.execute("SELECT id, url, label FROM tts_contract_engines ORDER BY id").fetchall()
+        return [dict(r) for r in rows]
+
+
+def upsert_contract_engine(engine_id: str, url: str, label: str | None) -> dict:
+    with db_session() as conn:
+        conn.execute(
+            "INSERT INTO tts_contract_engines (id, url, label) VALUES (?, ?, ?)"
+            " ON CONFLICT(id) DO UPDATE SET url = excluded.url, label = excluded.label",
+            (engine_id, url, label),
+        )
+        conn.commit()
+    return {"id": engine_id, "url": url, "label": label}
+
+
+def delete_contract_engine(engine_id: str) -> bool:
+    with db_session() as conn:
+        cursor = conn.execute("DELETE FROM tts_contract_engines WHERE id = ?", (engine_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
 # ---- Voices --------------------------------------------------------------------
 
 

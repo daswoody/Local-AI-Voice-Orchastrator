@@ -181,7 +181,7 @@ const NO_RERENDER = new Set(["editUser", "resetUserForm", "pickSample", "editCar
                              "editFiller", "resetFillerForm", "editAgent",
                              "resetAgentForm", "switchCardFormat", "playFiller",
                              "filterFillers", "editVoice", "resetVoiceForm",
-                             "previewTts"]);
+                             "previewTts", "editContractEngine"]);
 
 /* Audio-Blob abspielen und die Blob-URL danach wieder freigeben, sonst
  * sammeln sich die Objekte im Tab an. */
@@ -239,6 +239,7 @@ views.tts = async () => {
     error: '<span class="badge warn">Fehler</span>',
     unreachable: '<span class="badge off">nicht erreichbar</span>',
     off: '<span class="badge off">ausgeschaltet</span>',
+    idle: '<span class="badge off">nicht geladen</span>',
   };
 
   const rows = data.engines.map((engine) => {
@@ -249,12 +250,22 @@ views.tts = async () => {
       <td>${statusBadge[engine.status.status] || esc(engine.status.status)}${detail}</td>
       <td>${active ? '<span class="badge ok">aktiv</span>' : '<span class="badge off">inaktiv</span>'}</td>
       <td class="actions">
-        ${active ? "" : engine.status.status === "off"
-          ? '<small>erst unter GPUs einschalten</small>'
-          : `<button class="small" data-action="activateTts" data-id="${esc(engine.id)}">Aktivieren</button>`}
+        ${active ? "" : `<button class="small" data-action="activateTts" data-id="${esc(engine.id)}">Aktivieren</button>`}
       </td>
     </tr>`;
   }).join("");
+
+  // Engines nach dem Engine-Vertrag (v1.20): nur ID + Adresse, der Rest
+  // kommt aus ihrem Steckbrief.
+  const contractRows = data.contract_engines.map((engine) => `<tr>
+      <td><code>${esc(engine.id)}</code></td>
+      <td>${esc(engine.label || "")}</td>
+      <td><code>${esc(engine.url)}</code></td>
+      <td class="actions">
+        <button class="small" data-action="editContractEngine" data-id="${esc(engine.id)}">Bearbeiten</button>
+        <button class="small danger" data-action="deleteContractEngine" data-id="${esc(engine.id)}">Entfernen</button>
+      </td>
+    </tr>`).join("") || '<tr><td colspan="4" class="hint">Keine eingetragen.</td></tr>';
 
   const engineOptions = data.engines.map((e) =>
     `<option value="${esc(e.id)}" ${e.id === data.active_engine ? "selected" : ""}>${esc(e.label)}</option>`).join("");
@@ -265,7 +276,7 @@ views.tts = async () => {
 
   return `
     <h1>Sprachausgabe</h1>
-    <p class="hint">Welche TTS-Engine die gesprochenen Antworten erzeugt - server-weit, wie das aktive LLM. Faellt eine andere Engine als XTTS aus, bevor Audio geflossen ist (Container gestoppt, Modell laedt noch), spricht automatisch XTTS &ndash; bzw. Piper, solange XTTS unter GPUs ausgeschaltet ist. Filler behalten ihre eigene Engine (Filler &amp; Trigger) - fuer eine einheitliche Stimme dort dieselbe Engine waehlen und neu generieren.</p>
+    <p class="hint">Welche TTS-Engine die gesprochenen Antworten erzeugt - server-weit, wie das aktive LLM. <strong>Aktivieren</strong> laedt die Engine auf ihre Karte und entlaedt andere Sprachausgaben auf derselben Karte (beim ersten Mal kann das eine Minute dauern). Faellt die aktive Engine aus, bevor Audio geflossen ist (Container gestoppt, Modell laedt noch), spricht automatisch XTTS &ndash; bzw. Piper, solange XTTS entladen ist. Filler behalten ihre eigene Engine (Filler &amp; Trigger) - fuer eine einheitliche Stimme dort dieselbe Engine waehlen und neu generieren.</p>
     <section class="block">
       <table>
         <thead><tr><th>Engine</th><th>Dienst</th><th>Status</th><th></th></tr></thead>
@@ -274,7 +285,7 @@ views.tts = async () => {
     </section>
     <section class="block">
       <h2>Probehoeren &amp; vergleichen</h2>
-      <p class="hint">Spricht einen Testsatz mit genau dieser Engine und Stimme (ohne XTTS-Fallback) und misst die Zeit bis zur ersten Sekunde Audio sowie fuer die komplette Synthese. Echtzeitfaktor unter 1 = schneller als Echtzeit.</p>
+      <p class="hint">Spricht einen Testsatz mit genau dieser Engine und Stimme (ohne XTTS-Fallback) und misst die Zeit bis zur ersten Sekunde Audio sowie fuer die komplette Synthese. Echtzeitfaktor unter 1 = schneller als Echtzeit. Eine nicht geladene Engine wird dafuer auf ihre Karte geladen, ohne andere zu entladen &ndash; ist die Karte voll, die Engine vorher aktivieren.</p>
       <form class="grid" data-submit="previewTts" id="tts-preview-form">
         <label>Engine <select name="engine">${engineOptions}</select></label>
         <label>Stimme <select name="voice_id">${voiceOptions}</select></label>
@@ -283,6 +294,20 @@ views.tts = async () => {
         </label>
         <div><button type="submit">Anhoeren</button></div>
         <p class="hint full" id="tts-preview-result"></p>
+      </form>
+    </section>
+    <section class="block">
+      <h2>Engines nach dem Engine-Vertrag</h2>
+      <p class="hint">Jede Sprachausgabe, die den Engine-Vertrag spricht (<code>tts-engine-kit</code>, z. B. <code>tts-qwen3</code>), wird hier nur mit ID und Adresse eingetragen &ndash; Name, Sprachen und Faehigkeiten meldet sie selbst. Sie erscheint dann oben, beim Probehoeren, bei den Fillern und unter GPUs (Karte waehlen oder ganz aus).</p>
+      <table>
+        <thead><tr><th>ID</th><th>Name</th><th>Adresse</th><th></th></tr></thead>
+        <tbody>${contractRows}</tbody>
+      </table>
+      <form class="grid" data-submit="saveContractEngine" id="contract-engine-form">
+        <label>ID (klein, ohne Leerzeichen) <input name="id" required pattern="[a-z0-9][a-z0-9-]{0,30}" placeholder="qwen3" autocomplete="off" spellcheck="false"></label>
+        <label>Name (optional) <input name="label" maxlength="60" placeholder="Qwen3-TTS"></label>
+        <label class="full">Adresse &ndash; Container-Name:Port, IP:Port oder Domain <input name="url" required placeholder="http://tts-qwen3:8000" autocomplete="off" spellcheck="false"></label>
+        <div><button type="submit">Speichern</button></div>
       </form>
     </section>
     <section class="block">
@@ -304,7 +329,7 @@ views.tts = async () => {
         <div><button type="submit">Speichern</button></div>
       </form>
     </section>
-    <script type="application/json" id="tts-data">${JSON.stringify({ engines: data.engines, fallback: data.fallback_engine })}</script>`;
+    <script type="application/json" id="tts-data">${JSON.stringify({ engines: data.engines, fallback: data.fallback_engine, contract: data.contract_engines })}</script>`;
 };
 
 // ---- View: GPUs ------------------------------------------------------------------------
@@ -372,6 +397,13 @@ views.gpus = async () => {
       } else {
         running += ' <span class="badge off">noch nicht geladen</span>';
       }
+    } else if (service.state === "loading" || service.state === "preparing") {
+      // Engines nach dem Engine-Vertrag melden, was sie gerade tun (v1.20).
+      running = `<span class="badge warn">${service.state === "preparing" ? "laedt Gewichte herunter…" : "laedt…"}</span>`;
+    } else if (service.state === "error") {
+      running = `<span class="badge warn">${esc(service.detail || "Fehler beim Laden")}</span>`;
+    } else if (service.state === "idle") {
+      running = '<span class="badge off">nicht geladen</span>';
     } else if (service.error) {
       running = `<span class="badge warn">${esc(service.error)}</span>`;
     }
@@ -386,7 +418,7 @@ views.gpus = async () => {
 
   return `
     <h1>GPUs &amp; Dienste</h1>
-    <p class="hint">Verteilt die Dienste auf die vorhandenen Karten (VRAM-Budget 4.2). Der Wechsel laedt das Modell auf der neuen Karte neu &ndash; das dauert einige Sekunden, ein Container-Neustart ist nicht noetig, und die Zuweisung wird nach einem Neustart automatisch wiederhergestellt. Reicht das VRAM nicht, weicht der Dienst auf die CPU aus und die Spalte "Laeuft auf" zeigt "weicht ab". XTTS laesst sich auch ganz ausschalten ("Aus"), solange eine andere Engine die Hauptstimme spricht.</p>
+    <p class="hint">Verteilt die Dienste auf die vorhandenen Karten (VRAM-Budget 4.2). Der Wechsel laedt das Modell auf der neuen Karte neu &ndash; das dauert einige Sekunden, ein Container-Neustart ist nicht noetig, und die Zuweisung wird nach einem Neustart automatisch wiederhergestellt. Reicht das VRAM nicht, weicht der Dienst auf die CPU aus und die Spalte "Laeuft auf" zeigt "weicht ab". Sprachausgaben (XTTS und Engines nach dem Engine-Vertrag) lassen sich auch ganz ausschalten ("Aus"), solange sie nicht die Hauptstimme sprechen; "Aktivieren" unter Sprachausgabe laedt sie wieder.</p>
     ${notice}
     <section class="block">
       <h2>Grafikkarten</h2>
@@ -963,6 +995,12 @@ const formActions = {
     }
   },
 
+  saveContractEngine: (form) => api.post("/v1/admin/tts/engines", {
+    id: form.id.value.trim(),
+    url: form.url.value,
+    label: form.label.value.trim() || null,
+  }),
+
   saveTtsSettings: (form) => api.put("/v1/admin/tts/settings", {
     breeze_url: form.breeze_url.value,
     breeze_instruction: form.breeze_instruction.value,
@@ -1034,7 +1072,8 @@ const buttonActions = {
     const engine = engines.find((e) => e.id === data.id);
     const fallbackEngine = engines.find((e) => e.id === fallback);
     let confirmed = false;
-    if (engine && engine.status.status !== "ok") {
+    // "nicht geladen"/"aus" ist kein Problem - Aktivieren laedt die Engine.
+    if (engine && ["unreachable", "error"].includes(engine.status.status)) {
       // Rueckfallebene ist XTTS - oder Piper, solange XTTS ausgeschaltet ist.
       const meanwhile = engine.id === fallback
         ? "Bis dahin liest die App die Antworten selbst vor."
@@ -1043,8 +1082,30 @@ const buttonActions = {
         + `\n\nTrotzdem aktivieren? ${meanwhile}`)) return;
       confirmed = true;
     }
+    const button = document.querySelector(`button[data-action="activateTts"][data-id="${CSS.escape(data.id)}"]`);
+    if (button) {
+      button.disabled = true;
+      button.textContent = "laedt…";
+    }
     const result = await api.post("/v1/admin/tts/activate", { engine: data.id });
-    if (result.warning && !confirmed) alert(result.warning);
+    const messages = [...(result.notes || [])];
+    if (result.warning && !confirmed) messages.push(result.warning);
+    if (messages.length) alert(messages.join("\n\n"));
+  },
+
+  editContractEngine(data) {
+    const { contract } = JSON.parse(document.getElementById("tts-data").textContent);
+    const engine = contract.find((e) => e.id === data.id);
+    const form = document.getElementById("contract-engine-form");
+    form.id.value = engine.id;
+    form.label.value = engine.label || "";
+    form.url.value = engine.url;
+    form.scrollIntoView({ behavior: "smooth" });
+  },
+
+  async deleteContractEngine(data) {
+    if (!confirm(`Engine "${data.id}" entfernen? Der Container laeuft weiter, der Orchestrator nutzt ihn nur nicht mehr.`)) return;
+    await api.del(`/v1/admin/tts/engines/${encodeURIComponent(data.id)}`);
   },
 
   async assignDevice(data, element) {

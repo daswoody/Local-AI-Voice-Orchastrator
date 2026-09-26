@@ -11,6 +11,7 @@ der komplette Voice-Loop (Mikro-Phase 1.11) inklusive TTS-Engine-Wechsel
                  PIPER_BASE_URL=http://127.0.0.1:9100/piper \\
                  XTTS_BASE_URL=http://127.0.0.1:9100/xtts \\
                  BREEZE_BASE_URL=http://127.0.0.1:9100/breeze \\
+                 QWEN3_BASE_URL=http://127.0.0.1:9100/qwen3 \\
                  WEAVIATE_URL=http://127.0.0.1:9100/weaviate-gibtsnicht \\
                  uv run uvicorn orchestrator.main:app --port 8000
     Terminal 3:  uv run python scripts/manual_audio_ws_test.py
@@ -212,12 +213,86 @@ async def breeze_speech(
                              headers={"X-Sample-Rate": "24000", "X-Sample-Format": "s16le"})
 
 
+# --- Fake-Engine nach dem Engine-Vertrag (Qwen3-TTS, v1.20) ---------------------
+# Zustaende wie tts-engine-kit: idle -> (Laden) -> ready, off; Synthese im
+# Zustand idle laedt, wartet aber nur mit load_timeout_s > 0 darauf.
+qwen3 = FastAPI()
+_qwen3 = {"assigned": "cuda:0", "state": "idle"}
+
+
+@qwen3.get("/v1/health")
+async def qwen3_health() -> dict:
+    return {"status": "ok", "state": _qwen3["state"]}
+
+
+@qwen3.get("/v1/info")
+async def qwen3_info() -> dict:
+    return {"name": "Qwen3-TTS 1.7B (Fake)", "languages": ["de", "en"], "sample_rate": 24000,
+            "needs_sample": True, "uses_transcript": True, "instructions": False,
+            "streaming": "sentence", "vram_mb": 5000, "contract": 1,
+            "description": "Fake-Engine nach dem Engine-Vertrag."}
+
+
+def _qwen3_status() -> dict:
+    loaded = _qwen3["state"] == "ready"
+    return {"assigned": _qwen3["assigned"], "effective": _qwen3["assigned"] if loaded else None,
+            "loaded": loaded, "state": _qwen3["state"], "detail": "", "model": "Fake"}
+
+
+@qwen3.get("/v1/device")
+async def qwen3_device() -> dict:
+    return _qwen3_status()
+
+
+@qwen3.post("/v1/device")
+async def qwen3_set_device(payload: dict) -> dict:
+    _qwen3["assigned"] = payload["device"]
+    if payload["device"] == "off":
+        _qwen3["state"] = "off"
+    else:
+        await asyncio.sleep(0.5)  # "laedt"
+        _qwen3["state"] = "ready"
+    return _qwen3_status()
+
+
+@qwen3.post("/v1/synthesize")
+async def qwen3_synthesize(
+    text: str = Form(...),
+    language: str | None = Form(None),
+    ref_audio: UploadFile | None = File(None),
+    ref_text: str | None = Form(None),
+    load_timeout_s: float = Form(0.0),
+) -> StreamingResponse:
+    if _qwen3["state"] == "off":
+        raise HTTPException(503, "Engine ist im Admin-Panel ausgeschaltet (GPUs)")
+    if _qwen3["state"] != "ready":
+        if load_timeout_s <= 0:
+            _qwen3["state"] = "ready"  # "laedt im Hintergrund"
+            raise HTTPException(503, "Modell wird geladen - gleich noch einmal versuchen")
+        await asyncio.sleep(0.5)
+        _qwen3["state"] = "ready"
+    if ref_audio is None:
+        raise HTTPException(400, "Qwen3-TTS braucht ein Voice-Sample")
+    # Satz fuer Satz, Ton je nach Klon-Modus (mit Transkript tiefer).
+    sentences = [part for part in text.replace("!", ".").replace("?", ".").split(".") if part.strip()]
+    base = 200 if ref_text else 260
+
+    async def generate():
+        for index, sentence in enumerate(sentences or [text]):
+            await asyncio.sleep(0.1)
+            yield _sine_pcm16(0.2 + len(sentence) / 14, 24000, freq=base + 40 * index)
+
+    return StreamingResponse(generate(), media_type="application/octet-stream",
+                             headers={"X-Sample-Rate": "24000", "X-Sample-Format": "s16le"})
+
+
 app = FastAPI(title="Heim-AI Fake-Backends")
 app.mount("/llm", llm)
 app.mount("/stt", stt)
 app.mount("/piper", piper)
 app.mount("/xtts", xtts)
 app.mount("/breeze", breeze)
+app.mount("/qwen3", qwen3)
 
 
 if __name__ == "__main__":

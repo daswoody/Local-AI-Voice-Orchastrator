@@ -346,11 +346,13 @@ def _create_filler(client, admin_headers, engine="xtts", text="Moment bitte."):
 def test_tts_engines_are_listed_for_the_dropdown(client, admin_headers):
     engines = client.get("/v1/admin/tts-engines", headers=admin_headers).json()
     by_id = {engine["id"]: engine for engine in engines}
-    assert set(by_id) == {"xtts", "piper", "breeze"}
+    # qwen3: Engine nach dem Engine-Vertrag, beim ersten Start vorbelegt (v1.20)
+    assert set(by_id) == {"xtts", "piper", "breeze", "qwen3"}
     # per_voice steuert, ob die Engine in der Nutzerstimme spricht
     assert by_id["xtts"]["per_voice"] is True
     assert by_id["piper"]["per_voice"] is False
     assert by_id["breeze"]["per_voice"] is True
+    assert by_id["qwen3"]["contract"] is True and by_id["xtts"]["contract"] is False
     # Registry geht ohne Client-Objekte raus (JSON)
     assert "client" not in by_id["xtts"]
 

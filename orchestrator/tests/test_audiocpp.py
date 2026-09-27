@@ -54,6 +54,10 @@ class FakeAudioCpp:
         self.speech: list[dict] = []
         self.unload_calls: list[list[str]] = []
         self.rate = 24000
+        # Wie audio.cpp: Scheitert das Hochladen der Decoder-Konstanten (VRAM),
+        # bleibt das Modell kaputt, bis es entladen wird.
+        self.no_vram: set[str] = set()
+        self.broken: set[str] = set()
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -74,6 +78,7 @@ class FakeAudioCpp:
             unloaded = [i for i in ids if self.models.get(i, {}).get("loaded")]
             for model_id in unloaded:
                 self.models[model_id]["loaded"] = False
+                self.broken.discard(model_id)
             return httpx.Response(200, json={"unloaded": unloaded, "not_found": []})
         if path == "/v1/audio/speech":
             payload = json.loads(request.content)
@@ -82,6 +87,12 @@ class FakeAudioCpp:
             if model is None:
                 return self.error(500, f"unknown model id: {payload['model']}")
             model["loaded"] = True
+            prefix = "qwen3_tts.speech_tokenizer_decoder.constants"
+            if payload["model"] in self.broken:
+                return self.error(500, f"{prefix} constant tensor cache graph used a different tensor sequence")
+            if payload["model"] in self.no_vram:
+                self.broken.add(payload["model"])
+                return self.error(500, f"failed to allocate {prefix} constant tensor cache")
             if model["family"] == "qwen3_tts" and payload.get("language") not in (None, "german", "english"):
                 return self.error(500, f"Qwen3 talker unsupported language: {payload['language']}")
             if model["family"] == "kokoro_tts" and "reference_text" in payload:
@@ -288,6 +299,57 @@ async def test_audiocpp_errors_are_translated(server):
     with pytest.raises(audiocpp.AudioCppError, match="nicht \\(mehr\\) eingetragen"):
         [c async for c in audiocpp.AudioCppClient("gibtsnicht").stream("Hallo zusammen.", "x",
                                                                         wait_for_load=True)]
+
+
+async def test_a_broken_model_is_unloaded_and_tried_fresh(server):
+    """Nutzer-Report: "... constant tensor cache graph used a different tensor
+    sequence (HTTP 500)" beim Probehoeren - Folgefehler eines gescheiterten
+    ersten Satzes, audio.cpp heilt erst durch Entladen."""
+    server.models["qwen3-tts"]["loaded"] = True
+    server.broken.add("qwen3-tts")
+    await tts_engines.audiocpp_server()
+
+    chunks = [c async for c in audiocpp.AudioCppClient("qwen3-tts").stream(
+        "Hallo, wie geht es dir heute?", "default-de-female", wait_for_load=True)]
+
+    assert chunks and server.unload_calls == [["qwen3-tts"]] and len(server.speech) == 2
+
+
+async def test_live_turn_unloads_a_broken_model_but_does_not_wait(server):
+    server.models["qwen3-tts"]["loaded"] = True
+    server.broken.add("qwen3-tts")
+
+    with pytest.raises(audiocpp.AudioCppError, match="kaputten Zustand") as error:
+        [c async for c in audiocpp.AudioCppClient("qwen3-tts").stream("Hallo, wie geht es dir?", "x")]
+
+    assert server.unload_calls == [["qwen3-tts"]] and len(server.speech) == 1
+    assert not tts_engines.engine_gone(error.value)  # kein Ausfall des Servers
+
+
+async def test_too_little_vram_is_explained_and_the_model_left_clean(server):
+    server.no_vram.add("qwen3-tts")
+
+    with pytest.raises(audiocpp.AudioCppError) as error:
+        [c async for c in audiocpp.AudioCppClient("qwen3-tts").stream(
+            "Hallo, wie geht es dir heute?", "default-de-female", wait_for_load=True)]
+
+    assert "failed to allocate" in str(error.value) and "zu wenig VRAM" in str(error.value)
+    # Entladen, damit der naechste Versuch nicht am halb gefuellten Cache scheitert.
+    assert server.unload_calls == [["qwen3-tts"]] and "qwen3-tts" not in server.broken
+
+
+async def test_activation_tests_and_heals_an_already_loaded_model(server, monkeypatch):
+    _write_sample("default-de-female")
+    server.models["kokoro"]["loaded"] = False
+    server.models["qwen3-tts"]["loaded"] = True
+    server.broken.add("qwen3-tts")
+    _fake_gpu_services(monkeypatch, {"tts-xtts": {"assigned": "cuda:1", "effective": "cuda:1", "loaded": True}})
+    await tts_engines.audiocpp_server()
+
+    notes = await tts_engines.activate("audiocpp:qwen3-tts")
+
+    assert notes == ["audio.cpp/qwen3-tts ist geladen."]
+    assert server.unload_calls == [["qwen3-tts"]] and "qwen3-tts" not in server.broken
 
 
 # ---- Hauptstimme: Fallback auf XTTS ---------------------------------------------------------

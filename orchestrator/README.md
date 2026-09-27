@@ -296,10 +296,20 @@ Englisch/Chinesisch-Modell; eine Sprechanweisung gibt man in der
 - *Modell fehlt in der Liste* - in der `server.json` eingetragen, mit
   `"task": "tts"`? In der WebUI geladene Modelle verschwinden beim Neustart
   von audio.cpp.
-- *"... auf der Karte von audio.cpp ist zu wenig Speicher frei"* bzw. CUDA
-  out of memory - die Karte ist voll: "Karte von audio.cpp" angeben (dann
-  macht Aktivieren Platz), ein Q8-Paket bzw. kleineres Modell nehmen oder
-  audio.cpp per `device` auf die andere Karte legen.
+- *"... constant tensor cache graph used a different tensor sequence"* - ein
+  Folgefehler in audio.cpp: Der erste Satz mit diesem Modell ist gescheitert
+  (fast immer zu wenig VRAM beim Hochladen der Decoder-Daten), seitdem steckt
+  das Modell dort fest, bis es entladen wird. Seit v1.21.1 entlaedt der
+  Orchestrator es dann selbst und versucht es einmal frisch (Probehoeren,
+  Filler, Aktivieren; im Live-Turn spricht XTTS und der naechste Turn laedt
+  neu) - die Meldung danach nennt die eigentliche Ursache. Von Hand: "Alle
+  audio.cpp-Sprachmodelle entladen" oder audio.cpp neu starten.
+- *"failed to allocate ..."*, *"... zu wenig VRAM"* bzw. CUDA out of memory -
+  die Karte ist voll: "Karte von audio.cpp" angeben (dann macht Aktivieren
+  Platz), ein Q8-Paket bzw. kleineres Modell nehmen oder audio.cpp per
+  `device` auf die andere Karte legen. Bei Qwen3 hilft auch ein kuerzeres
+  Voice-Sample (5-15 s): Mit Transkript dekodiert audio.cpp das Sample bei
+  jedem Satz mit, ein 30-s-Sample kostet also bei jedem Satz VRAM und Zeit.
 - *Stimme klingt fremd* - Transkript pruefen, ruhigeres Sample; nicht jedes
   Modell klont (Spalte "Stimme": eingebaute Stimme waehlen).
 - *"Verbindung mitten in der Synthese abgebrochen"* - audio.cpp ist

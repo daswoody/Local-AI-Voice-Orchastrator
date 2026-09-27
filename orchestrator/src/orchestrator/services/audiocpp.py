@@ -305,8 +305,29 @@ def _reference(voice_id: str) -> str | None:
     return data
 
 
-def _error_message(response: httpx.Response) -> str:
-    """{"error": {"message", "type"}} von audio.cpp lesbar machen."""
+# audio.cpp baut beim ERSTEN Satz eines Modells Caches fuer konstante Tensoren
+# und laedt sie auf die Karte. Scheitert das (meist: VRAM voll), bleibt der
+# Cache halb gefuellt, und jeder weitere Satz scheitert mit "... constant
+# tensor cache graph used a different tensor sequence" - bis das Modell
+# entladen wird (so in audio.cpp, Stand 2026-09). Der Client entlaedt es
+# deshalb selbst und versucht es, wo gewartet werden darf, einmal frisch.
+_BROKEN_CACHE_MARKERS = ("different tensor sequence", "tensor sequence mismatch",
+                         "saw a new tensor after upload")
+_MEMORY_MARKERS = ("failed to allocate", "out of memory", "cudamalloc", "insufficient memory",
+                   "not enough memory")
+VRAM_HINT = ("auf der Karte von audio.cpp ist zu wenig VRAM frei: dort Platz schaffen (XTTS oder das LLM "
+             "auf die andere Karte, bzw. 'Karte von audio.cpp' angeben - dann macht Aktivieren Platz), "
+             "ein kleineres Modell oder ein kuerzeres Voice-Sample nehmen (5-15 s; Qwen3 rechnet das "
+             "Sample bei jedem Satz mit)")
+
+
+def _cache_broken(message: str) -> bool:
+    text = message.lower()
+    return "constant tensor cache" in text and any(marker in text for marker in _BROKEN_CACHE_MARKERS)
+
+
+def _error_parts(response: httpx.Response) -> tuple[str, str | None]:
+    """{"error": {"message", "type"}} von audio.cpp -> (Meldung, Typ)."""
     try:
         body = response.json()
         error = body.get("error") if isinstance(body, dict) else None
@@ -314,16 +335,28 @@ def _error_message(response: httpx.Response) -> str:
         kind = error.get("type") if isinstance(error, dict) else None
     except ValueError:
         message, kind = None, None
-    message = str(message or response.text or "ohne Begruendung")[:400]
+    return str(message or response.text or "ohne Begruendung")[:400], kind
+
+
+def _describe(message: str, kind: str | None) -> str:
+    """Meldung von audio.cpp -> was zu tun ist."""
     unknown = re.match(r"unknown model id: (.+)", message)
     if unknown:
         return (f"Modell '{unknown.group(1)}' ist auf dem audio.cpp-Server nicht (mehr) eingetragen - "
                 "dort laden bzw. in die server.json eintragen oder eine andere Engine aktivieren")
-    if kind == "insufficient_memory":
-        return f"{message} - auf der Karte von audio.cpp ist zu wenig Speicher frei"
+    if _cache_broken(message):
+        return (f"{message} - das Modell ist in audio.cpp seit einem gescheiterten ersten Satz in einem "
+                "kaputten Zustand (Ursache meist zu wenig VRAM). Der Orchestrator hat es entladen; "
+                "der naechste Versuch laedt es frisch und zeigt dann die eigentliche Ursache")
+    if kind == "insufficient_memory" or any(marker in message.lower() for marker in _MEMORY_MARKERS):
+        return f"{message} - {VRAM_HINT}"
     if kind == "server_busy":
         return f"{message} - audio.cpp rechnet gerade etwas anderes mit diesem Modell"
     return message
+
+
+def _error_message(response: httpx.Response) -> str:
+    return _describe(*_error_parts(response))
 
 
 class AudioCppClient:
@@ -369,7 +402,7 @@ class AudioCppClient:
                 payload = self._payload(sentence, voice_id, voice, language, family, builtin, url)
                 if index == 0 and not wait_for_load:
                     payload["busy_timeout_ms"] = LIVE_BUSY_TIMEOUT_MS
-                pcm, rate = await self._speech(client, payload, url)
+                pcm, rate = await self._speech(client, payload, url, reload_allowed=wait_for_load)
                 for chunk in chunk_pcm(pcm):
                     yield rate, chunk
 
@@ -400,17 +433,39 @@ class AudioCppClient:
                 payload["reference_text"] = transcript
         return payload
 
-    async def _speech(self, client: httpx.AsyncClient, payload: dict, url: str) -> tuple[bytes, int]:
-        for _ in range(3):
+    async def _speech(self, client: httpx.AsyncClient, payload: dict, url: str,
+                      reload_allowed: bool) -> tuple[bytes, int]:
+        """Ein Satz. reload_allowed: Ist das Modell in audio.cpp kaputt
+        (siehe _BROKEN_CACHE_MARKERS), nach dem Entladen einmal frisch
+        versuchen - nur wo auf das Neuladen gewartet werden darf."""
+        reloaded = False
+        for _ in range(4):
             response = await client.post("/v1/audio/speech", json=payload)
             if response.status_code < 400:
                 return wav_to_pcm16(response.content)
-            message = _error_message(response)
+            message, kind = _error_parts(response)
             rejected = _rejected_fields(message, payload)
-            if not rejected:
-                break
-            logger.info("audio.cpp-Modell '%s' lehnt %s ab - frage ohne nach",
-                        self.model, ", ".join(sorted(rejected)))
-            _dropped.setdefault((url, self.model), set()).update(rejected)
-            payload = {key: value for key, value in payload.items() if key not in rejected}
-        raise AudioCppError(response.status_code, message)
+            if rejected:
+                logger.info("audio.cpp-Modell '%s' lehnt %s ab - frage ohne nach",
+                            self.model, ", ".join(sorted(rejected)))
+                _dropped.setdefault((url, self.model), set()).update(rejected)
+                payload = {key: value for key, value in payload.items() if key not in rejected}
+                continue
+            if "constant tensor cache" in message.lower():
+                # Auch ein gescheitertes Hochladen hinterlaesst den Cache
+                # halb gefuellt - so oder so frisch laden lassen.
+                await self._reset(message)
+                if _cache_broken(message) and reload_allowed and not reloaded:
+                    reloaded = True
+                    continue
+            break
+        raise AudioCppError(response.status_code, _describe(message, kind))
+
+    async def _reset(self, reason: str) -> None:
+        """Modell auf audio.cpp entladen - der naechste Request laedt es neu."""
+        logger.warning("audio.cpp-Modell '%s' in kaputtem Zustand (%s) - wird entladen",
+                       self.model, reason[:160])
+        try:
+            await unload([self.model])
+        except Exception as exc:
+            logger.warning("audio.cpp-Modell '%s' liess sich nicht entladen: %s", self.model, exc)

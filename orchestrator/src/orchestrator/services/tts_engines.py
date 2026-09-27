@@ -520,10 +520,11 @@ async def _activate_audiocpp(engine_id: str, spec: dict, engines: dict[str, dict
     card = audiocpp.device()
     if card.startswith("cuda"):
         notes += await _unload_same_card(card, engines, exclude=engine_id)
-    if entry.get("loaded"):
-        notes.append(f"{name} ist geladen.")
-        return notes
+    was_loaded = bool(entry.get("loaded"))
     try:
+        # Auch ein schon geladenes Modell spricht einen Testsatz: Das deckt
+        # einen kaputten Zustand in audio.cpp auf - und der Client heilt ihn
+        # dabei (entladen, frisch laden).
         done = await audiocpp.ensure_loaded(model, audiocpp.warm_up_voice(), AUDIOCPP_LOAD_WAIT_S)
     except Exception as exc:
         # Scheitert nur der Testsatz (z. B. Stimme ohne Sample), ist das
@@ -534,7 +535,7 @@ async def _activate_audiocpp(engine_id: str, spec: dict, engines: dict[str, dict
             notes.append(f"{name}: Laden fehlgeschlagen - {str(exc)[:300]}")
         return notes
     if done:
-        notes.append(f"{name} geladen.")
+        notes.append(f"{name} ist geladen." if was_loaded else f"{name} geladen.")
     else:
         fallback = get_engine(fallback_engine())["name"]
         notes.append(f"{name} laedt noch - bis es fertig ist, spricht {fallback}.")

@@ -38,9 +38,13 @@ class Settings(BaseSettings):
     # docker-compose.qwen3.yml). Nur der Startwert - Vertrags-Engines und
     # ihre Adressen verwaltet das Admin-Panel (Sprachausgabe).
     qwen3_base_url: str = "http://tts-qwen3:8000"
+    # audio.cpp (v1.21): EIN Server fuer viele TTS-Modelle, angebunden wie
+    # LiteLLM - jedes dort eingetragene TTS-Modell wird eine Engine. Leer =
+    # nicht eingerichtet; die Adresse laesst sich im Admin-Panel setzen.
+    audiocpp_base_url: str = ""
 
     # Engine der Hauptantwort, solange im Admin-Panel keine gewaehlt wurde
-    # (v1.17): xtts | breeze | piper.
+    # (v1.17): xtts | breeze | piper | audiocpp:<Modell-ID>.
     tts_engine: str = "xtts"
 
     # Ausgabe-Stream laeuft einheitlich auf XTTS-Rate (Protokoll 4.13:

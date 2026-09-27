@@ -181,7 +181,7 @@ const NO_RERENDER = new Set(["editUser", "resetUserForm", "pickSample", "editCar
                              "editFiller", "resetFillerForm", "editAgent",
                              "resetAgentForm", "switchCardFormat", "playFiller",
                              "filterFillers", "editVoice", "resetVoiceForm",
-                             "previewTts", "editContractEngine"]);
+                             "previewTts", "editContractEngine", "setAudioCppVoice"]);
 
 /* Audio-Blob abspielen und die Blob-URL danach wieder freigeben, sonst
  * sammeln sich die Objekte im Tab an. */
@@ -267,6 +267,8 @@ views.tts = async () => {
       </td>
     </tr>`).join("") || '<tr><td colspan="4" class="hint">Keine eingetragen.</td></tr>';
 
+  const audiocppSection = renderAudioCpp(data.audiocpp, data.gpus);
+
   const engineOptions = data.engines.map((e) =>
     `<option value="${esc(e.id)}" ${e.id === data.active_engine ? "selected" : ""}>${esc(e.label)}</option>`).join("");
   const voiceOptions = voices.map((v) => {
@@ -276,7 +278,7 @@ views.tts = async () => {
 
   return `
     <h1>Sprachausgabe</h1>
-    <p class="hint">Welche TTS-Engine die gesprochenen Antworten erzeugt - server-weit, wie das aktive LLM. <strong>Aktivieren</strong> laedt die Engine auf ihre Karte und entlaedt andere Sprachausgaben auf derselben Karte (beim ersten Mal kann das eine Minute dauern). Faellt die aktive Engine aus, bevor Audio geflossen ist (Container gestoppt, Modell laedt noch), spricht automatisch XTTS &ndash; bzw. Piper, solange XTTS entladen ist. Filler behalten ihre eigene Engine (Filler &amp; Trigger) - fuer eine einheitliche Stimme dort dieselbe Engine waehlen und neu generieren.</p>
+    <p class="hint">Welche TTS-Engine die gesprochenen Antworten erzeugt - server-weit, wie das aktive LLM. <strong>Aktivieren</strong> laedt die Engine auf ihre Karte und entlaedt andere Sprachausgaben auf derselben Karte (beim ersten Mal kann das eine Minute dauern); die Modelle eines audio.cpp-Servers stehen hier einzeln (siehe audio.cpp unten). Faellt die aktive Engine aus, bevor Audio geflossen ist (Server/Container gestoppt, Modell laedt noch), spricht automatisch XTTS &ndash; bzw. Piper, solange XTTS entladen ist. Filler behalten ihre eigene Engine (Filler &amp; Trigger) - fuer eine einheitliche Stimme dort dieselbe Engine waehlen und neu generieren.</p>
     <section class="block">
       <table>
         <thead><tr><th>Engine</th><th>Dienst</th><th>Status</th><th></th></tr></thead>
@@ -285,7 +287,7 @@ views.tts = async () => {
     </section>
     <section class="block">
       <h2>Probehoeren &amp; vergleichen</h2>
-      <p class="hint">Spricht einen Testsatz mit genau dieser Engine und Stimme (ohne XTTS-Fallback) und misst die Zeit bis zur ersten Sekunde Audio sowie fuer die komplette Synthese. Echtzeitfaktor unter 1 = schneller als Echtzeit. Eine nicht geladene Engine wird dafuer auf ihre Karte geladen, ohne andere zu entladen &ndash; ist die Karte voll, die Engine vorher aktivieren.</p>
+      <p class="hint">Spricht einen Testsatz mit genau dieser Engine und Stimme (ohne XTTS-Fallback) und misst die Zeit bis zur ersten Sekunde Audio sowie fuer die komplette Synthese. Echtzeitfaktor unter 1 = schneller als Echtzeit. audio.cpp-Modelle sprechen Satz fuer Satz &ndash; dort ist "erste Sekunde" die Zeit bis zum ersten Satz. Eine nicht geladene Engine wird dafuer geladen (das erste Mal zaehlt die Ladezeit mit, also zweimal messen), ohne andere zu entladen &ndash; ist die Karte voll, die Engine vorher aktivieren.</p>
       <form class="grid" data-submit="previewTts" id="tts-preview-form">
         <label>Engine <select name="engine">${engineOptions}</select></label>
         <label>Stimme <select name="voice_id">${voiceOptions}</select></label>
@@ -296,6 +298,7 @@ views.tts = async () => {
         <p class="hint full" id="tts-preview-result"></p>
       </form>
     </section>
+    ${audiocppSection}
     <section class="block">
       <h2>Engines nach dem Engine-Vertrag</h2>
       <p class="hint">Jede Sprachausgabe, die den Engine-Vertrag spricht (<code>tts-engine-kit</code>, z. B. <code>tts-qwen3</code>), wird hier nur mit ID und Adresse eingetragen &ndash; Name, Sprachen und Faehigkeiten meldet sie selbst. Sie erscheint dann oben, beim Probehoeren, bei den Fillern und unter GPUs (Karte waehlen oder ganz aus).</p>
@@ -311,9 +314,10 @@ views.tts = async () => {
       </form>
     </section>
     <section class="block">
-      <h2>Breeze TTS 2</h2>
-      <p class="hint">Breeze klont eine Stimme nur mit Sample <strong>und</strong> exaktem Transkript (unter "Stimmen" pflegen); ohne Transkript spricht es mit seiner eingebauten Stimme. Offiziell unterstuetzt das Open-Weight-Modell nur Englisch und Chinesisch - deutsche Antworten koennen mit Akzent oder falsch ausgesprochen klingen. Der Server laeuft getrennt vom Voice-Stack, in einer von zwei Varianten mit derselben Schnittstelle: <strong>offizieller PyTorch-Server</strong> (<code>docker-compose.breeze.yml</code>, ~7,7 GB VRAM) oder <strong>Breeze-TTS-2.cpp</strong> (<code>docker-compose.breeze-cpp.yml</code> oder nativ, Q8_0 ~4 GB VRAM).</p>
+      <h2>Breeze TTS 2 (eigener Server)</h2>
+      <p class="hint">Breeze klont eine Stimme nur mit Sample <strong>und</strong> exaktem Transkript (unter "Stimmen" pflegen); ohne Transkript spricht es mit seiner eingebauten Stimme. Offiziell unterstuetzt das Open-Weight-Modell nur Englisch und Chinesisch - deutsche Antworten koennen mit Akzent oder falsch ausgesprochen klingen. Der Server laeuft getrennt vom Voice-Stack, in einer von zwei Varianten mit derselben Schnittstelle: <strong>offizieller PyTorch-Server</strong> (<code>docker-compose.breeze.yml</code>, ~7,7 GB VRAM) oder <strong>Breeze-TTS-2.cpp</strong> (<code>docker-compose.breeze-cpp.yml</code> oder nativ, Q8_0 ~4 GB VRAM). Laeuft Breeze stattdessen ueber audio.cpp (Familie <code>breeze_tts</code>), diese Engine ausblenden.</p>
       <form class="grid" data-submit="saveTtsSettings">
+        <label class="full check"><input type="checkbox" name="breeze_enabled" ${data.breeze_enabled ? "checked" : ""}> Breeze-Engine anzeigen (in der Engine-Liste, beim Probehoeren, bei den Fillern und unter GPUs)</label>
         <label class="full"><span>Breeze-Server - Container-Name, IP:Port oder Domain (leer = Standard aus der .env: ${esc(data.breeze_url_default)})</span>
           <input name="breeze_url" list="breeze-url-suggestions" value="${esc(data.breeze_url)}" placeholder="${esc(data.breeze_url_default)}" autocomplete="off" spellcheck="false">
           <datalist id="breeze-url-suggestions">
@@ -331,6 +335,81 @@ views.tts = async () => {
     </section>
     <script type="application/json" id="tts-data">${JSON.stringify({ engines: data.engines, fallback: data.fallback_engine, contract: data.contract_engines })}</script>`;
 };
+
+/* audio.cpp (v1.21): ein Server, viele Modelle - angebunden wie LiteLLM.
+ * Jedes TTS-Modell steht oben als eigene Engine; hier nur Adresse, Karte,
+ * Stimmenwahl je Modell und Entladen. */
+function renderAudioCpp(info, gpus) {
+  const cards = gpus.length
+    ? gpus
+    : [0, 1].map((index) => ({ device: `cuda:${index}`, label: `GPU ${index}` }));
+  const deviceOptions = [
+    { device: "", label: "nicht angeben - XTTS bleibt immer geladen" },
+    ...cards,
+    { device: "cpu", label: "CPU" },
+  ].map((choice) =>
+    `<option value="${esc(choice.device)}" ${choice.device === info.device ? "selected" : ""}>${esc(choice.label)}</option>`
+  ).join("");
+
+  let status;
+  if (!info.configured) {
+    status = '<div class="notice">Noch keine Adresse eingetragen - unten den audio.cpp-Server angeben (Containername:Port im Netzwerk <code>ai-lab</code>, Standard-Port 8080).</div>';
+  } else if (!info.reachable) {
+    status = `<div class="notice error">audio.cpp unter <code>${esc(info.url_effective)}</code> nicht erreichbar: ${esc(info.detail)} Bis der Server laeuft, spricht XTTS.</div>`;
+  } else {
+    const tts = info.models.filter((m) => m.engine_id).length;
+    status = `<p><span class="badge ok">erreichbar</span> <code>${esc(info.url_effective)}</code>`
+      + `${info.backend ? ` &middot; Backend ${esc(info.backend)}` : ""}`
+      + ` &middot; ${info.models.length} Modell(e), davon ${tts} Sprachausgabe`
+      + ` &middot; WebUI-Verwaltung ${info.ui_management ? "an" : "aus"}</p>`;
+  }
+
+  const ttsModels = info.models.filter((m) => m.engine_id);
+  const others = info.models.filter((m) => !m.engine_id);
+  const voiceSelect = (model) => {
+    const voices = model.voice && !model.voices.includes(model.voice) ? [model.voice, ...model.voices] : model.voices;
+    const options = [`<option value="">Voice-Sample der Stimme klonen</option>`,
+      ...voices.map((v) => `<option value="${esc(v)}" ${v === model.voice ? "selected" : ""}>eingebaut: ${esc(v)}</option>`)];
+    return `<select data-action-change="setAudioCppVoice" data-model="${esc(model.id)}">${options.join("")}</select>`;
+  };
+  const rows = ttsModels.map((model) => `<tr>
+      <td><code>${esc(model.id)}</code></td>
+      <td>${esc(model.family)}${model.mode === "streaming" ? " <small>(Streaming)</small>" : ""}</td>
+      <td>${model.loaded ? '<span class="badge ok">geladen</span>' : '<span class="badge off">nicht geladen</span>'}</td>
+      <td>${voiceSelect(model)}</td>
+    </tr>`).join("");
+  const table = info.reachable ? `
+      <table>
+        <thead><tr><th>Modell</th><th>Familie</th><th>Speicher</th><th>Stimme</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="4" class="hint">audio.cpp listet kein Sprachmodell (task tts) - dort eins laden bzw. in die server.json eintragen.</td></tr>'}</tbody>
+      </table>
+      ${others.length ? `<p class="hint">Weitere Modelle auf dem Server (keine Sprachausgabe): ${others.map((m) => `<code>${esc(m.id)}</code> (${esc(m.task)})`).join(", ")}</p>` : ""}
+      <div class="actions-row">
+        <button type="button" class="small ghost" data-action="refreshView">Liste aktualisieren</button>
+        <button type="button" class="small ghost" data-action="unloadAudioCpp">Alle audio.cpp-Sprachmodelle entladen</button>
+      </div>` : "";
+
+  return `
+    <section class="block">
+      <h2>audio.cpp</h2>
+      <p class="hint">Ein Server fuer viele lokale Sprachmodelle (<a href="https://github.com/0xShug0/audio.cpp" target="_blank" rel="noopener">audio.cpp</a>), angebunden wie LiteLLM: Jedes Sprachmodell, das audio.cpp listet, steht oben als Engine "audio.cpp &middot; &lt;Modell&gt;" &ndash; aktivieren, probehoeren, fuer Filler nutzen. Neue Modelle in audio.cpp laden bzw. in dessen <code>server.json</code> eintragen, dann erscheinen sie hier. Ist audio.cpp nicht erreichbar oder laedt das Modell noch, spricht XTTS. Geklont wird aus dem Voice-Sample der Stimme samt Transkript; Modelle ohne Klonen sprechen mit einer eingebauten Stimme (Spalte "Stimme").</p>
+      ${status}
+      <form class="grid" data-submit="saveAudioCpp">
+        <label class="full"><span>Adresse &ndash; Containername:Port, IP:Port oder Domain (leer = Standard aus der .env${info.url_default ? `: ${esc(info.url_default)}` : ", dort nicht gesetzt"})</span>
+          <input name="audiocpp_url" list="audiocpp-url-suggestions" value="${esc(info.url)}" placeholder="${esc(info.url_default || "http://audiocpp:8080")}" autocomplete="off" spellcheck="false">
+          <datalist id="audiocpp-url-suggestions">
+            <option value="http://audiocpp:8080" label="Container 'audiocpp' im Netzwerk ai-lab"></option>
+            <option value="http://audiocpp-server:8080" label="Dienstname aus den audio.cpp-Compose-Beispielen"></option>
+            <option value="http://192.168.2.105:8080" label="audio.cpp nativ auf einem Rechner im LAN (IP anpassen)"></option>
+          </datalist>
+        </label>
+        <label>Karte von audio.cpp <select name="audiocpp_device">${deviceOptions}</select></label>
+        <p class="hint full">Nur angeben, wenn audio.cpp sich die Karte mit XTTS teilt und das VRAM knapp ist: Dann entlaedt "Aktivieren" eines audio.cpp-Modells XTTS (und andere Sprachausgaben) auf dieser Karte, und "Aktivieren" von XTTS entlaedt die audio.cpp-Modelle. Faellt audio.cpp danach aus, springt Piper ein und XTTS wird automatisch wieder geladen. Welche Karte audio.cpp nutzt, legt es selbst fest (<code>device</code> in der server.json bzw. <code>--device</code>).</p>
+        <div><button type="submit">Speichern</button></div>
+      </form>
+      ${table}
+    </section>`;
+}
 
 // ---- View: GPUs ------------------------------------------------------------------------
 
@@ -385,7 +464,13 @@ views.gpus = async () => {
     }
 
     let running = "&ndash;";
-    if (service.assigned === "off") {
+    if (service.audiocpp) {
+      // audio.cpp (v1.21): Karte laut Angabe unter Sprachausgabe, dazu was geladen ist.
+      running = service.reachable === false
+        ? `<span class="badge warn">${esc(service.error || "nicht erreichbar")}</span>`
+        : `${service.effective ? `<code>${esc(service.effective)}</code> ` : ""}`
+          + `<span class="badge ${service.loaded ? "ok" : "off"}">${esc(service.detail || "")}</span>`;
+    } else if (service.assigned === "off") {
       running = '<span class="badge off">aus &ndash; kein Modell geladen</span>';
     } else if (service.effective) {
       const deviates = service.assigned && service.effective !== service.assigned;
@@ -564,10 +649,10 @@ views.voices = async () => {
 
   return `
     <h1>Stimmen</h1>
-    <p class="hint">Jede Stimme braucht ein WAV-Sample (~6-30s sauberes, deutsches Sprechmaterial) fuer das Voice-Cloning. Breeze TTS 2 braucht zusaetzlich das <strong>exakte Transkript</strong> des Samples: Es wird beim Upload per Whisper vorgeschlagen und laesst sich unter "Bearbeiten" korrigieren (Wiederholungen und Versprecher mit aufschreiben). Nach dem Austausch eines Samples: Filler neu generieren.</p>
+    <p class="hint">Jede Stimme braucht ein WAV-Sample (~6-30s sauberes, deutsches Sprechmaterial) fuer das Voice-Cloning. Klonende Engines wie Qwen3-TTS, Breeze und die meisten audio.cpp-Modelle brauchen bzw. nutzen zusaetzlich das <strong>exakte Transkript</strong> des Samples: Es wird beim Upload per Whisper vorgeschlagen und laesst sich unter "Bearbeiten" korrigieren (Wiederholungen und Versprecher mit aufschreiben). Nach dem Austausch eines Samples: Filler neu generieren.</p>
     <section class="block">
       <table>
-        <thead><tr><th>ID</th><th>Name</th><th>Sprache</th><th>Status</th><th>Transkript (Breeze)</th><th></th></tr></thead>
+        <thead><tr><th>ID</th><th>Name</th><th>Sprache</th><th>Status</th><th>Transkript</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </section>
@@ -1004,6 +1089,12 @@ const formActions = {
   saveTtsSettings: (form) => api.put("/v1/admin/tts/settings", {
     breeze_url: form.breeze_url.value,
     breeze_instruction: form.breeze_instruction.value,
+    breeze_enabled: form.breeze_enabled.checked,
+  }),
+
+  saveAudioCpp: (form) => api.put("/v1/admin/tts/settings", {
+    audiocpp_url: form.audiocpp_url.value,
+    audiocpp_device: form.audiocpp_device.value,
   }),
 
   createTrigger: (form) => api.post("/v1/admin/triggers", {
@@ -1093,6 +1184,25 @@ const buttonActions = {
     if (messages.length) alert(messages.join("\n\n"));
   },
 
+  /* Eingebaute Stimme eines audio.cpp-Modells ("" = aus dem Sample klonen). */
+  setAudioCppVoice: (data, element) => api.put("/v1/admin/tts/audiocpp/voice", {
+    model: data.model,
+    voice: element.value,
+  }),
+
+  async unloadAudioCpp() {
+    if (!confirm("Alle Sprachmodelle auf audio.cpp entladen?\n\nDas VRAM wird frei; audio.cpp laedt "
+      + "ein Modell beim naechsten Bedarf selbst wieder. Ist eins davon die Hauptstimme, spricht "
+      + "bis dahin die Rueckfallebene (XTTS bzw. Piper).")) return;
+    const result = await api.post("/v1/admin/tts/audiocpp/unload");
+    alert(result.unloaded.length
+      ? `Entladen: ${result.unloaded.join(", ")}`
+      : "Es war kein Sprachmodell geladen.");
+  },
+
+  // Neu zeichnen = Liste frisch von audio.cpp holen (render() folgt der Aktion).
+  refreshView() {},
+
   editContractEngine(data) {
     const { contract } = JSON.parse(document.getElementById("tts-data").textContent);
     const engine = contract.find((e) => e.id === data.id);
@@ -1167,7 +1277,7 @@ const buttonActions = {
         const result = await api.request("POST", `/v1/admin/voices/${data.id}/sample`, body, true);
         if (result.transcript_error) {
           alert("Sample gespeichert, aber kein Transkript-Vorschlag moeglich: "
-            + `${result.transcript_error}\nFuer Breeze bitte unter "Bearbeiten" von Hand eintragen.`);
+            + `${result.transcript_error}\nFuer klonende Engines (Qwen3, Breeze, audio.cpp) bitte unter "Bearbeiten" von Hand eintragen.`);
         }
         render();
       } catch (err) {

@@ -21,6 +21,9 @@ BREEZE_SAMPLE_RATE = 24000
 BREEZE_INSTRUCTION_SETTING = "breeze_instruction"
 # ... und der Breeze-Server-Adresse (v1.18). Leer = BREEZE_BASE_URL aus der .env.
 BREEZE_URL_SETTING = "breeze_base_url"
+# Breeze-Engine im Panel ausgeblendet ("0", v1.21) - z. B. weil Breeze jetzt
+# ueber audio.cpp laeuft und der eigene Container gestoppt ist.
+BREEZE_ENABLED_SETTING = "breeze_enabled"
 
 
 def breeze_base_url() -> str:
@@ -28,6 +31,10 @@ def breeze_base_url() -> str:
     Varianten - der offizielle PyTorch-Server und Breeze-TTS-2.cpp - sprechen
     dieselbe Schnittstelle, der Orchestrator muss nicht wissen, welche laeuft."""
     return (repos.get_setting(BREEZE_URL_SETTING) or settings.breeze_base_url).rstrip("/")
+
+
+def breeze_enabled() -> bool:
+    return repos.get_setting(BREEZE_ENABLED_SETTING) != "0"
 
 
 def normalize_base_url(value: str) -> str:
@@ -168,7 +175,7 @@ class BreezeClient:
         voice = repos.get_voice(voice_id) or {}
         transcript = (voice.get("sample_text") or "").strip()
         if sample.exists() and transcript:
-            files = {"ref_audio": (sample.name, _reference_wav(sample.read_bytes()), "audio/wav")}
+            files = {"ref_audio": (sample.name, reference_wav(sample.read_bytes()), "audio/wav")}
             data["ref_text"] = transcript
         instruction = (repos.get_setting(BREEZE_INSTRUCTION_SETTING) or "").strip()
         if instruction:
@@ -237,7 +244,7 @@ class ContractClient:
         files = None
         sample = Path(settings.voices_dir) / f"{voice_id}.wav"
         if sample.exists():
-            files = {"ref_audio": (sample.name, _reference_wav(sample.read_bytes()), "audio/wav")}
+            files = {"ref_audio": (sample.name, reference_wav(sample.read_bytes()), "audio/wav")}
             transcript = (voice.get("sample_text") or "").strip()
             if transcript:
                 data["ref_text"] = transcript
@@ -254,8 +261,9 @@ def _detail(body: bytes) -> str:
     return str(detail or text or "ohne Begruendung")[:400]
 
 
-def _reference_wav(raw: bytes) -> bytes:
-    """Voice-Sample -> mono PCM16 mit 24 kHz fuer Breeze.
+def reference_wav(raw: bytes) -> bytes:
+    """Voice-Sample -> mono PCM16 mit 24 kHz fuer Breeze, Vertrags-Engines
+    und audio.cpp.
 
     Der Upload nimmt jedes PCM-WAV an (XTTS liest alles), der WAV-Leser von
     Breeze-TTS-2.cpp kennt aber nur 16/32 Bit: Ein 24-Bit-Sample kaeme dort
@@ -266,7 +274,7 @@ def _reference_wav(raw: bytes) -> bytes:
     try:
         pcm, rate = wav_to_pcm16(raw)
     except Exception as exc:
-        logger.warning("Voice-Sample fuer Breeze nicht umwandelbar, sende Original: %s", exc)
+        logger.warning("Voice-Sample nicht umwandelbar, sende Original: %s", exc)
         return raw
     return pcm16_to_wav(resample_pcm16(pcm, rate, BREEZE_SAMPLE_RATE), BREEZE_SAMPLE_RATE)
 

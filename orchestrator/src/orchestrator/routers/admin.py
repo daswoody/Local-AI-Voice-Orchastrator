@@ -18,13 +18,15 @@ from ..audio import pcm16_to_wav, wav_to_pcm16
 from ..config import settings
 from ..schemas import CardLayout
 from ..security import hash_password, require_admin
-from ..services import filler_service, gpu_manager, tts_engines
+from ..services import audiocpp, filler_service, gpu_manager, tts_engines
 from ..services.litellm_client import litellm_client
 from ..services.stt_client import stt_client
 from ..services.tts_client import (
+    BREEZE_ENABLED_SETTING,
     BREEZE_INSTRUCTION_SETTING,
     BREEZE_URL_SETTING,
     breeze_base_url,
+    breeze_enabled,
     normalize_base_url,
 )
 
@@ -332,9 +334,11 @@ class FillerPayload(BaseModel):
 
 
 @router.get("/tts-engines")
-def list_tts_engines() -> list[dict]:
+async def list_tts_engines() -> list[dict]:
     """Engines, die Filler-Audio erzeugen koennen - Grundlage fuer das
-    Dropdown im Filler-Formular."""
+    Dropdown im Filler-Formular. Die audio.cpp-Modelle dabei frisch holen
+    (best effort, der Server darf fehlen)."""
+    await tts_engines.audiocpp_server()
     return tts_engines.public_engines()
 
 
@@ -449,18 +453,40 @@ class TtsSettingsPayload(BaseModel):
     # Adresse des Breeze-Servers (v1.18): Container-Name, IP:Port oder
     # Domain - leer = BREEZE_BASE_URL aus der .env.
     breeze_url: str | None = None
+    # Breeze-Engine anzeigen (v1.21) - aus, wenn Breeze ueber audio.cpp laeuft.
+    breeze_enabled: bool | None = None
+    # audio.cpp (v1.21): Adresse (leer = AUDIOCPP_BASE_URL aus der .env) und
+    # die Karte, auf der es rechnet ("" = nicht angegeben).
+    audiocpp_url: str | None = None
+    audiocpp_device: str | None = Field(default=None, pattern=r"^(|cpu|cuda(:\d+)?)$")
+
+
+class AudioCppVoicePayload(BaseModel):
+    model: str = Field(min_length=1, max_length=200)
+    # "" = aus dem Voice-Sample der Stimme klonen, sonst eine eingebaute Stimme.
+    voice: str = Field(default="", max_length=200)
 
 
 @router.get("/tts")
 async def tts_overview() -> dict:
+    # audio.cpp einmal abfragen - Engine-Liste und audio.cpp-Bereich nutzen
+    # denselben Stand.
+    server = await tts_engines.audiocpp_server()
+    engines = await tts_engines.overview(server)
     return {
         "active_engine": tts_engines.active_engine(),
         # Wer einspringt, wenn die aktive Engine ausfaellt (XTTS, oder Piper,
         # solange XTTS ausgeschaltet ist) - fuer die Rueckfrage im Panel.
         "fallback_engine": tts_engines.fallback_engine(),
-        "engines": await tts_engines.overview(),
+        "engines": engines,
         # Engines nach dem Engine-Vertrag (v1.20) - im Panel verwaltbar.
         "contract_engines": repos.list_contract_engines(),
+        # audio.cpp (v1.21): ein Server, viele Modelle - wie LiteLLM.
+        "audiocpp": await tts_engines.audiocpp_panel(server),
+        # Fuer die Auswahl "Karte von audio.cpp".
+        "gpus": [{"device": gpu["device"], "label": f"GPU {gpu['index']} - {gpu['name']}"}
+                 for gpu in gpu_manager.list_gpus().get("gpus", [])],
+        "breeze_enabled": breeze_enabled(),
         "breeze_instruction": repos.get_setting(BREEZE_INSTRUCTION_SETTING) or "",
         "breeze_url": repos.get_setting(BREEZE_URL_SETTING) or "",
         "breeze_url_default": settings.breeze_base_url.rstrip("/"),
@@ -552,19 +578,68 @@ async def preview_tts(payload: TtsPreviewPayload) -> Response:
 
 @router.put("/tts/settings")
 def save_tts_settings(payload: TtsSettingsPayload) -> dict:
-    if payload.breeze_url is not None:
-        try:
-            url = normalize_base_url(payload.breeze_url)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=f"Breeze-Adresse ungueltig: {exc}")
-        repos.set_setting(BREEZE_URL_SETTING, url)
+    # Erst alles pruefen, dann speichern - ein Fehler soll nichts halb setzen.
+    breeze_url = audiocpp_url = None
+    try:
+        if payload.breeze_url is not None:
+            breeze_url = normalize_base_url(payload.breeze_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Breeze-Adresse ungueltig: {exc}")
+    try:
+        if payload.audiocpp_url is not None:
+            audiocpp_url = normalize_base_url(payload.audiocpp_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"audio.cpp-Adresse ungueltig: {exc}")
+    if payload.breeze_enabled is False and tts_engines.active_engine() == "breeze":
+        raise HTTPException(status_code=409, detail=(
+            "Breeze ist die aktive Hauptstimme - erst eine andere Engine aktivieren, dann ausblenden."))
+    if breeze_url is not None:
+        repos.set_setting(BREEZE_URL_SETTING, breeze_url)
     if payload.breeze_instruction is not None:
         repos.set_setting(BREEZE_INSTRUCTION_SETTING, payload.breeze_instruction.strip())
+    if payload.breeze_enabled is not None:
+        repos.set_setting(BREEZE_ENABLED_SETTING, "1" if payload.breeze_enabled else "0")
+    if audiocpp_url is not None:
+        before = audiocpp.base_url()
+        repos.set_setting(audiocpp.URL_SETTING, audiocpp_url)
+        if audiocpp.base_url() != before:
+            # Anderer Server: dessen Modelle zeigt das Panel beim naechsten
+            # Oeffnen - die alten sollen nicht als Engines stehen bleiben.
+            audiocpp.forget_models()
+    if payload.audiocpp_device is not None:
+        repos.set_setting(audiocpp.DEVICE_SETTING, payload.audiocpp_device)
     return {
+        "breeze_enabled": breeze_enabled(),
         "breeze_instruction": repos.get_setting(BREEZE_INSTRUCTION_SETTING) or "",
         "breeze_url": repos.get_setting(BREEZE_URL_SETTING) or "",
         "breeze_url_effective": breeze_base_url(),
+        "audiocpp_url": repos.get_setting(audiocpp.URL_SETTING) or "",
+        "audiocpp_url_effective": audiocpp.base_url(),
+        "audiocpp_device": audiocpp.device(),
     }
+
+
+@router.put("/tts/audiocpp/voice")
+def save_audiocpp_voice(payload: AudioCppVoicePayload) -> dict:
+    """Eingebaute Stimme fuer ein audio.cpp-Modell waehlen ("" = aus dem
+    Voice-Sample der jeweiligen Stimme klonen)."""
+    audiocpp.set_voice_choice(payload.model, payload.voice.strip())
+    return {"model": payload.model, "voice": audiocpp.voice_choices().get(payload.model, "")}
+
+
+@router.post("/tts/audiocpp/unload")
+async def unload_audiocpp_models() -> dict:
+    """Alle TTS-Modelle auf audio.cpp entladen (VRAM frei). audio.cpp laedt
+    sie beim naechsten Bedarf selbst wieder - die aktive Hauptstimme also
+    beim naechsten Turn (bis dahin spricht die Rueckfallebene)."""
+    server = await tts_engines.audiocpp_server()
+    if not server["reachable"]:
+        raise HTTPException(status_code=502, detail=f"audio.cpp nicht erreichbar: {server['detail']}")
+    try:
+        unloaded = await audiocpp.unload(await tts_engines.audiocpp_loaded(server))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"audio.cpp: {str(exc)[:300]}")
+    return {"unloaded": unloaded}
 
 
 # ---- Karten-Layouts ---------------------------------------------------------------

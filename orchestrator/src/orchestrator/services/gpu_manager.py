@@ -26,13 +26,18 @@ import httpx
 
 from .. import repos
 from ..config import settings
-from .tts_client import breeze_base_url
+from . import audiocpp
+from .tts_client import breeze_base_url, breeze_enabled
 
 logger = logging.getLogger(__name__)
 
 _SETTING_PREFIX = "gpu_device_"
 # Karte vor dem Ausschalten - dorthin laedt "Aktivieren" die Engine wieder.
 _LAST_PREFIX = "gpu_last_device_"
+# "Automatisch aus" (v1.21): Aktivieren einer anderen Sprachausgabe hat den
+# Dienst entladen (gleiche Karte) - nicht der Admin. Faellt die neue
+# Hauptstimme aus, darf XTTS dann von selbst zurueckkommen.
+_AUTO_OFF_PREFIX = "gpu_auto_off_"
 # Zuweisung "ausgeschaltet" (v1.19): Der Dienst entlaedt sein Modell und gibt
 # VRAM/RAM frei. Der Container laeuft weiter - ihn zu stoppen, hiesse wieder
 # Docker-Socket (siehe oben).
@@ -105,8 +110,10 @@ def contract_service(engine_id: str) -> str:
 def services() -> dict[str, dict]:
     """Feste Dienste + Engines nach dem Engine-Vertrag (Datenbank): Die
     koennen alle Karte wechseln und ganz aus - ihr Modell laeuft in einem
-    eigenen Prozess, "Aus" beendet ihn."""
-    result = dict(SERVICES)
+    eigenen Prozess, "Aus" beendet ihn. Dazu audio.cpp (v1.21) als
+    Info-Zeile: Seine Karte legt es selbst fest."""
+    result = {name: spec for name, spec in SERVICES.items()
+              if name != "tts-breeze" or breeze_enabled()}
     for row in repos.list_contract_engines():
         url = row["url"].rstrip("/")
         result[contract_service(row["id"])] = {
@@ -117,6 +124,23 @@ def services() -> dict[str, dict]:
             "note": ("Engine nach dem Engine-Vertrag: 'Aus' beendet ihren Modell-Prozess, das VRAM "
                      "ist danach komplett frei. 'Aktivieren' unter Sprachausgabe laedt sie auf ihre "
                      "Karte und entlaedt andere Sprachausgaben auf derselben Karte."),
+        }
+    if audiocpp.base_url():
+        card = audiocpp.device()
+        result["tts-audiocpp"] = {
+            "label": "Sprachausgabe (audio.cpp)",
+            "base_url": audiocpp.base_url,
+            "controllable": False,
+            "control_hint": "per audio.cpp-Konfiguration",
+            "fixed_device": card or None,
+            "audiocpp": True,
+            "note": (
+                "Ein Server fuer viele TTS-Modelle. Die Karte legt audio.cpp selbst fest "
+                "(device in der server.json bzw. --device) - unter Sprachausgabe -> audio.cpp "
+                "angeben, dann entlaedt 'Aktivieren' andere Sprachausgaben auf dieser Karte. "
+                "Entladen: unter Sprachausgabe -> audio.cpp."
+                + ("" if card else " Karte: nicht angegeben.")
+            ),
         }
     return result
 
@@ -227,6 +251,20 @@ def store_assignment(name: str, device: str) -> None:
         if previous and previous != OFF:
             repos.set_setting(_LAST_PREFIX + name, previous)
     repos.set_setting(_SETTING_PREFIX + name, device)
+    # Jede neue Zuweisung ist eine bewusste - erst mark_auto_off macht
+    # daraus wieder "automatisch aus".
+    if repos.get_setting(_AUTO_OFF_PREFIX + name):
+        repos.set_setting(_AUTO_OFF_PREFIX + name, "")
+
+
+def mark_auto_off(name: str, engine_id: str) -> None:
+    """Dienst wurde fuer `engine_id` entladen (Aktivieren, gleiche Karte)."""
+    repos.set_setting(_AUTO_OFF_PREFIX + name, engine_id)
+
+
+def auto_off(name: str) -> bool:
+    """Aus, weil eine andere Sprachausgabe die Karte brauchte - nicht von Hand."""
+    return is_off(name) and bool(repos.get_setting(_AUTO_OFF_PREFIX + name))
 
 
 def last_device(name: str) -> str | None:
@@ -284,15 +322,31 @@ async def apply_device(name: str, device: str) -> dict:
     return status
 
 
+async def _audiocpp_row() -> dict:
+    """Was audio.cpp gerade geladen hat (fuer die Info-Zeile)."""
+    try:
+        data = await audiocpp.fetch_server()
+    except Exception:
+        return {"reachable": False, "error": "nicht erreichbar - Details unter Sprachausgabe -> audio.cpp"}
+    loaded = [m["id"] for m in data["models"] if m.get("task") == "tts" and m.get("loaded")]
+    return {"reachable": True, "loaded": bool(loaded),
+            "detail": f"geladen: {', '.join(loaded)}" if loaded else "kein TTS-Modell geladen"}
+
+
 async def overview() -> dict:
     """Alles, was das Panel braucht: Karten + Dienste nebeneinander."""
     gpu_info = list_gpus()
     names = controllable()
-    statuses = await asyncio.gather(*(service_status(name) for name in names), return_exceptions=True)
+    all_services = services()
+    if "tts-audiocpp" in all_services:
+        names = [*names, "tts-audiocpp"]
+    statuses = await asyncio.gather(
+        *(_audiocpp_row() if name == "tts-audiocpp" else service_status(name) for name in names),
+        return_exceptions=True)
     live = dict(zip(names, statuses))
 
     entries = []
-    for name, spec in services().items():
+    for name, spec in all_services.items():
         entry = {
             "name": name,
             "label": spec["label"],
@@ -306,6 +360,12 @@ async def overview() -> dict:
             "reachable": None,
         }
         status = live.get(name)
+        if spec.get("audiocpp"):
+            entry["audiocpp"] = True
+            if isinstance(status, dict):
+                entry.update(status)
+            entries.append(entry)
+            continue
         if isinstance(status, dict):
             entry["reachable"] = status.get("reachable", False)
             if status.get("reachable"):

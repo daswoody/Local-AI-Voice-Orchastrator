@@ -1,8 +1,9 @@
 """Fake-Backends fuer lokale Orchestrator-Tests ohne GPU/echte Infra.
 
-Startet EINEN Server (Port 9100), der LiteLLM, STT, Piper, XTTS und Breeze
-TTS 2 als Sub-Apps unter eigenen Pfad-Prefixen nachstellt. Damit laesst sich
-der komplette Voice-Loop (Mikro-Phase 1.11) inklusive TTS-Engine-Wechsel
+Startet EINEN Server (Port 9100), der LiteLLM, STT, Piper, XTTS, Breeze
+TTS 2, eine Engine nach dem Engine-Vertrag (Qwen3) und einen audio.cpp-Server
+(v1.21) als Sub-Apps unter eigenen Pfad-Prefixen nachstellt. Damit laesst
+sich der komplette Voice-Loop (Mikro-Phase 1.11) inklusive TTS-Engine-Wechsel
 (v1.17) auf jedem Rechner durchspielen:
 
     Terminal 1:  uv run python scripts/dev_fake_services.py
@@ -12,6 +13,7 @@ der komplette Voice-Loop (Mikro-Phase 1.11) inklusive TTS-Engine-Wechsel
                  XTTS_BASE_URL=http://127.0.0.1:9100/xtts \\
                  BREEZE_BASE_URL=http://127.0.0.1:9100/breeze \\
                  QWEN3_BASE_URL=http://127.0.0.1:9100/qwen3 \\
+                 AUDIOCPP_BASE_URL=http://127.0.0.1:9100/audiocpp \\
                  WEAVIATE_URL=http://127.0.0.1:9100/weaviate-gibtsnicht \\
                  uv run uvicorn orchestrator.main:app --port 8000
     Terminal 3:  uv run python scripts/manual_audio_ws_test.py
@@ -286,6 +288,90 @@ async def qwen3_synthesize(
                              headers={"X-Sample-Rate": "24000", "X-Sample-Format": "s16le"})
 
 
+# --- Fake audio.cpp (v1.21) -------------------------------------------------------
+# Gleiche Routen und Fehlerform wie audiocpp_server (app/server/runtime.cpp):
+# Modelle laden beim ersten Request (lazy), Fehler als {"error": {...}} mit
+# HTTP 500. qwen3-tts nimmt Sprachen nur beim Namen, kokoro kennt kein
+# reference_text - genau die Faelle, auf die der Client reagieren muss.
+audiocpp = FastAPI()
+_audiocpp_models = {
+    "qwen3-tts": {"family": "qwen3_tts", "task": "tts", "mode": "offline", "loaded": False, "rate": 24000},
+    "kokoro": {"family": "kokoro_tts", "task": "tts", "mode": "offline", "loaded": False, "rate": 24000,
+               "voices": ["af_heart", "bf_emma", "ff_siwis"]},
+    "voxcpm2-stream": {"family": "voxcpm2", "task": "tts", "mode": "streaming", "loaded": False, "rate": 48000},
+    "qwen3-asr": {"family": "qwen3_asr", "task": "asr", "mode": "offline", "loaded": False},
+}
+
+
+def _audiocpp_error(status: int, message: str, kind: str = "server_error") -> Response:
+    import json
+
+    return Response(json.dumps({"error": {"message": message, "type": kind}}), status_code=status,
+                    media_type="application/json")
+
+
+@audiocpp.get("/health")
+async def audiocpp_health() -> dict:
+    return {"status": "ok", "backend": "cuda", "models": len(_audiocpp_models), "ui": True,
+            "ui_management": False}
+
+
+@audiocpp.get("/v1/models")
+async def audiocpp_list() -> dict:
+    return {"object": "list", "data": [
+        {"id": model_id, "object": "model", "owned_by": "engine", "family": m["family"],
+         "task": m["task"], "mode": m["mode"], "loaded": m["loaded"], "path": f"/models/{model_id}"}
+        for model_id, m in _audiocpp_models.items()]}
+
+
+@audiocpp.get("/v1/audio/voices")
+async def audiocpp_voices(model: str = "") -> dict:
+    return {"voices": _audiocpp_models.get(model, {}).get("voices", [])}
+
+
+@audiocpp.post("/v1/audio/speech")
+async def audiocpp_speech(payload: dict) -> Response:
+    model_id = payload.get("model", "")
+    model = _audiocpp_models.get(model_id)
+    if model is None:
+        return _audiocpp_error(500, f"unknown model id: {model_id}")
+    if not model["loaded"]:
+        await asyncio.sleep(1.5)  # "laedt"
+        model["loaded"] = True
+    language = payload.get("language", "")
+    if model["family"] == "qwen3_tts" and language and language.lower() not in (
+            "auto", "german", "english", "chinese"):
+        return _audiocpp_error(500, f"Qwen3 talker unsupported language: {language}")
+    if model["family"] == "kokoro_tts" and "reference_text" in payload:
+        return _audiocpp_error(500, "unknown Kokoro request option: reference_text")
+    if model["family"] == "qwen3_tts" and "voice_ref" not in payload:
+        return _audiocpp_error(500, "Qwen3 TTS Base requires reference audio (voice_ref)")
+    # Klon = tiefer, eingebaute Stimme = hoeher; Laenge grob wie gesprochen.
+    freq = 220 if "voice_ref" in payload else 330
+    rate = model["rate"]
+    await asyncio.sleep(0.2)
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(rate)
+        wav.writeframes(_sine_pcm16(0.2 + len(payload.get("input", "")) / 14, rate, freq=freq))
+    return Response(buffer.getvalue(), media_type="audio/wav")
+
+
+@audiocpp.post("/v1/tasks/unload_models")
+async def audiocpp_unload(payload: dict) -> dict:
+    unloaded, not_found = [], []
+    for model_id in payload.get("model_ids", []):
+        model = _audiocpp_models.get(model_id)
+        if model is None:
+            not_found.append(model_id)
+        elif model["loaded"]:
+            model["loaded"] = False
+            unloaded.append(model_id)
+    return {"unloaded": unloaded, "not_found": not_found}
+
+
 app = FastAPI(title="Heim-AI Fake-Backends")
 app.mount("/llm", llm)
 app.mount("/stt", stt)
@@ -293,6 +379,7 @@ app.mount("/piper", piper)
 app.mount("/xtts", xtts)
 app.mount("/breeze", breeze)
 app.mount("/qwen3", qwen3)
+app.mount("/audiocpp", audiocpp)
 
 
 if __name__ == "__main__":

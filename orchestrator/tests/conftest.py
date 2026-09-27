@@ -7,7 +7,7 @@ from orchestrator.config import settings
 from orchestrator.db import init_db
 from orchestrator.main import app
 from orchestrator.services import mcp_gateway as mcp_gateway_module
-from orchestrator.services import tts_engines
+from orchestrator.services import audiocpp, tts_engines
 from orchestrator.services.stt_client import stt_client
 
 
@@ -21,6 +21,14 @@ def temp_environment(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "filler_cache_dir", str(tmp_path / "filler-cache"))
     # Steckbriefe der Vertrags-Engines (v1.20) nicht zwischen Tests teilen.
     monkeypatch.setattr(tts_engines, "_INFO", {})
+    # audio.cpp (v1.21): Lade-Aufgaben, gelernte Ablehnungen, Sample-Cache.
+    monkeypatch.setattr(audiocpp, "_warmups", {})
+    monkeypatch.setattr(audiocpp, "_warm_up_errors", {})
+    monkeypatch.setattr(audiocpp, "_dropped", {})
+    monkeypatch.setattr(audiocpp, "_references", {})
+    monkeypatch.setattr(tts_engines, "_revival", None)
+    monkeypatch.setattr(tts_engines, "_revival_failed_at", 0.0)
+    monkeypatch.setattr(settings, "audiocpp_base_url", "")
     monkeypatch.setattr(
         mcp_gateway_module.mcp_gateway, "list_openai_tools", AsyncMock(return_value=[])
     )

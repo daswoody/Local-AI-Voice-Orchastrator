@@ -6,7 +6,10 @@ Die Nachbar-Services der Voice-Pipeline liegen im selben Repo:
 `../tts-xtts` (1.10, Hauptstimme), `../tts-breeze` (v1.17, Test-Engine
 Breeze TTS 2, eigener Deploy), `../tts-engine-kit` (v1.20, gemeinsamer
 Engine-Vertrag fuer weitere Sprachausgaben) und `../tts-qwen3` (v1.20,
-Qwen3-TTS, erste Engine nach diesem Vertrag, eigener Deploy).
+Qwen3-TTS, erste Engine nach diesem Vertrag, eigener Deploy). Seit v1.21
+laesst sich ausserdem ein [audio.cpp](https://github.com/0xShug0/audio.cpp)-Server
+anbinden - ein Container fuer viele Sprachmodelle, siehe
+[audio.cpp anschliessen](#audiocpp-anschliessen-v121).
 
 ## Admin-Panel (/admin)
 
@@ -18,12 +21,12 @@ aus `ADMIN_USERNAME`/`ADMIN_PASSWORD` in die leere DB geschrieben.
 | Bereich | Funktion |
 |---|---|
 | Modelle | In LiteLLM registrierte Modelle anzeigen und das aktive Modell setzen (LM Studio laedt per JIT beim ersten Request, Entladen per Idle-TTL) |
-| Sprachausgabe | TTS-Engine der gesprochenen Antworten waehlen (XTTS / Piper / Breeze TTS 2 / Qwen3-TTS und jede weitere Engine nach dem Engine-Vertrag) mit Live-Status; Aktivieren laedt die Engine und entlaedt andere Sprachausgaben auf derselben Karte; Probehoeren pro Engine + Stimme mit Latenzmessung (Vergleich auf der echten Hardware); Vertrags-Engines per ID + Adresse eintragen; optionale Breeze-Sprechanweisung |
+| Sprachausgabe | TTS-Engine der gesprochenen Antworten waehlen (XTTS / Piper / Breeze TTS 2 / Qwen3-TTS, jede weitere Engine nach dem Engine-Vertrag und jedes Sprachmodell eines audio.cpp-Servers) mit Live-Status; Aktivieren laedt die Engine und entlaedt andere Sprachausgaben auf derselben Karte; Probehoeren pro Engine + Stimme mit Latenzmessung (Vergleich auf der echten Hardware); audio.cpp-Adresse, -Karte und eingebaute Stimme je Modell; Vertrags-Engines per ID + Adresse eintragen; Breeze ausblenden, optionale Breeze-Sprechanweisung |
 | GPUs | Karten mit Name, Compute-Capability und live belegtem VRAM; pro Dienst die Karte waehlen (CPU / GPU 0 / GPU 1), XTTS und Vertrags-Engines (z. B. Qwen3) auch ganz ausschalten ("Aus"). STT, XTTS und Vertrags-Engines laden ihr Modell dabei zur Laufzeit neu - kein Container-Neustart. Piper ist CPU-only, LM Studio laeuft auf dem Host und wird dort eingestellt (4.2) |
 | Charakter | Globaler System-Prompt; pro Nutzer ueberschreibbar (Nutzer-Formular) |
 | Nutzer | Anlegen/Bearbeiten/Loeschen, Tier 1-3, Standard-Stimme, Charakter-Override |
-| Stimmen | Anlegen + WAV-Sample-Upload (landet im XTTS-Voices-Volume, kein docker cp mehr); Transkript des Samples (fuer Breeze und Qwen3), beim Upload per Whisper vorgeschlagen und editierbar |
-| Filler & Trigger | Eigene Trigger (Nachdenken/Suche/Tool inkl. Tool-Muster wie `Calendar-*`), Filler mit Titel+Text, Engine pro Filler (XTTS = Nutzerstimme, Piper = feste Stimme/robust, Breeze/Qwen3 = Test), "Alle generieren" rendert vor, pro Stimme Play-Button zum Probehoeren und &#8635; zum Neu-Generieren nur dieser Stimme, Filter-Chips nach Trigger |
+| Stimmen | Anlegen + WAV-Sample-Upload (landet im XTTS-Voices-Volume, kein docker cp mehr); Transkript des Samples (fuer klonende Engines wie Qwen3, Breeze und die audio.cpp-Modelle), beim Upload per Whisper vorgeschlagen und editierbar |
+| Filler & Trigger | Eigene Trigger (Nachdenken/Suche/Tool inkl. Tool-Muster wie `Calendar-*`), Filler mit Titel+Text, Engine pro Filler (XTTS = Nutzerstimme, Piper = feste Stimme/robust, Breeze/Qwen3/audio.cpp-Modelle = Test), "Alle generieren" rendert vor, pro Stimme Play-Button zum Probehoeren und &#8635; zum Neu-Generieren nur dieser Stimme, Filter-Chips nach Trigger |
 | Agenten | Spezial-Agenten (4.16) mit eigener ID, Beschreibung, System-Prompt und eigenem LiteLLM-Modell; erscheinen der Haupt-KI als Tool `agent-<id>` - z. B. Websuche/Coding an Cloud-Modelle delegieren. Reservierte ID `code-card`: schreibt automatisch die HTML-Layouts fuer Karten ohne passendes Template |
 | Karten | Layout-Templates (4.12) anlegen/bearbeiten/loeschen, Version zaehlt automatisch hoch; Format JSON (Layout-Baum) oder HTML (Fragment mit `{{data.*}}`-Platzhaltern, sandboxed gerendert) |
 
@@ -74,6 +77,11 @@ Karte festlegen: Unter Sprachausgabe **Aktivieren** laedt die Engine auf
 diese Karte und entlaedt dafuer die anderen Sprachausgaben auf derselben
 Karte (siehe unten).
 
+**audio.cpp (v1.21)** steht als Info-Zeile "Sprachausgabe (audio.cpp)" mit
+der Karte laut Angabe unter Sprachausgabe -> audio.cpp und den gerade
+geladenen Modellen. Umstellen laesst sich die Karte hier nicht: audio.cpp
+legt sie selbst fest (`device` in seiner `server.json` bzw. `--device`).
+
 Ablauf fuer die erste Stimme: Stimme anlegen -> Sample hochladen (6-30s
 sauberes Deutsch) -> unter "Filler & Trigger" bei jedem Filler "Audio
 generieren" klicken. Ab dann spielt der Orchestrator Filler in der
@@ -108,6 +116,7 @@ Die Wahl greift ab dem naechsten Sprach-Turn, ohne Neustart.
 | Piper | eine feste deutsche Stimme | CPU | robuster Notbetrieb, z. B. wenn die GPUs fuer einen LLM-Test gebraucht werden |
 | Breeze TTS 2 | klont aus Sample **+ exaktem Transkript**, sonst eingebaute Stimme | ~7,7 GB (PyTorch) bzw. ~4 GB (Breeze-TTS-2.cpp) | Test-Engine (eigener Server, s. u.) |
 | Qwen3-TTS (v1.20) | klont aus Sample, mit exaktem Transkript am aehnlichsten; 10 Sprachen inkl. Deutsch | ~5 GB (1.7B) bzw. ~2,5 GB (0.6B) | Test-Engine nach dem Engine-Vertrag (eigener Deploy, s. u.) |
+| audio.cpp · &lt;Modell&gt; (v1.21) | je nach Modell: klont aus Sample + Transkript oder eingebaute Stimme | je nach Modell, GGUF (Q8 spart VRAM) | viele Modelle ueber EINEN Server testen - Qwen3-TTS und Breeze gibt es dort auch (s. u.) |
 
 Wie es funktioniert:
 
@@ -134,14 +143,17 @@ Wie es funktioniert:
   Rueckfallebene. Zurueck zu XTTS: XTTS aktivieren - dann wird z. B. Qwen3
   entladen und XTTS wieder eingeschaltet.
 - **Sicherheitsnetz:** Faellt eine andere Engine als XTTS aus, bevor Audio
-  geflossen ist (Container gestoppt, Modell laedt noch, belegt), spricht XTTS
-  die Antwort - bzw. Piper, solange XTTS unter GPUs ausgeschaltet ist (also
-  auch, nachdem das Aktivieren einer anderen Engine XTTS entladen hat). Nach
-  dem ersten Chunk wird nicht mehr gewechselt (sonst doppeltes Audio). Im
-  Live-Gespraech wartet der Orchestrator nie auf das Laden einer
-  Vertrags-Engine: Ist ihr Modell nicht geladen (z. B. nach einem
-  Container-Neustart), stoesst der Turn das Laden an und die Rueckfallebene
-  spricht, bis die Engine bereit ist.
+  geflossen ist (Server/Container gestoppt, Modell laedt noch, belegt),
+  spricht XTTS die Antwort - bzw. Piper, solange XTTS unter GPUs
+  ausgeschaltet ist. Hatte erst das Aktivieren der ausgefallenen Engine XTTS
+  entladen (gleiche Karte) und ist deren Server jetzt ganz weg, laedt der
+  Orchestrator XTTS von selbst wieder (v1.21): Piper ueberbrueckt die
+  Sekunden bis dahin, danach spricht wieder XTTS. Von Hand ausgeschaltetes
+  XTTS bleibt aus. Nach dem ersten Chunk wird nicht mehr gewechselt (sonst
+  doppeltes Audio). Im Live-Gespraech wartet der Orchestrator nie auf das
+  Laden einer Vertrags-Engine oder eines audio.cpp-Modells: Ist das Modell
+  nicht geladen (z. B. nach einem Neustart), stoesst der Turn das Laden an
+  und die Rueckfallebene spricht, bis es bereit ist.
 - **Probehoeren & vergleichen:** Testsatz + Stimme waehlen, "Anhoeren" -
   ohne Fallback, damit du wirklich die gewaehlte Engine hoerst. Das Panel
   zeigt die Zeit bis zur ersten Sekunde Audio, die Gesamtdauer und den
@@ -154,7 +166,151 @@ Wie es funktioniert:
 - **Filler** behalten ihre eigene Engine (Filler & Trigger). Fuer eine
   einheitliche Stimme dort dieselbe Engine waehlen und neu generieren.
 
+### audio.cpp anschliessen (v1.21)
+
+[audio.cpp](https://github.com/0xShug0/audio.cpp) ist ein Server fuer viele
+lokale Audio-Modelle (ueber 80 Familien, darunter Qwen3-TTS, Breeze TTS 2,
+VoxCPM2, OmniVoice, Chatterbox, CosyVoice3, FireRedTTS3, PocketTTS, Kokoro) -
+**ein** Container statt eines Containers pro Modell. Der Orchestrator bindet
+ihn an wie LiteLLM: Er fragt die Modell-Liste ab (`GET /v1/models`) und macht
+jedes Sprachmodell (`task: tts`) zu einer Engine **"audio.cpp &middot;
+&lt;Modell-ID&gt;"** - mit Status, Aktivieren, Probehoeren und Fillern wie
+jede andere Engine. Neue Modelle in audio.cpp bereitstellen, Panel oeffnen,
+fertig. Ist audio.cpp nicht erreichbar, spricht XTTS.
+
+#### Einrichten
+
+1. audio.cpp muss im Netzwerk `ai-lab` haengen (Containername und Port
+   merken, Standard-Port 8080). Pruefen: `docker network inspect ai-lab`
+   listet den Container.
+2. Admin-Panel -> **Sprachausgabe -> audio.cpp**: Adresse eintragen, z. B.
+   `http://audiocpp:8080` (Containername:Port; IP:Port geht auch) ->
+   Speichern. Danach steht dort "erreichbar", das Backend und die Modelle,
+   und die Sprachmodelle erscheinen oben in der Engine-Tabelle.
+   (`AUDIOCPP_BASE_URL` in der .env waere nur der Standard fuer ein leeres
+   Feld.)
+3. **Modelle bereitstellen** - zwei Wege:
+   - *In der `server.json` von audio.cpp eintragen (empfohlen):* Die
+     Modelle sind dann immer gelistet, auch nach einem Neustart von
+     audio.cpp. Pfade so, wie der Model-Manager bzw. die WebUI die Pakete
+     ablegt (im Container unter `/app/models`):
+
+     ```json
+     {
+       "host": "0.0.0.0",
+       "port": 8080,
+       "backend": "cuda",
+       "device": 0,
+       "lazy_load": true,
+       "max_loaded_models": 1,
+       "models": [
+         {"id": "qwen3-tts", "family": "qwen3_tts", "task": "tts", "mode": "offline",
+          "path": "/app/models/Qwen3-TTS-12Hz-1.7B-Base-GGUF/qwen3-tts-12hz-1.7b-base-q8_0_v2.gguf"},
+         {"id": "voxcpm2", "family": "voxcpm2", "task": "tts", "mode": "offline",
+          "path": "/app/models/VoxCPM2-GGUF/voxcpm2-q8_0.gguf"},
+         {"id": "pocket-tts-de", "family": "pocket_tts", "task": "tts", "mode": "offline",
+          "path": "/app/models/PocketTTS-GGUF/german/pocket-tts-german-q8_0.gguf"}
+       ]
+     }
+     ```
+
+     Gestartet mit `server --config /app/server.json --ui --ui-management`
+     bleiben WebUI und Downloads nutzbar.
+   - *In der audio.cpp-WebUI laden* (Start mit `--ui --ui-management`): Auch
+     so geladene Modelle erscheinen - aber nur bis zum naechsten Neustart von
+     audio.cpp.
+
+   `lazy_load: true` heisst: Ein Modell belegt erst VRAM, wenn es gebraucht
+   wird. `max_loaded_models: 1` haelt hoechstens eins im Speicher (der
+   Orchestrator entlaedt beim Wechsel ohnehin). **`idle_unload_ms` nicht
+   setzen** (oder sehr hoch): sonst entlaedt audio.cpp die Hauptstimme in
+   Gespraechspausen, und die erste Antwort danach spricht XTTS, waehrend das
+   Modell neu laedt.
+4. **Karte von audio.cpp** (gleicher Abschnitt) nur angeben, wenn audio.cpp
+   auf derselben Karte wie XTTS rechnet und das VRAM knapp ist. Dann entlaedt
+   "Aktivieren" eines audio.cpp-Modells XTTS (und andere Sprachausgaben) auf
+   dieser Karte, "Aktivieren" von XTTS entlaedt die audio.cpp-Modelle - und
+   faellt audio.cpp aus, laedt der Orchestrator XTTS automatisch wieder.
+   Ohne Angabe bleibt XTTS immer geladen und ist sofort die Rueckfallebene;
+   bei zwei Karten ist das die bequemste Aufteilung (audio.cpp per `device`
+   auf die andere Karte als XTTS).
+
+#### Testen und aktivieren
+
+1. **Stimme vorbereiten:** Sample mit 5-15 s sauberer Sprache und exaktem
+   Transkript (Stimmen -> "Transkribieren", Wort fuer Wort korrigieren).
+2. **Probehoeren:** Engine "audio.cpp &middot; qwen3-tts" (usw.), deine Stimme,
+   ein deutscher Satz - danach derselbe Satz mit XTTS. Das erste Mal laedt
+   audio.cpp das Modell (zaehlt in die Messung), also zweimal anhoeren.
+   audio.cpp-Modelle sprechen Satz fuer Satz; "erste Sekunde" ist hier die
+   Zeit bis zum ersten Satz.
+3. **Spalte "Stimme"** im audio.cpp-Abschnitt: Standard ist "Voice-Sample
+   der Stimme klonen". Modelle ohne Klonen (z. B. Kokoro, Supertonic,
+   MagpieTTS) bieten dort ihre eingebauten Stimmen an - die gewaehlte gilt
+   dann fuer alle Nutzer.
+4. **Aktivieren:** Andere audio.cpp-Modelle werden entladen, das gewaehlte
+   geladen (das Panel wartet bis zu ~2,5 Minuten). Zurueck: XTTS aktivieren -
+   das audio.cpp-Modell wird dabei pausiert (entladen).
+5. Optional die **Filler** auf das audio.cpp-Modell umstellen und neu
+   generieren.
+
+"Alle audio.cpp-Sprachmodelle entladen" gibt das VRAM sofort frei; audio.cpp
+laedt ein Modell beim naechsten Bedarf selbst wieder (die Hauptstimme also
+beim naechsten Turn, bis dahin spricht XTTS).
+
+#### Wie der Orchestrator mit audio.cpp spricht
+
+- **Satz fuer Satz** ueber `POST /v1/audio/speech` (WAV je Satz) - das erste
+  Audio kommt nach dem ersten Satz.
+- **Klonen:** Das Voice-Sample geht als mono 24 kHz (Base64, audio.cpp nimmt
+  bis 5 MiB, also Samples bis ~100 s) mit dem Transkript mit; audio.cpp
+  cacht die Referenz selbst. Die Sprache kommt aus der Stimme (Qwen3 bekommt
+  sie als Namen, z. B. "german", die anderen als ISO-Code "de").
+- **Lehnt ein Modell ein Feld ab** (z. B. kennt Kokoro kein Transkript, ein
+  Modell keine Sprachangabe), fragt der Orchestrator einmal ohne das Feld nach
+  und merkt es sich.
+- **Live-Turn:** Ist das Modell nicht geladen, spricht sofort XTTS und
+  audio.cpp laedt im Hintergrund. Ist audio.cpp mit etwas anderem beschaeftigt
+  (z. B. einer Filler-Generierung), wartet der erste Satz hoechstens 8 s, dann
+  spricht ebenfalls XTTS.
+- Container starten und stoppen macht weiter Coolify - der Orchestrator
+  bekommt bewusst keinen Docker-Zugriff (4.2); "pausieren" heisst Modell
+  entladen.
+
+#### Breeze und Qwen3 ueber audio.cpp statt eigener Container
+
+audio.cpp bringt `qwen3_tts` und `breeze_tts` als GGUF mit (Q8 spart VRAM).
+Wenn das klingt wie gewuenscht: die Container `heimai-tts-qwen3` und
+`heimai-tts-breeze(-cpp)` in Coolify stoppen, unter Sprachausgabe die
+Vertrags-Engine `qwen3` **Entfernen** und bei "Breeze TTS 2 (eigener Server)"
+den Haken **"Breeze-Engine anzeigen"** herausnehmen. Breeze bleibt dabei ein
+Englisch/Chinesisch-Modell; eine Sprechanweisung gibt man in der
+`server.json` mit: `"default_request_options": {"instruction": "Speak warmly."}`.
+
+**Probleme:**
+
+- *Server nicht gefunden* - Name oder Netzwerk stimmt nicht: Haengt audio.cpp
+  in `ai-lab`? Stimmt der Containername? Notfalls die IP:Port des Hosts nehmen.
+- *"Unter ... antwortet kein audio.cpp-Server"* - Port oder Pfad falsch (etwa
+  der WebUI-Port eines Proxys statt 8080).
+- *Modell fehlt in der Liste* - in der `server.json` eingetragen, mit
+  `"task": "tts"`? In der WebUI geladene Modelle verschwinden beim Neustart
+  von audio.cpp.
+- *"... auf der Karte von audio.cpp ist zu wenig Speicher frei"* bzw. CUDA
+  out of memory - die Karte ist voll: "Karte von audio.cpp" angeben (dann
+  macht Aktivieren Platz), ein Q8-Paket bzw. kleineres Modell nehmen oder
+  audio.cpp per `device` auf die andere Karte legen.
+- *Stimme klingt fremd* - Transkript pruefen, ruhigeres Sample; nicht jedes
+  Modell klont (Spalte "Stimme": eingebaute Stimme waehlen).
+- *"Verbindung mitten in der Synthese abgebrochen"* - audio.cpp ist
+  abgestuerzt: dessen Logs pruefen (Coolify bzw. `docker logs <Name>`), dazu
+  `nvidia-smi`.
+
 ### Breeze TTS 2 testen
+
+> Seit v1.21 laeuft Breeze auch ueber audio.cpp (Familie `breeze_tts`), siehe
+> [audio.cpp anschliessen](#audiocpp-anschliessen-v121) - dort steht auch, wie
+> man die eigene Breeze-Engine ausblendet.
 
 Vorab, weil es die Erwartung praegt: Laut [offiziellem Repo](https://github.com/breezeblue-ai/breeze-tts)
 spricht das Open-Weight-Modell **nur Englisch und Chinesisch** - deutsche
@@ -364,6 +520,10 @@ Echtzeitfaktor im Probehoeren; ist sie zu langsam, ist B die Alternative.
 
 ### Qwen3-TTS testen (Engine-Vertrag, v1.20)
 
+> Seit v1.21 geht Qwen3-TTS auch ohne eigenen Container ueber audio.cpp
+> (Familie `qwen3_tts`, GGUF), siehe
+> [audio.cpp anschliessen](#audiocpp-anschliessen-v121).
+
 [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) (Qwen-Team, Apache-2.0)
 klont eine Stimme aus einem kurzen Sample und spricht 10 Sprachen, darunter
 **Deutsch**. Genutzt werden die *Base*-Modelle:
@@ -496,9 +656,10 @@ Infrastruktur zeigt. Die Weaviate-Abfrage selbst scheitert dabei bewusst
 
 ### Kompletter Voice-Loop ohne GPU (Fake-Backends)
 
-`scripts/dev_fake_services.py` stellt LiteLLM, STT, Piper, XTTS und Breeze auf
-einem Port nach (inkl. simulierter LLM-Latenz, damit die Filler-Logik sichtbar
-wird; der Fake-Breeze klingt beim Voice-Cloning tiefer als mit eingebauter
+`scripts/dev_fake_services.py` stellt LiteLLM, STT, Piper, XTTS, Breeze,
+eine Vertrags-Engine (Qwen3) und einen audio.cpp-Server auf einem Port nach
+(inkl. simulierter LLM-Latenz, damit die Filler-Logik sichtbar wird; Fake-Breeze
+und Fake-audio.cpp klingen beim Voice-Cloning tiefer als mit eingebauter
 Stimme, so hoert man im Probehoeren, welcher Modus gegriffen hat):
 
 ```bash
@@ -511,6 +672,8 @@ STT_BASE_URL=http://127.0.0.1:9100/stt \
 PIPER_BASE_URL=http://127.0.0.1:9100/piper \
 XTTS_BASE_URL=http://127.0.0.1:9100/xtts \
 BREEZE_BASE_URL=http://127.0.0.1:9100/breeze \
+QWEN3_BASE_URL=http://127.0.0.1:9100/qwen3 \
+AUDIOCPP_BASE_URL=http://127.0.0.1:9100/audiocpp \
 WEAVIATE_URL=http://127.0.0.1:9100/weaviate-gibtsnicht \
 FILLER_DELAY_MS=800 \
 uv run uvicorn orchestrator.main:app --port 8000

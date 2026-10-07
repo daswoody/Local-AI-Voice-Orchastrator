@@ -287,7 +287,7 @@ views.tts = async () => {
     </section>
     <section class="block">
       <h2>Probehoeren &amp; vergleichen</h2>
-      <p class="hint">Spricht einen Testsatz mit genau dieser Engine und Stimme (ohne XTTS-Fallback) und misst die Zeit bis zur ersten Sekunde Audio sowie fuer die komplette Synthese. Echtzeitfaktor unter 1 = schneller als Echtzeit. audio.cpp-Modelle sprechen Satz fuer Satz &ndash; dort ist "erste Sekunde" die Zeit bis zum ersten Satz. Eine nicht geladene Engine wird dafuer geladen (das erste Mal zaehlt die Ladezeit mit, also zweimal messen), ohne andere zu entladen &ndash; ist die Karte voll, die Engine vorher aktivieren.</p>
+      <p class="hint">Spricht einen Testsatz mit genau dieser Engine und Stimme (ohne XTTS-Fallback) und misst die Zeit bis zum ersten Ton (erstes Audio-Stueck) sowie fuer die komplette Synthese. Echtzeitfaktor unter 1 = schneller als Echtzeit. audio.cpp-Modelle ohne Streaming sprechen Satz fuer Satz &ndash; dort kommt der erste Ton erst mit dem ersten fertigen Satz. Eine nicht geladene Engine wird dafuer geladen (das erste Mal zaehlt die Ladezeit mit, also zweimal messen), ohne andere zu entladen &ndash; ist die Karte voll, die Engine vorher aktivieren.</p>
       <form class="grid" data-submit="previewTts" id="tts-preview-form">
         <label>Engine <select name="engine">${engineOptions}</select></label>
         <label>Stimme <select name="voice_id">${voiceOptions}</select></label>
@@ -363,6 +363,7 @@ function renderAudioCpp(info, gpus) {
         <thead><tr><th>Modell</th><th>Familie</th><th>Speicher</th><th>Stimme</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="4" class="hint">audio.cpp listet kein Sprachmodell (task tts) - dort eins laden bzw. in die server.json eintragen.</td></tr>'}</tbody>
       </table>
+      <p class="hint">Streaming: Modelle mit <em>(Streaming)</em> geben ihr Audio schon waehrend der Berechnung weiter, alle anderen jeden Satz erst, wenn er fertig ist. Einschalten in der <code>server.json</code> von audio.cpp mit <code>"mode": "streaming"</code> am Modell &ndash; nur bei Familien, die es koennen (z. B. voxcpm2, omnivoice, pocket_tts, breeze_tts; qwen3_tts nicht). Die Samplerate nennt audio.cpp im Stream nicht &ndash; der Orchestrator lernt sie aus der ersten normalen Antwort des Modells (z. B. beim Aktivieren), bis dahin kommt der Satz am Stueck.</p>
       ${others.length ? `<p class="hint">Weitere Modelle auf dem Server (keine Sprachausgabe): ${others.map((m) => `<code>${esc(m.id)}</code> (${esc(m.task)})`).join(", ")}</p>` : ""}
       <div class="actions-row">
         <button type="button" class="small ghost" data-action="refreshView">Liste aktualisieren</button>
@@ -1049,7 +1050,7 @@ const formActions = {
       const total = Number(response.headers.get("X-TTS-Total-Ms"));
       const audio = Number(response.headers.get("X-Audio-Ms"));
       const rtf = audio ? (total / audio).toFixed(2) : "-";
-      result.textContent = `${form.engine.selectedOptions[0].textContent}: erste Sekunde Audio nach ${first} ms, `
+      result.textContent = `${form.engine.selectedOptions[0].textContent}: erster Ton nach ${first} ms, `
         + `komplette Synthese ${total} ms fuer ${(audio / 1000).toFixed(1)} s Audio (Echtzeitfaktor ${rtf}).`;
       await playBlob(await response.blob());
     } catch (err) {

@@ -53,6 +53,36 @@ def resample_pcm16(pcm: bytes, src_rate: int, dst_rate: int) -> bytes:
     return converted
 
 
+class Pcm16StreamConverter:
+    """Fortlaufender PCM16-Stream (mono/stereo) -> mono in der Zielrate.
+
+    ratecv mit Zustand: Jedes Stueck setzt dort fort, wo das letzte
+    aufgehoert hat. Einzeln umgerechnete Stuecke beginnen jedes Mal bei 0 und
+    knacken an jeder Grenze - bei einem Stream aus vielen kleinen Stuecken
+    hoerbar. Ein angefangenes Sample wartet aufs naechste Stueck."""
+
+    def __init__(self, src_rate: int, dst_rate: int, channels: int = 1) -> None:
+        if channels not in (1, 2):
+            raise ValueError(f"nur mono/stereo unterstuetzt, nicht {channels} Kanaele")
+        self.src_rate = src_rate
+        self.dst_rate = dst_rate
+        self.channels = channels
+        self._state = None
+        self._rest = b""
+
+    def convert(self, pcm: bytes) -> bytes:
+        pcm = self._rest + pcm
+        frame = 2 * self.channels
+        usable = len(pcm) - len(pcm) % frame
+        pcm, self._rest = pcm[:usable], pcm[usable:]
+        if self.channels == 2:
+            pcm = audioop.tomono(pcm, 2, 0.5, 0.5)
+        if self.src_rate == self.dst_rate:
+            return pcm
+        converted, self._state = audioop.ratecv(pcm, 2, 1, self.src_rate, self.dst_rate, self._state)
+        return converted
+
+
 def chunk_pcm(pcm: bytes, chunk_bytes: int = 48000) -> Iterator[bytes]:
     """Teilt PCM in Frames (Default 48000 Bytes = 1s bei 24 kHz PCM16).
     Chunk-Groesse muss gerade sein, sonst zerreisst es 16-Bit-Samples."""

@@ -1,8 +1,10 @@
 import asyncio
+import audioop
+import math
 from unittest.mock import AsyncMock
 
 from orchestrator import graph as graph_module
-from orchestrator.audio import pcm_to_b64
+from orchestrator.audio import b64_to_pcm, pcm_to_b64
 from orchestrator.config import settings
 from orchestrator.routers import stream as stream_module
 from orchestrator.services.tts_client import xtts_client
@@ -82,6 +84,31 @@ def test_audio_roundtrip(client, monkeypatch):
     # audio_end kommt nach dem letzten audio_chunk, done ist das letzte Frame
     assert types.index("audio_end") > types.index("audio_chunk")
     assert types[-1] == "done"
+
+
+def test_main_answer_at_another_rate_is_converted_without_seams(client, monkeypatch):
+    """Engines mit anderer Rate (z. B. audio.cpp-Modelle mit 48 kHz) werden
+    ueber den ganzen Stream mit Zustand umgerechnet (v1.23). Einzeln
+    umgerechnete Chunks knackten an jeder Grenze und wuchsen je um ein
+    Sample - bei einem Stream aus vielen kleinen Stuecken hoerbar."""
+    _patch_pipeline(monkeypatch)
+    monkeypatch.setattr(settings, "filler_enabled", False)
+    source = b"".join(int(8000 * math.sin(i / 8)).to_bytes(2, "little", signed=True) for i in range(48000))
+
+    async def stream_48k(text, voice_id, language=None):
+        for offset in range(0, len(source), 4802):
+            yield 48000, source[offset:offset + 4802]
+
+    monkeypatch.setattr(xtts_client, "stream", stream_48k)
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "talk"})
+        _send_audio_input(ws)
+        frames = _collect_until_done(ws)
+
+    spoken = b"".join(b64_to_pcm(f["data"]) for f in frames if f["type"] == "audio_chunk")
+    assert spoken == audioop.ratecv(source, 2, 1, 48000, 24000, None)[0]
 
 
 def test_text_input_is_always_text_only(client, monkeypatch):

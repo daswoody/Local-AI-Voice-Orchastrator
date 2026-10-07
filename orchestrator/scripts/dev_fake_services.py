@@ -254,6 +254,8 @@ async def engine_synthesize(
 # Modelle laden beim ersten Request (lazy), Fehler als {"error": {...}} mit
 # HTTP 500. qwen3-tts nimmt Sprachen nur beim Namen, kokoro kennt kein
 # reference_text - genau die Faelle, auf die der Client reagieren muss.
+# voxcpm2-stream streamt (v1.23): stream_format=sse liefert speech.audio.delta-
+# Events mit rohem PCM16 (ohne Samplerate) im Takt der "Berechnung".
 audiocpp = FastAPI()
 _audiocpp_models = {
     "qwen3-tts": {"family": "qwen3_tts", "task": "tts", "mode": "offline", "loaded": False, "rate": 24000},
@@ -296,6 +298,11 @@ async def audiocpp_speech(payload: dict) -> Response:
     model = _audiocpp_models.get(model_id)
     if model is None:
         return _audiocpp_error(500, f"unknown model id: {model_id}")
+    streamed = "stream_format" in payload or payload.get("stream")
+    if streamed and model["mode"] != "streaming":
+        return _audiocpp_error(500, "speech streaming requires a model configured with mode=streaming")
+    if streamed and payload.get("response_format", "pcm") != "pcm":
+        return _audiocpp_error(500, "streaming speech currently supports response_format=pcm")
     if not model["loaded"]:
         await asyncio.sleep(1.5)  # "laedt"
         model["loaded"] = True
@@ -310,6 +317,9 @@ async def audiocpp_speech(payload: dict) -> Response:
     # Klon = tiefer, eingebaute Stimme = hoeher; Laenge grob wie gesprochen.
     freq = 220 if "voice_ref" in payload else 330
     rate = model["rate"]
+    if streamed:
+        return StreamingResponse(_audiocpp_events(payload, model, freq), media_type="text/event-stream",
+                                 headers={"X-Accel-Buffering": "no"})
     await asyncio.sleep(0.2)
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as wav:
@@ -318,6 +328,26 @@ async def audiocpp_speech(payload: dict) -> Response:
         wav.setframerate(rate)
         wav.writeframes(_sine_pcm16(0.2 + len(payload.get("input", "")) / 14, rate, freq=freq))
     return Response(buffer.getvalue(), media_type="audio/wav")
+
+
+async def _audiocpp_events(payload: dict, model: dict, freq: float):
+    import base64
+    import json
+
+    def event(data: dict) -> str:
+        return f"data: {json.dumps(data)}\n\n"
+
+    if model["family"] == "voxcpm2" and payload.get("options", {}).get("retry_badcase") is not False:
+        yield event({"type": "error", "error": {"message": "VoxCPM2 streaming generation requires retry_badcase=false"}})
+        return
+    rate = model["rate"]
+    pcm = _sine_pcm16(0.2 + len(payload.get("input", "")) / 14, rate, freq=freq)
+    piece = int(rate * 0.08) * 2  # 80 ms je Delta, "berechnet" in 40 ms
+    for offset in range(0, len(pcm), piece):
+        await asyncio.sleep(0.04)
+        yield event({"type": "speech.audio.delta", "audio": base64.b64encode(pcm[offset:offset + piece]).decode()})
+    yield event({"type": "speech.audio.done", "timing": {"ttft_ms": 40.0}})
+    yield "data: [DONE]\n\n"
 
 
 @audiocpp.post("/v1/tasks/unload_models")

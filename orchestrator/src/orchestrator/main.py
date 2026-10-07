@@ -16,6 +16,19 @@ logger = logging.getLogger(__name__)
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
+class RevalidatedStaticFiles(StaticFiles):
+    """Statische Seiten, die der Browser bei jedem Laden kurz gegenprueft
+    (no-cache: Rueckfrage per ETag, unveraendert = 304 ohne Inhalt). Ohne
+    Cache-Control raet der Browser selbst, wie lange eine Datei frisch ist -
+    so lief nach einem Deploy noch das alte app.js gegen die neue API
+    (v1.22: ausgebauter Breeze-Abschnitt weiter sichtbar)."""
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 async def _restore_gpu_assignments() -> None:
     """GPU-Zuweisungen nachziehen (v1.14). Im Hintergrund, damit der
     Orchestrator nicht auf langsam startende GPU-Dienste wartet - und mit
@@ -73,7 +86,7 @@ app.include_router(admin.router)
 # Admin-Panel: statisches Vanilla-JS ohne Build-Step (Entscheidung 4.14).
 # Die Seiten selbst sind oeffentlich, jede API-Aktion erfordert das
 # Tier-3-Token (require_admin).
-app.mount("/admin", StaticFiles(directory=_STATIC_DIR / "admin", html=True), name="admin")
+app.mount("/admin", RevalidatedStaticFiles(directory=_STATIC_DIR / "admin", html=True), name="admin")
 
 # User-Web-UI (Phase 2.5, "voll zentral"): der gebaute Svelte-Client aus
 # frontend/ wird vom Server ausgeliefert - die Windows-Shell (und jeder
@@ -82,4 +95,4 @@ app.mount("/admin", StaticFiles(directory=_STATIC_DIR / "admin", html=True), nam
 # bleibt der Mount einfach weg (Vite-Dev-Server uebernimmt).
 _APP_DIR = _STATIC_DIR / "app"
 if _APP_DIR.is_dir():
-    app.mount("/app", StaticFiles(directory=_APP_DIR, html=True), name="app")
+    app.mount("/app", RevalidatedStaticFiles(directory=_APP_DIR, html=True), name="app")

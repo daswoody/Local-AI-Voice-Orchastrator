@@ -7,7 +7,7 @@ import uuid
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from .. import repos
-from ..audio import b64_to_pcm, chunk_pcm, pcm_to_b64, resample_pcm16
+from ..audio import Pcm16StreamConverter, b64_to_pcm, chunk_pcm, pcm_to_b64, resample_pcm16
 from ..config import settings
 from ..graph import initial_state, orchestrator_graph
 from ..schemas import DeviceTool
@@ -496,9 +496,15 @@ class StreamSession:
         try:
             # Engine der Hauptstimme waehlt der Admin im Panel (v1.17);
             # faellt eine Test-Engine vor dem ersten Chunk aus, spricht XTTS.
+            # Umrechnen mit Zustand ueber den ganzen Stream (v1.23): einzeln
+            # umgerechnete Chunks knacken an jeder Grenze.
+            converter: Pcm16StreamConverter | None = None
             async for rate, chunk in tts_engines.stream_main(text, self.voice_id):
-                if rate != settings.target_sample_rate:
-                    chunk = resample_pcm16(chunk, rate, settings.target_sample_rate)
+                if converter is None or converter.src_rate != rate:
+                    converter = Pcm16StreamConverter(rate, settings.target_sample_rate)
+                chunk = converter.convert(chunk)
+                if not chunk:
+                    continue
                 await self.ws.send_json(
                     {
                         "type": "audio_chunk",

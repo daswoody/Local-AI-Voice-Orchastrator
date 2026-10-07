@@ -14,22 +14,30 @@ eigene Konfiguration fest (device) - der Orchestrator kann das nicht
 umstellen, nur wissen (Angabe im Panel), um beim Aktivieren andere
 Sprachausgaben auf derselben Karte zu entladen.
 
+Streaming (v1.23): Modelle, die audio.cpp mit "mode": "streaming" fuehrt
+(server.json; nur Familien, die das koennen), liefern jeden Satz als
+SSE-Stream - der erste Ton kommt, waehrend das Modell noch rechnet. Alle
+anderen (z. B. Qwen3-TTS, das audio.cpp nur offline kann) liefern jeden Satz
+als fertiges WAV.
+
 Hier steht nur der Draht zu audio.cpp; Registry, Status-Texte und das
 Aktivieren liegen in tts_engines."""
 
 import asyncio
 import base64
+import io
 import json
 import logging
 import re
 import time
+import wave
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import httpx
 
 from .. import repos
-from ..audio import chunk_pcm, wav_to_pcm16
+from ..audio import Pcm16StreamConverter, chunk_pcm, wav_to_pcm16
 from ..config import settings
 from .sentences import split_sentences
 from .tts_client import reference_wav
@@ -43,6 +51,8 @@ URL_SETTING = "audiocpp_base_url"
 DEVICE_SETTING = "audiocpp_device"
 MODELS_SETTING = "audiocpp_models"
 VOICES_SETTING = "audiocpp_voices"
+# Samplerate je Modell fuers Streaming (JSON, siehe stream_format).
+FORMATS_SETTING = "audiocpp_formats"
 
 STATUS_TIMEOUT_S = 3.0
 # Live-Turn: Ist das Modell belegt (z. B. Filler-Generierung), nicht lange
@@ -52,6 +62,12 @@ LIVE_BUSY_TIMEOUT_MS = 8000
 # anstossen.
 WARM_UP_RETRY_S = 60.0
 WARM_UP_TEXT = "Hallo, ich bin bereit."
+# Streaming: so viel Audio sammeln, bevor es weitergeht - kleinere Stuecke
+# bringen nur mehr WebSocket-Nachrichten, keinen frueheren Ton.
+STREAM_CHUNK_S = 0.2
+# VoxCPM2 streamt nur ohne "bad case"-Wiederholung (die braucht das fertige
+# Audio, audio.cpp lehnt den Stream sonst ab); VoxCPM1 schaltet sie selbst ab.
+_STREAM_OPTIONS = {"voxcpm2": {"retry_badcase": False}}
 
 # Qwen3-TTS kennt Sprachen nur beim Namen ("german"); die anderen Familien
 # nehmen ISO-Codes. Unbekanntes bleibt leer = das Modell erkennt selbst.
@@ -62,12 +78,14 @@ _QWEN3_LANGUAGES = {
 
 
 class AudioCppError(RuntimeError):
-    """Antwort von audio.cpp mit HTTP-Fehler (Text = seine Meldung)."""
+    """Antwort von audio.cpp mit HTTP-Fehler (Text = seine Meldung). Ohne
+    status_code: Fehler mitten im Stream (die Antwort lief schon mit 200)."""
 
-    def __init__(self, status_code: int, message: str) -> None:
+    def __init__(self, status_code: int, message: str, kind: str | None = None) -> None:
         super().__init__(f"{message} (HTTP {status_code})" if status_code else message)
         self.status_code = status_code
         self.message = message
+        self.kind = kind
 
 
 class AudioCppNotReady(AudioCppError):
@@ -344,6 +362,9 @@ def _describe(message: str, kind: str | None) -> str:
     if unknown:
         return (f"Modell '{unknown.group(1)}' ist auf dem audio.cpp-Server nicht (mehr) eingetragen - "
                 "dort laden bzw. in die server.json eintragen oder eine andere Engine aktivieren")
+    if "does not provide streaming execution" in message:
+        return (f"{message} - diese Modellfamilie kann in audio.cpp nicht streamen: in dessen server.json "
+                "beim Modell \"mode\": \"offline\" eintragen")
     if _cache_broken(message):
         return (f"{message} - das Modell ist in audio.cpp seit einem gescheiterten ersten Satz in einem "
                 "kaputten Zustand (Ursache meist zu wenig VRAM). Der Orchestrator hat es entladen; "
@@ -359,15 +380,82 @@ def _error_message(response: httpx.Response) -> str:
     return _describe(*_error_parts(response))
 
 
+# ---- Streaming-Format -------------------------------------------------------------
+#
+# Im Stream nennt audio.cpp keine Samplerate, es schickt nur rohes PCM16. Die
+# Rate steht im WAV-Header jeder normalen Antwort desselben Modells (Laden
+# beim Aktivieren, Probehoeren, Filler, notfalls der erste Satz) und wird pro
+# Modell gemerkt - zusammen mit Server, Familie und Pfad: Steckt hinter der
+# ID spaeter ein anderes Modell, lernt der Client neu, statt Audio in
+# falscher Geschwindigkeit abzuspielen.
+
+
+def _formats() -> dict:
+    try:
+        data = json.loads(repos.get_setting(FORMATS_SETTING) or "{}")
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _format_key(url: str, entry: dict) -> str:
+    return f"{url}|{entry.get('family') or ''}|{entry.get('path') or ''}"
+
+
+def stream_format(url: str, entry: dict) -> tuple[int, int] | None:
+    """(Samplerate, Kanaele) fuer einen Stream - None: Das Modell streamt
+    nicht (mode offline) oder sein Format ist noch unbekannt (dann ein
+    normaler Request, der es lernt)."""
+    if entry.get("mode") != "streaming":
+        return None
+    known = _formats().get(str(entry.get("id")))
+    if not isinstance(known, dict) or known.get("key") != _format_key(url, entry):
+        return None
+    rate, channels = known.get("rate"), known.get("channels")
+    if not isinstance(rate, int) or rate <= 0 or channels not in (1, 2):
+        return None
+    return rate, channels
+
+
+def _remember_format(url: str, entry: dict, wav: bytes) -> None:
+    try:
+        with wave.open(io.BytesIO(wav), "rb") as reader:
+            value = {"key": _format_key(url, entry), "rate": reader.getframerate(),
+                     "channels": reader.getnchannels()}
+    except (wave.Error, EOFError):
+        return
+    formats = _formats()
+    model = str(entry.get("id"))
+    if formats.get(model) != value:
+        formats[model] = value
+        repos.set_setting(FORMATS_SETTING, json.dumps(formats))
+
+
+async def _sse_data(response: httpx.Response) -> AsyncIterator[str]:
+    """Die data-Felder eines SSE-Streams, ein Eintrag pro Event."""
+    lines: list[str] = []
+    async for line in response.aiter_lines():
+        if not line:
+            if lines:
+                yield "\n".join(lines)
+                lines = []
+        elif line.startswith("data:"):
+            value = line[5:]
+            lines.append(value[1:] if value.startswith(" ") else value)
+    if lines:
+        yield "\n".join(lines)
+
+
 class AudioCppClient:
     """Ein TTS-Modell auf dem audio.cpp-Server - gemeinsame Engine-
     Schnittstelle wie XTTS & Co.: stream(text, voice_id) liefert
-    (Samplerate, PCM16-Chunk)-Tupel.
+    (Samplerate, PCM16-Chunk)-Tupel in der Rate des Modells.
 
-    Satz fuer Satz ueber POST /v1/audio/speech (WAV zurueck), damit das erste
-    Audio nach dem ersten Satz kommt. Geklont wird aus dem Voice-Sample der
-    Stimme (Base64, mono PCM16 24 kHz) samt Transkript - ausser der Admin hat
-    fuer dieses Modell eine eingebaute Stimme gewaehlt.
+    Satz fuer Satz ueber POST /v1/audio/speech, damit das erste Audio nach
+    dem ersten Satz kommt - bei Streaming-Modellen schon waehrend des ersten
+    Satzes (SSE), sonst mit dem fertigen WAV des Satzes. Geklont wird aus dem
+    Voice-Sample der Stimme (Base64, mono PCM16 24 kHz) samt Transkript -
+    ausser der Admin hat fuer dieses Modell eine eingebaute Stimme gewaehlt.
 
     wait_for_load=False (Live-Turn): Ist das Modell nicht geladen, stoesst
     der Client das Laden an und gibt sofort auf (AudioCppNotReady) - dann
@@ -388,21 +476,29 @@ class AudioCppClient:
         voice = repos.get_voice(voice_id) or {}
         language = language or voice.get("language") or "de"
         builtin = voice_choices().get(self.model)
-        family = next((m.get("family", "") for m in cached_models() if m["id"] == self.model), "")
         timeout = httpx.Timeout(10.0, read=600.0 if wait_for_load else 180.0)
         async with httpx.AsyncClient(base_url=url, timeout=timeout) as client:
-            if not wait_for_load:
-                entry = await self._entry(client)
-                family = entry.get("family") or family
-                if not entry.get("loaded"):
-                    start_warm_up(self.model, voice_id)
-                    raise AudioCppNotReady(
-                        503, f"Modell '{self.model}' ist nicht geladen - audio.cpp laedt es jetzt")
+            # Frisch statt aus der gemerkten Liste: geladen?, Familie (Sprachcodes)
+            # und Modus (Streaming) koennen sich auf dem Server geaendert haben.
+            entry = await self._entry(client)
+            family = entry.get("family") or ""
+            if not wait_for_load and not entry.get("loaded"):
+                start_warm_up(self.model, voice_id)
+                raise AudioCppNotReady(
+                    503, f"Modell '{self.model}' ist nicht geladen - audio.cpp laedt es jetzt")
             for index, sentence in enumerate(sentences):
                 payload = self._payload(sentence, voice_id, voice, language, family, builtin, url)
                 if index == 0 and not wait_for_load:
                     payload["busy_timeout_ms"] = LIVE_BUSY_TIMEOUT_MS
-                pcm, rate = await self._speech(client, payload, url, reload_allowed=wait_for_load)
+                streaming = stream_format(url, entry)
+                if streaming:
+                    async for chunk in self._streamed(client, payload, url, family, streaming,
+                                                      reload_allowed=wait_for_load):
+                        yield streaming[0], chunk
+                    continue
+                wav = await self._speech(client, payload, url, reload_allowed=wait_for_load)
+                _remember_format(url, entry, wav)
+                pcm, rate = wav_to_pcm16(wav)
                 for chunk in chunk_pcm(pcm):
                     yield rate, chunk
 
@@ -434,32 +530,109 @@ class AudioCppClient:
         return payload
 
     async def _speech(self, client: httpx.AsyncClient, payload: dict, url: str,
-                      reload_allowed: bool) -> tuple[bytes, int]:
-        """Ein Satz. reload_allowed: Ist das Modell in audio.cpp kaputt
-        (siehe _BROKEN_CACHE_MARKERS), nach dem Entladen einmal frisch
-        versuchen - nur wo auf das Neuladen gewartet werden darf."""
+                      reload_allowed: bool) -> bytes:
+        """Ein Satz am Stueck -> WAV. reload_allowed: Ist das Modell in
+        audio.cpp kaputt (siehe _BROKEN_CACHE_MARKERS), nach dem Entladen
+        einmal frisch versuchen - nur wo auf das Neuladen gewartet werden darf."""
         reloaded = False
         for _ in range(4):
             response = await client.post("/v1/audio/speech", json=payload)
             if response.status_code < 400:
-                return wav_to_pcm16(response.content)
+                return response.content
             message, kind = _error_parts(response)
-            rejected = _rejected_fields(message, payload)
-            if rejected:
-                logger.info("audio.cpp-Modell '%s' lehnt %s ab - frage ohne nach",
-                            self.model, ", ".join(sorted(rejected)))
-                _dropped.setdefault((url, self.model), set()).update(rejected)
-                payload = {key: value for key, value in payload.items() if key not in rejected}
-                continue
-            if "constant tensor cache" in message.lower():
-                # Auch ein gescheitertes Hochladen hinterlaesst den Cache
-                # halb gefuellt - so oder so frisch laden lassen.
-                await self._reset(message)
-                if _cache_broken(message) and reload_allowed and not reloaded:
-                    reloaded = True
-                    continue
-            break
+            retry, reloading = await self._recover(message, payload, url, reload_allowed and not reloaded)
+            if retry is None:
+                break
+            reloaded = reloaded or reloading
+            payload = retry
         raise AudioCppError(response.status_code, _describe(message, kind))
+
+    async def _streamed(self, client: httpx.AsyncClient, payload: dict, url: str, family: str,
+                        streaming: tuple[int, int], reload_allowed: bool) -> AsyncIterator[bytes]:
+        """Ein Satz als Stream -> PCM16 mono in der Rate des Modells, sobald
+        audio.cpp es erzeugt (Stuecke ab STREAM_CHUNK_S). Fehler vor dem
+        ersten Ton werden behandelt wie bei _speech (Feld weglassen, kaputtes
+        Modell frisch laden); danach gehen sie an den Aufrufer - bereits
+        gespieltes Audio laesst sich nicht zuruecknehmen."""
+        rate, channels = streaming
+        min_bytes = int(rate * STREAM_CHUNK_S) * 2
+        request = {**payload, "stream_format": "sse", "response_format": "pcm"}
+        options = _STREAM_OPTIONS.get(family)
+        if options:
+            request["options"] = {**request.get("options", {}), **options}
+        reloaded = False
+        for _ in range(4):
+            converter = Pcm16StreamConverter(rate, rate, channels)  # nur Stereo -> mono
+            buffer = bytearray()
+            produced = False
+            try:
+                async for pcm in self._sse_audio(client, request):
+                    buffer += converter.convert(pcm)
+                    if len(buffer) >= min_bytes:
+                        produced = True
+                        yield bytes(buffer)
+                        buffer.clear()
+            except AudioCppError as exc:
+                failure = exc
+                retry, reloading = await self._recover(
+                    exc.message, request, url, reload_allowed and not reloaded and not produced)
+                if produced or retry is None:
+                    break
+                reloaded = reloaded or reloading
+                request = retry
+                continue
+            if buffer:
+                yield bytes(buffer)
+            return
+        raise AudioCppError(failure.status_code, _describe(failure.message, failure.kind), failure.kind)
+
+    async def _sse_audio(self, client: httpx.AsyncClient, request: dict) -> AsyncIterator[bytes]:
+        """POST mit stream_format=sse -> PCM16-Stuecke der speech.audio.delta-
+        Events. Fehler kommen vor dem Stream als HTTP-Fehler, danach als
+        error-Event - beides als AudioCppError mit der Meldung von audio.cpp."""
+        async with client.stream("POST", "/v1/audio/speech", json=request,
+                                 headers={"Accept": "text/event-stream"}) as response:
+            if response.status_code >= 400:
+                await response.aread()
+                message, kind = _error_parts(response)
+                raise AudioCppError(response.status_code, message, kind)
+            done = False
+            async for data in _sse_data(response):
+                if data == "[DONE]":
+                    return
+                try:
+                    event = json.loads(data)
+                except ValueError:
+                    continue
+                kind = event.get("type") if isinstance(event, dict) else None
+                if kind == "speech.audio.delta" and event.get("audio"):
+                    yield base64.b64decode(event["audio"])
+                elif kind == "speech.audio.done":
+                    done = True  # [DONE] folgt noch - bis dahin lesen
+                elif kind == "error":
+                    error = event.get("error")
+                    message = error.get("message") if isinstance(error, dict) else None
+                    raise AudioCppError(0, str(message or "Stream-Fehler ohne Begruendung")[:400])
+            if not done:
+                raise AudioCppError(0, "audio.cpp hat den Stream vorzeitig beendet")
+
+    async def _recover(self, message: str, payload: dict, url: str,
+                       reload_allowed: bool) -> tuple[dict | None, bool]:
+        """Fehlermeldung von audio.cpp -> (Payload fuer einen neuen Versuch
+        oder None = aufgeben, ob dafuer frisch geladen wird)."""
+        rejected = _rejected_fields(message, payload)
+        if rejected:
+            logger.info("audio.cpp-Modell '%s' lehnt %s ab - frage ohne nach",
+                        self.model, ", ".join(sorted(rejected)))
+            _dropped.setdefault((url, self.model), set()).update(rejected)
+            return {key: value for key, value in payload.items() if key not in rejected}, False
+        if "constant tensor cache" in message.lower():
+            # Auch ein gescheitertes Hochladen hinterlaesst den Cache
+            # halb gefuellt - so oder so frisch laden lassen.
+            await self._reset(message)
+            if _cache_broken(message) and reload_allowed:
+                return payload, True
+        return None, False
 
     async def _reset(self, reason: str) -> None:
         """Modell auf audio.cpp entladen - der naechste Request laedt es neu."""

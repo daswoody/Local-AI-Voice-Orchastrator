@@ -2,6 +2,8 @@
 LiteLLM, Client (Klonen, Sprache, abgelehnte Felder), Status, Aktivieren mit
 Entladen und XTTS als Rueckfallebene."""
 
+import asyncio
+import audioop
 import base64
 import io
 import json
@@ -15,6 +17,7 @@ import httpx
 import pytest
 
 from orchestrator import repos
+from orchestrator.audio import Pcm16StreamConverter
 from orchestrator.config import settings
 from orchestrator.services import audiocpp, filler_service, gpu_manager, tts_engines
 from orchestrator.services.sentences import split_sentences
@@ -23,14 +26,18 @@ from orchestrator.services.tts_client import piper_client, xtts_client
 URL = "http://audiocpp:8080"
 
 
+def _tone(seconds: float, rate: int) -> bytes:
+    return b"".join(int(8000 * math.sin(i / 8)).to_bytes(2, "little", signed=True)
+                    for i in range(int(rate * seconds)))
+
+
 def _wav(seconds: float = 0.5, rate: int = 24000) -> bytes:
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as writer:
         writer.setnchannels(1)
         writer.setsampwidth(2)
         writer.setframerate(rate)
-        writer.writeframes(b"".join(int(8000 * math.sin(i / 8)).to_bytes(2, "little", signed=True)
-                                    for i in range(int(rate * seconds))))
+        writer.writeframes(_tone(seconds, rate))
     return buffer.getvalue()
 
 
@@ -50,10 +57,20 @@ class FakeAudioCpp:
             "kokoro": {"family": "kokoro_tts", "task": "tts", "mode": "offline", "loaded": True,
                        "voices": ["af_heart", "ff_siwis"]},
             "qwen3-asr": {"family": "qwen3_asr", "task": "asr", "mode": "offline", "loaded": False},
+            # Streamt (server.json "mode": "streaming"); kennt kein reference_text.
+            "pocket-tts": {"family": "pocket_tts", "task": "tts", "mode": "streaming", "loaded": False},
+            "voxcpm2": {"family": "voxcpm2", "task": "tts", "mode": "streaming", "loaded": False,
+                        "rate": 48000},
         }
         self.speech: list[dict] = []
         self.unload_calls: list[list[str]] = []
         self.rate = 24000
+        # Stream: Laenge eines speech.audio.delta; gate haelt den Stream nach
+        # dem ersten Delta an (zeigt, dass der Client nicht aufs Ende wartet).
+        self.delta_s = 0.25
+        self.deltas = 3
+        self.gate: asyncio.Event | None = None
+        self.fail_mid_stream: str | None = None
         # Wie audio.cpp: Scheitert das Hochladen der Decoder-Konstanten (VRAM),
         # bleibt das Modell kaputt, bis es entladen wird.
         self.no_vram: set[str] = set()
@@ -86,19 +103,63 @@ class FakeAudioCpp:
             model = self.models.get(payload["model"])
             if model is None:
                 return self.error(500, f"unknown model id: {payload['model']}")
+            if model["mode"] == "streaming" and model["family"] in ("qwen3_tts", "kokoro_tts"):
+                # Laden scheitert: Die Familie kann nur offline.
+                return self.error(500, f"configured model does not provide streaming execution: {payload['model']}")
+            streamed = "stream_format" in payload or payload.get("stream")
+            if streamed and model["mode"] != "streaming":
+                return self.error(500, "speech streaming requires a model configured with mode=streaming")
+            if streamed and payload.get("response_format") != "pcm":
+                return self.error(500, "streaming speech currently supports response_format=pcm")
             model["loaded"] = True
-            prefix = "qwen3_tts.speech_tokenizer_decoder.constants"
-            if payload["model"] in self.broken:
-                return self.error(500, f"{prefix} constant tensor cache graph used a different tensor sequence")
-            if payload["model"] in self.no_vram:
-                self.broken.add(payload["model"])
-                return self.error(500, f"failed to allocate {prefix} constant tensor cache")
-            if model["family"] == "qwen3_tts" and payload.get("language") not in (None, "german", "english"):
-                return self.error(500, f"Qwen3 talker unsupported language: {payload['language']}")
-            if model["family"] == "kokoro_tts" and "reference_text" in payload:
-                return self.error(500, "unknown Kokoro request option: reference_text")
-            return httpx.Response(200, content=_wav(0.25, self.rate), headers={"content-type": "audio/wav"})
+            # Fehler beim Rechnen: als WAV-Request HTTP 500, im Stream (Header
+            # sind dann schon raus) ein error-Event - wie in audio.cpp.
+            failure = self._failure(payload, model, streamed)
+            rate = model.get("rate", self.rate)
+            if streamed:
+                return httpx.Response(200, headers={"content-type": "text/event-stream; charset=utf-8"},
+                                      content=self._events(failure, rate))
+            if failure:
+                return self.error(500, failure)
+            return httpx.Response(200, content=_wav(0.25, rate), headers={"content-type": "audio/wav"})
         return self.error(404, f"unknown endpoint: {path}", "not_found")
+
+    def _failure(self, payload: dict, model: dict, streamed: bool) -> str | None:
+        prefix = "qwen3_tts.speech_tokenizer_decoder.constants"
+        if payload["model"] in self.broken:
+            return f"{prefix} constant tensor cache graph used a different tensor sequence"
+        if payload["model"] in self.no_vram:
+            self.broken.add(payload["model"])
+            return f"failed to allocate {prefix} constant tensor cache"
+        if model["family"] == "qwen3_tts" and payload.get("language") not in (None, "german", "english"):
+            return f"Qwen3 talker unsupported language: {payload['language']}"
+        if model["family"] == "kokoro_tts" and "reference_text" in payload:
+            return "unknown Kokoro request option: reference_text"
+        if model["family"] == "pocket_tts" and "reference_text" in payload:
+            return "unknown PocketTTS request option: reference_text"
+        if streamed and model["family"] == "voxcpm2" and payload.get("options", {}).get("retry_badcase") is not False:
+            return "VoxCPM2 streaming generation requires retry_badcase=false"
+        return None
+
+    async def _events(self, failure: str | None, rate: int):
+        def event(data: dict) -> bytes:
+            return f"data: {json.dumps(data)}\n\n".encode()
+
+        if failure:
+            yield event({"type": "error", "error": {"message": failure}})
+            return
+        pcm = _tone(self.delta_s * self.deltas, rate)
+        size = len(pcm) // self.deltas // 2 * 2
+        for index in range(self.deltas):
+            piece = pcm[index * size:] if index == self.deltas - 1 else pcm[index * size:(index + 1) * size]
+            yield event({"type": "speech.audio.delta", "audio": base64.b64encode(piece).decode()})
+            if index == 0 and self.gate is not None:
+                await self.gate.wait()
+        if self.fail_mid_stream:
+            yield event({"type": "error", "error": {"message": self.fail_mid_stream}})
+            return
+        yield event({"type": "speech.audio.done", "timing": {"ttft_ms": 12.5}})
+        yield b"data: [DONE]\n\n"
 
     @staticmethod
     def error(status: int, message: str, kind: str = "server_error") -> httpx.Response:
@@ -350,6 +411,163 @@ async def test_activation_tests_and_heals_an_already_loaded_model(server, monkey
 
     assert notes == ["audio.cpp/qwen3-tts ist geladen."]
     assert server.unload_calls == [["qwen3-tts"]] and "qwen3-tts" not in server.broken
+
+
+# ---- Streaming (v1.23) -----------------------------------------------------------------------
+
+
+async def _learn(model: str) -> None:
+    """Ein normaler Request, wie beim Laden nach dem Aktivieren: Daraus lernt
+    der Client die Samplerate, die audio.cpp im Stream nicht nennt."""
+    [c async for c in audiocpp.AudioCppClient(model).stream("Hallo, ich bin bereit.", "", wait_for_load=True)]
+
+
+async def test_a_streaming_model_learns_its_rate_once_then_streams(server):
+    server.models["pocket-tts"]["loaded"] = True
+    text = "Das ist der erste Satz der Antwort. Und hier kommt noch der zweite Satz."
+
+    chunks = [c async for c in audiocpp.AudioCppClient("pocket-tts").stream(text, "default-de-female")]
+
+    # Satz 1 als WAV (Samplerate lernen), ab Satz 2 als Stream.
+    assert "stream_format" not in server.speech[0]
+    assert server.speech[1]["stream_format"] == "sse" and server.speech[1]["response_format"] == "pcm"
+    assert chunks and all(rate == 24000 for rate, _ in chunks)
+
+    server.speech.clear()
+    [c async for c in audiocpp.AudioCppClient("pocket-tts").stream("Noch eine Antwort.", "default-de-female")]
+    assert server.speech[0]["stream_format"] == "sse"  # gemerkt, auch fuer den ersten Satz
+
+
+async def test_streamed_audio_is_passed_on_before_the_sentence_is_finished(server):
+    server.models["pocket-tts"]["loaded"] = True
+    await _learn("pocket-tts")
+    server.gate = asyncio.Event()
+
+    stream = audiocpp.AudioCppClient("pocket-tts").stream("Hallo, schoen dass du da bist.", "default-de-female")
+    rate, first = await asyncio.wait_for(stream.__anext__(), timeout=2)
+
+    # audio.cpp rechnet noch (gate zu) - der erste Ton ist trotzdem schon da.
+    assert rate == 24000 and len(first) >= int(24000 * audiocpp.STREAM_CHUNK_S) * 2
+    server.gate.set()
+    rest = [c async for c in stream]
+    assert len(first) + sum(len(pcm) for _, pcm in rest) == len(_tone(server.delta_s * server.deltas, 24000))
+
+
+async def test_offline_models_keep_sending_whole_sentences(server):
+    server.models["kokoro"]["loaded"] = True
+    text = "Das ist der erste Satz der Antwort. Und hier kommt noch der zweite Satz."
+
+    for _ in range(2):
+        [c async for c in audiocpp.AudioCppClient("kokoro").stream(text, "default-de-female")]
+
+    assert len(server.speech) == 4 and not any("stream_format" in p for p in server.speech)
+
+
+async def test_voxcpm2_streams_at_its_own_rate_without_bad_case_retries(server):
+    server.models["voxcpm2"]["loaded"] = True
+    await _learn("voxcpm2")
+
+    chunks = [c async for c in audiocpp.AudioCppClient("voxcpm2").stream(
+        "Hallo, schoen dass du da bist.", "default-de-female")]
+
+    # Ohne die Option lehnt audio.cpp den Stream ab ("requires retry_badcase=false").
+    assert server.speech[-1]["options"] == {"retry_badcase": False}
+    assert {rate for rate, _ in chunks} == {48000}  # umgerechnet wird erst im Router, am Stueck
+    assert b"".join(pcm for _, pcm in chunks) == _tone(server.delta_s * server.deltas, 48000)
+
+
+async def test_a_different_model_behind_the_same_id_is_learned_again(server):
+    server.models["pocket-tts"]["loaded"] = True
+    await _learn("pocket-tts")
+    server.speech.clear()
+    # In der server.json steckt jetzt ein anderes Modell hinter der ID.
+    server.models["pocket-tts"].update(family="voxcpm2", rate=48000)
+
+    chunks = [c async for c in audiocpp.AudioCppClient("pocket-tts").stream(
+        "Hallo, schoen dass du da bist.", "default-de-female")]
+
+    assert "stream_format" not in server.speech[0] and {rate for rate, _ in chunks} == {48000}
+
+
+async def test_a_field_rejected_inside_the_stream_is_dropped_before_any_audio(server):
+    _write_sample("default-de-female")
+    repos.update_voice("default-de-female", {"sample_text": "Das ist mein Sample."})
+    server.models["pocket-tts"]["loaded"] = True
+    await _learn("pocket-tts")
+    server.speech.clear()
+
+    chunks = [c async for c in audiocpp.AudioCppClient("pocket-tts").stream(
+        "Guten Morgen zusammen!", "default-de-female")]
+
+    first, second = server.speech
+    assert first["stream_format"] == second["stream_format"] == "sse"
+    assert "reference_text" in first and "reference_text" not in second and "voice_ref" in second
+    assert chunks
+
+
+async def test_an_error_in_the_middle_of_a_stream_is_not_retried(server):
+    server.models["pocket-tts"]["loaded"] = True
+    await _learn("pocket-tts")
+    server.speech.clear()
+    server.fail_mid_stream = "CUDA error: an illegal memory access was encountered"
+
+    received = []
+    with pytest.raises(audiocpp.AudioCppError, match="illegal memory access"):
+        async for chunk in audiocpp.AudioCppClient("pocket-tts").stream(
+                "Hallo, schoen dass du da bist.", "default-de-female"):
+            received.append(chunk)
+
+    # Gespieltes Audio laesst sich nicht zuruecknehmen: kein zweiter Versuch.
+    assert received and len(server.speech) == 1
+
+
+async def test_a_broken_streaming_model_is_unloaded_and_tried_fresh(server):
+    server.models["pocket-tts"]["loaded"] = True
+    await _learn("pocket-tts")
+    server.speech.clear()
+    server.broken.add("pocket-tts")
+
+    chunks = [c async for c in audiocpp.AudioCppClient("pocket-tts").stream(
+        "Hallo, wie geht es dir heute?", "x", wait_for_load=True)]
+
+    assert chunks and server.unload_calls == [["pocket-tts"]]
+    assert len(server.speech) == 2 and all(p["stream_format"] == "sse" for p in server.speech)
+
+
+async def test_the_live_answer_streams_from_a_streaming_model(server):
+    server.models["pocket-tts"]["loaded"] = True
+    await tts_engines.audiocpp_server()
+    repos.set_setting(tts_engines.ACTIVE_ENGINE_SETTING, "audiocpp:pocket-tts")
+    await _learn("pocket-tts")
+    server.speech.clear()
+    server.gate = asyncio.Event()
+
+    answer = tts_engines.stream_main("Hallo, schoen dass du da bist.", "default-de-female")
+    rate, first = await asyncio.wait_for(answer.__anext__(), timeout=2)
+    server.gate.set()
+    rest = [c async for c in answer]
+
+    assert rate == 24000 and first and rest
+    assert server.speech[0]["busy_timeout_ms"] == audiocpp.LIVE_BUSY_TIMEOUT_MS
+
+
+async def test_streaming_mode_on_an_offline_only_family_is_explained(server):
+    # Qwen3-TTS kann in audio.cpp nur offline - "mode": "streaming" laedt nicht.
+    server.models["qwen3-tts"]["mode"] = "streaming"
+
+    with pytest.raises(audiocpp.AudioCppError, match="kann in audio.cpp nicht streamen"):
+        [c async for c in audiocpp.AudioCppClient("qwen3-tts").stream("Hallo zusammen.", "x", wait_for_load=True)]
+
+
+def test_the_stream_converter_matches_a_one_shot_conversion():
+    stereo = b"".join(int(8000 * math.sin(i / 8)).to_bytes(2, "little", signed=True) * 2 for i in range(4800))
+    converter = Pcm16StreamConverter(48000, 24000, channels=2)
+
+    # Stuecke mitten im Sample zerschnitten, wie sie ueber das Netz kommen koennen.
+    out = b"".join(converter.convert(stereo[i:i + 1001]) for i in range(0, len(stereo), 1001))
+
+    mono = audioop.tomono(stereo, 2, 0.5, 0.5)
+    assert out == audioop.ratecv(mono, 2, 1, 48000, 24000, None)[0]
 
 
 # ---- Hauptstimme: Fallback auf XTTS ---------------------------------------------------------

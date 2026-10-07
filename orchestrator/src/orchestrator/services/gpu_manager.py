@@ -27,7 +27,6 @@ import httpx
 from .. import repos
 from ..config import settings
 from . import audiocpp
-from .tts_client import breeze_base_url, breeze_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -64,22 +63,9 @@ SERVICES: dict[str, dict] = {
         "can_disable": True,
         "note": (
             "~3 GB VRAM. Auf CPU technisch moeglich, aber sehr langsam (Sekunden pro Satz). "
-            "'Aus' entlaedt das Modell, z. B. fuer einen Breeze-Test auf derselben Karte; "
+            "'Aus' entlaedt das Modell, z. B. um auf derselben Karte Platz fuer audio.cpp zu schaffen; "
             "den Rest (CUDA-Kontext, einige hundert MB) gibt erst "
             "'docker restart heimai-tts-xtts' frei."
-        ),
-    },
-    "tts-breeze": {
-        "label": "Sprachausgabe-Test (Breeze TTS 2)",
-        "base_url": breeze_base_url,
-        "controllable": False,
-        # Beide Breeze-Server laden ihr Modell beim Start auf eine feste Karte
-        # und koennen nicht zur Laufzeit wechseln.
-        "control_hint": "per Compose (BREEZE_GPU)",
-        "note": (
-            "Nur aktiv, solange ein Breeze-Server laeuft; laedt das Modell beim Start: "
-            "docker-compose.breeze.yml (PyTorch) ~7,7 GB VRAM, docker-compose.breeze-cpp.yml "
-            "(Q8_0) ~4 GB. Karte ueber BREEZE_GPU in Coolify waehlen, nicht hier."
         ),
     },
     "tts-piper": {
@@ -112,8 +98,7 @@ def services() -> dict[str, dict]:
     koennen alle Karte wechseln und ganz aus - ihr Modell laeuft in einem
     eigenen Prozess, "Aus" beendet ihn. Dazu audio.cpp (v1.21) als
     Info-Zeile: Seine Karte legt es selbst fest."""
-    result = {name: spec for name, spec in SERVICES.items()
-              if name != "tts-breeze" or breeze_enabled()}
+    result = dict(SERVICES)
     for row in repos.list_contract_engines():
         url = row["url"].rstrip("/")
         result[contract_service(row["id"])] = {

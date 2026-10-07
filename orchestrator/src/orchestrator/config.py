@@ -31,20 +31,13 @@ class Settings(BaseSettings):
     stt_base_url: str = "http://stt:8000"
     piper_base_url: str = "http://tts-piper:8000"
     xtts_base_url: str = "http://tts-xtts:8000"
-    # Breeze TTS 2 (Test-Engine, v1.17): offizieller Streaming-Server aus
-    # tts-breeze/, eigener Deploy ueber docker-compose.breeze.yml.
-    breeze_base_url: str = "http://tts-breeze:7860"
-    # Qwen3-TTS (v1.20): erste Engine nach dem Engine-Vertrag (tts-qwen3/,
-    # docker-compose.qwen3.yml). Nur der Startwert - Vertrags-Engines und
-    # ihre Adressen verwaltet das Admin-Panel (Sprachausgabe).
-    qwen3_base_url: str = "http://tts-qwen3:8000"
     # audio.cpp (v1.21): EIN Server fuer viele TTS-Modelle, angebunden wie
     # LiteLLM - jedes dort eingetragene TTS-Modell wird eine Engine. Leer =
     # nicht eingerichtet; die Adresse laesst sich im Admin-Panel setzen.
     audiocpp_base_url: str = ""
 
     # Engine der Hauptantwort, solange im Admin-Panel keine gewaehlt wurde
-    # (v1.17): xtts | breeze | piper | audiocpp:<Modell-ID>.
+    # (v1.17): xtts | piper | audiocpp:<Modell-ID> | ID einer Vertrags-Engine.
     tts_engine: str = "xtts"
 
     # Ausgabe-Stream laeuft einheitlich auf XTTS-Rate (Protokoll 4.13:

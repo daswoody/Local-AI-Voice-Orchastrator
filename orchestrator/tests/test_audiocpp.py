@@ -585,15 +585,12 @@ def test_preview_explains_an_unreachable_server(client, admin_headers, monkeypat
     assert "Server nicht gefunden" in response.json()["detail"] and "audio.cpp" in response.json()["detail"]
 
 
-def test_breeze_can_be_hidden_but_not_while_it_speaks(client, admin_headers):
-    assert client.put("/v1/admin/tts/settings", headers=admin_headers,
-                      json={"breeze_enabled": False}).json()["breeze_enabled"] is False
-    assert "breeze" not in tts_engines.engine_ids() and "tts-breeze" not in gpu_manager.services()
-
-    client.put("/v1/admin/tts/settings", headers=admin_headers, json={"breeze_enabled": True})
-    repos.set_setting(tts_engines.ACTIVE_ENGINE_SETTING, "breeze")
-    assert client.put("/v1/admin/tts/settings", headers=admin_headers,
-                      json={"breeze_enabled": False}).status_code == 409
+def test_breeze_and_qwen3_are_no_longer_built_in(client, admin_headers):
+    """v1.22: Beide laufen ueber audio.cpp - keine eigene Engine, keine
+    GPU-Zeile, keine Einstellungen mehr."""
+    assert "breeze" not in tts_engines.engine_ids() and "qwen3" not in tts_engines.engine_ids()
+    assert "tts-breeze" not in gpu_manager.services() and "tts-qwen3" not in gpu_manager.services()
+    assert not any(key.startswith("breeze") for key in client.get("/v1/admin/tts", headers=admin_headers).json())
 
 
 async def test_fillers_can_be_spoken_by_an_audiocpp_model(server):

@@ -47,9 +47,10 @@ CREATE TABLE IF NOT EXISTS voices (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     language TEXT NOT NULL DEFAULT 'de',
-    -- Exaktes Transkript des Voice-Samples (v1.17): Breeze TTS 2 braucht
-    -- es fuers Voice-Cloning, XTTS nicht. Beim Upload per Whisper
-    -- vorgeschlagen, im Panel korrigierbar. NULL = keins.
+    -- Exaktes Transkript des Voice-Samples (v1.17): Damit klonen
+    -- audio.cpp-Modelle und Vertrags-Engines am genauesten, XTTS braucht es
+    -- nicht. Beim Upload per Whisper vorgeschlagen, im Panel korrigierbar.
+    -- NULL = keins.
     sample_text TEXT
 );
 
@@ -196,7 +197,7 @@ def init_db() -> None:
         _seed_voices(conn)
         _seed_triggers_and_fillers(conn)
         _seed_card_layouts(conn)
-        _seed_contract_engines(conn)
+        _retire_breeze_and_qwen3(conn)
         conn.commit()
     finally:
         conn.close()
@@ -260,18 +261,41 @@ def _seed_voices(conn: sqlite3.Connection) -> None:
     )
 
 
-def _seed_contract_engines(conn: sqlite3.Connection) -> None:
-    # Qwen3-TTS einmalig vorbelegen - NUR beim ersten Mal (Merker in
-    # app_settings), damit eine im Panel entfernte Engine nicht bei jedem
-    # Start wiederkommt.
+def _retire_breeze_and_qwen3(conn: sqlite3.Connection) -> None:
+    """v1.22: Breeze TTS 2 und Qwen3-TTS als eigene Anbindungen sind
+    ausgebaut - beide laufen jetzt ueber audio.cpp. Einmalig (Merker)
+    aufraeumen: den einst vorbelegten Qwen3-Eintrag (nur mit seiner
+    Standardadresse), die Breeze-Einstellungen und eine Hauptstimmen-Wahl,
+    die es nicht mehr gibt. Dann spricht wieder XTTS - war es ausgeschaltet,
+    wird es wieder einer Karte zugewiesen (der Orchestrator zieht die
+    Zuweisung beim Start nach)."""
     marker = conn.execute(
-        "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('tts_contract_engines_seeded', '1')"
+        "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('retired_breeze_qwen3', '1')"
     )
-    if marker.rowcount:
+    if not marker.rowcount:
+        return
+    conn.execute("DELETE FROM tts_contract_engines WHERE id = 'qwen3' AND url = 'http://tts-qwen3:8000'")
+    conn.execute(
+        "DELETE FROM app_settings WHERE key IN"
+        " ('breeze_base_url', 'breeze_instruction', 'breeze_enabled', 'tts_contract_engines_seeded')"
+    )
+    active = _setting(conn, "tts_engine")
+    still_registered = conn.execute(
+        "SELECT 1 FROM tts_contract_engines WHERE id = ?", (active or "",)).fetchone()
+    if active not in ("breeze", "qwen3") or still_registered:
+        return
+    conn.execute("DELETE FROM app_settings WHERE key = 'tts_engine'")
+    if _setting(conn, "gpu_device_tts-xtts") == "off":
         conn.execute(
-            "INSERT OR IGNORE INTO tts_contract_engines (id, url, label) VALUES ('qwen3', ?, 'Qwen3-TTS')",
-            (settings.qwen3_base_url.rstrip("/"),),
+            "UPDATE app_settings SET value = ? WHERE key = 'gpu_device_tts-xtts'",
+            (_setting(conn, "gpu_last_device_tts-xtts") or "cuda:0",),
         )
+        conn.execute("DELETE FROM app_settings WHERE key = 'gpu_auto_off_tts-xtts'")
+
+
+def _setting(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row is not None else None
 
 
 def _seed_triggers_and_fillers(conn: sqlite3.Connection) -> None:

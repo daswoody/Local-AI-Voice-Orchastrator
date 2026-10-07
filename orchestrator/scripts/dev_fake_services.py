@@ -1,22 +1,24 @@
 """Fake-Backends fuer lokale Orchestrator-Tests ohne GPU/echte Infra.
 
-Startet EINEN Server (Port 9100), der LiteLLM, STT, Piper, XTTS, Breeze
-TTS 2, eine Engine nach dem Engine-Vertrag (Qwen3) und einen audio.cpp-Server
-(v1.21) als Sub-Apps unter eigenen Pfad-Prefixen nachstellt. Damit laesst
-sich der komplette Voice-Loop (Mikro-Phase 1.11) inklusive TTS-Engine-Wechsel
-(v1.17) auf jedem Rechner durchspielen:
+Startet EINEN Server (Port 9100), der LiteLLM, STT, Piper, XTTS, einen
+audio.cpp-Server (v1.21) und eine Engine nach dem Engine-Vertrag als Sub-Apps
+unter eigenen Pfad-Prefixen nachstellt. Damit laesst sich der komplette
+Voice-Loop (Mikro-Phase 1.11) inklusive TTS-Engine-Wechsel (v1.17) auf jedem
+Rechner durchspielen:
 
     Terminal 1:  uv run python scripts/dev_fake_services.py
     Terminal 2:  LITELLM_BASE_URL=http://127.0.0.1:9100/llm \\
                  STT_BASE_URL=http://127.0.0.1:9100/stt \\
                  PIPER_BASE_URL=http://127.0.0.1:9100/piper \\
                  XTTS_BASE_URL=http://127.0.0.1:9100/xtts \\
-                 BREEZE_BASE_URL=http://127.0.0.1:9100/breeze \\
-                 QWEN3_BASE_URL=http://127.0.0.1:9100/qwen3 \\
                  AUDIOCPP_BASE_URL=http://127.0.0.1:9100/audiocpp \\
                  WEAVIATE_URL=http://127.0.0.1:9100/weaviate-gibtsnicht \\
                  uv run uvicorn orchestrator.main:app --port 8000
     Terminal 3:  uv run python scripts/manual_audio_ws_test.py
+
+Die Fake-Vertrags-Engine traegt man bei Bedarf im Admin-Panel unter
+Sprachausgabe -> Engines nach dem Engine-Vertrag ein (Adresse
+http://127.0.0.1:9100/engine).
 """
 
 import asyncio
@@ -174,107 +176,66 @@ async def xtts_synthesize_full(payload: dict) -> Response:
     return Response(buffer.getvalue(), media_type="audio/wav")
 
 
-# --- Fake Breeze TTS 2 (Test-Engine, v1.17) ------------------------------------
-# Formular-Signatur wie im offiziellen Server (breeze_infer/api.py), damit
-# der Multipart-Request des Orchestrators gegen denselben Parser laeuft.
-breeze = FastAPI()
-
-
-@breeze.get("/health")
-async def breeze_health() -> dict:
-    return {"status": "ok", "sample_rate": 24000}
-
-
-@breeze.post("/v1/audio/speech")
-async def breeze_speech(
-    text: str = Form(...),
-    instruction: str | None = Form(None),
-    cfg_scale: float = Form(1.0),
-    ref_audio: UploadFile | None = File(None),
-    ref_text: str = Form(""),
-    seed: int = Form(42),
-) -> StreamingResponse:
-    has_reference = ref_audio is not None and bool(ref_audio.filename)
-    if has_reference != bool(ref_text.strip()):
-        raise HTTPException(
-            status_code=400,
-            detail="ref_audio and ref_text must be provided together or both omitted.",
-        )
-    # Klon = tieferer Ton, eingebaute Stimme = hoeherer - so hoert man im
-    # Probehoeren, welcher Modus gegriffen hat. Laenge grob wie gesprochen
-    # (~14 Zeichen/s), damit die Plausibilitaetspruefung der Filler passt.
-    base = 220 if has_reference else 330
-    part = (0.2 + len(text) / 14) / 3
-
-    async def generate():
-        for step in range(3):
-            yield _sine_pcm16(part, 24000, freq=base + 110 * step)
-            await asyncio.sleep(0.05)
-
-    return StreamingResponse(generate(), media_type="audio/pcm",
-                             headers={"X-Sample-Rate": "24000", "X-Sample-Format": "s16le"})
-
-
-# --- Fake-Engine nach dem Engine-Vertrag (Qwen3-TTS, v1.20) ---------------------
+# --- Fake-Engine nach dem Engine-Vertrag (v1.20) ----------------------------------
 # Zustaende wie tts-engine-kit: idle -> (Laden) -> ready, off; Synthese im
 # Zustand idle laedt, wartet aber nur mit load_timeout_s > 0 darauf.
-qwen3 = FastAPI()
-_qwen3 = {"assigned": "cuda:0", "state": "idle"}
+engine = FastAPI()
+_engine = {"assigned": "cuda:0", "state": "idle"}
 
 
-@qwen3.get("/v1/health")
-async def qwen3_health() -> dict:
-    return {"status": "ok", "state": _qwen3["state"]}
+@engine.get("/v1/health")
+async def engine_health() -> dict:
+    return {"status": "ok", "state": _engine["state"]}
 
 
-@qwen3.get("/v1/info")
-async def qwen3_info() -> dict:
-    return {"name": "Qwen3-TTS 1.7B (Fake)", "languages": ["de", "en"], "sample_rate": 24000,
+@engine.get("/v1/info")
+async def engine_info() -> dict:
+    return {"name": "Demo-TTS (Fake)", "languages": ["de", "en"], "sample_rate": 24000,
             "needs_sample": True, "uses_transcript": True, "instructions": False,
             "streaming": "sentence", "vram_mb": 5000, "contract": 1,
             "description": "Fake-Engine nach dem Engine-Vertrag."}
 
 
-def _qwen3_status() -> dict:
-    loaded = _qwen3["state"] == "ready"
-    return {"assigned": _qwen3["assigned"], "effective": _qwen3["assigned"] if loaded else None,
-            "loaded": loaded, "state": _qwen3["state"], "detail": "", "model": "Fake"}
+def _engine_status() -> dict:
+    loaded = _engine["state"] == "ready"
+    return {"assigned": _engine["assigned"], "effective": _engine["assigned"] if loaded else None,
+            "loaded": loaded, "state": _engine["state"], "detail": "", "model": "Fake"}
 
 
-@qwen3.get("/v1/device")
-async def qwen3_device() -> dict:
-    return _qwen3_status()
+@engine.get("/v1/device")
+async def engine_device() -> dict:
+    return _engine_status()
 
 
-@qwen3.post("/v1/device")
-async def qwen3_set_device(payload: dict) -> dict:
-    _qwen3["assigned"] = payload["device"]
+@engine.post("/v1/device")
+async def engine_set_device(payload: dict) -> dict:
+    _engine["assigned"] = payload["device"]
     if payload["device"] == "off":
-        _qwen3["state"] = "off"
+        _engine["state"] = "off"
     else:
         await asyncio.sleep(0.5)  # "laedt"
-        _qwen3["state"] = "ready"
-    return _qwen3_status()
+        _engine["state"] = "ready"
+    return _engine_status()
 
 
-@qwen3.post("/v1/synthesize")
-async def qwen3_synthesize(
+@engine.post("/v1/synthesize")
+async def engine_synthesize(
     text: str = Form(...),
     language: str | None = Form(None),
     ref_audio: UploadFile | None = File(None),
     ref_text: str | None = Form(None),
     load_timeout_s: float = Form(0.0),
 ) -> StreamingResponse:
-    if _qwen3["state"] == "off":
+    if _engine["state"] == "off":
         raise HTTPException(503, "Engine ist im Admin-Panel ausgeschaltet (GPUs)")
-    if _qwen3["state"] != "ready":
+    if _engine["state"] != "ready":
         if load_timeout_s <= 0:
-            _qwen3["state"] = "ready"  # "laedt im Hintergrund"
+            _engine["state"] = "ready"  # "laedt im Hintergrund"
             raise HTTPException(503, "Modell wird geladen - gleich noch einmal versuchen")
         await asyncio.sleep(0.5)
-        _qwen3["state"] = "ready"
+        _engine["state"] = "ready"
     if ref_audio is None:
-        raise HTTPException(400, "Qwen3-TTS braucht ein Voice-Sample")
+        raise HTTPException(400, "Die Demo-Engine braucht ein Voice-Sample")
     # Satz fuer Satz, Ton je nach Klon-Modus (mit Transkript tiefer).
     sentences = [part for part in text.replace("!", ".").replace("?", ".").split(".") if part.strip()]
     base = 200 if ref_text else 260
@@ -377,8 +338,7 @@ app.mount("/llm", llm)
 app.mount("/stt", stt)
 app.mount("/piper", piper)
 app.mount("/xtts", xtts)
-app.mount("/breeze", breeze)
-app.mount("/qwen3", qwen3)
+app.mount("/engine", engine)
 app.mount("/audiocpp", audiocpp)
 
 

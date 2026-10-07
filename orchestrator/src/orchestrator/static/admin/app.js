@@ -301,35 +301,15 @@ views.tts = async () => {
     ${audiocppSection}
     <section class="block">
       <h2>Engines nach dem Engine-Vertrag</h2>
-      <p class="hint">Jede Sprachausgabe, die den Engine-Vertrag spricht (<code>tts-engine-kit</code>, z. B. <code>tts-qwen3</code>), wird hier nur mit ID und Adresse eingetragen &ndash; Name, Sprachen und Faehigkeiten meldet sie selbst. Sie erscheint dann oben, beim Probehoeren, bei den Fillern und unter GPUs (Karte waehlen oder ganz aus).</p>
+      <p class="hint">Fuer eigene Sprachausgabe-Container neben audio.cpp: Jeder Dienst, der den Engine-Vertrag spricht (<code>tts-engine-kit</code>), wird hier nur mit ID und Adresse eingetragen &ndash; Name, Sprachen und Faehigkeiten meldet sie selbst. Sie erscheint dann oben, beim Probehoeren, bei den Fillern und unter GPUs (Karte waehlen oder ganz aus).</p>
       <table>
         <thead><tr><th>ID</th><th>Name</th><th>Adresse</th><th></th></tr></thead>
         <tbody>${contractRows}</tbody>
       </table>
       <form class="grid" data-submit="saveContractEngine" id="contract-engine-form">
-        <label>ID (klein, ohne Leerzeichen) <input name="id" required pattern="[a-z0-9][a-z0-9-]{0,30}" placeholder="qwen3" autocomplete="off" spellcheck="false"></label>
-        <label>Name (optional) <input name="label" maxlength="60" placeholder="Qwen3-TTS"></label>
-        <label class="full">Adresse &ndash; Container-Name:Port, IP:Port oder Domain <input name="url" required placeholder="http://tts-qwen3:8000" autocomplete="off" spellcheck="false"></label>
-        <div><button type="submit">Speichern</button></div>
-      </form>
-    </section>
-    <section class="block">
-      <h2>Breeze TTS 2 (eigener Server)</h2>
-      <p class="hint">Breeze klont eine Stimme nur mit Sample <strong>und</strong> exaktem Transkript (unter "Stimmen" pflegen); ohne Transkript spricht es mit seiner eingebauten Stimme. Offiziell unterstuetzt das Open-Weight-Modell nur Englisch und Chinesisch - deutsche Antworten koennen mit Akzent oder falsch ausgesprochen klingen. Der Server laeuft getrennt vom Voice-Stack, in einer von zwei Varianten mit derselben Schnittstelle: <strong>offizieller PyTorch-Server</strong> (<code>docker-compose.breeze.yml</code>, ~7,7 GB VRAM) oder <strong>Breeze-TTS-2.cpp</strong> (<code>docker-compose.breeze-cpp.yml</code> oder nativ, Q8_0 ~4 GB VRAM). Laeuft Breeze stattdessen ueber audio.cpp (Familie <code>breeze_tts</code>), diese Engine ausblenden.</p>
-      <form class="grid" data-submit="saveTtsSettings">
-        <label class="full check"><input type="checkbox" name="breeze_enabled" ${data.breeze_enabled ? "checked" : ""}> Breeze-Engine anzeigen (in der Engine-Liste, beim Probehoeren, bei den Fillern und unter GPUs)</label>
-        <label class="full"><span>Breeze-Server - Container-Name, IP:Port oder Domain (leer = Standard aus der .env: ${esc(data.breeze_url_default)})</span>
-          <input name="breeze_url" list="breeze-url-suggestions" value="${esc(data.breeze_url)}" placeholder="${esc(data.breeze_url_default)}" autocomplete="off" spellcheck="false">
-          <datalist id="breeze-url-suggestions">
-            <option value="http://tts-breeze:7860" label="Container: offizieller PyTorch-Server (docker-compose.breeze.yml)"></option>
-            <option value="http://tts-breeze-cpp:7860" label="Container: Breeze-TTS-2.cpp (docker-compose.breeze-cpp.yml)"></option>
-            <option value="http://192.168.2.105:7860" label="breeze-server nativ auf einem Rechner im LAN (IP anpassen)"></option>
-          </datalist>
-        </label>
-        <p class="hint full">Genutzt wird gerade: <code>${esc(data.breeze_url_effective)}</code>. Nach dem Speichern zeigt die Tabelle oben, ob der Server unter dieser Adresse antwortet.</p>
-        <label class="full">Sprechanweisung (optional, "Voice Direction") - steuert Tonfall, Tempo und Emotion; die Beispiele von Breeze sind auf Englisch. Breeze-TTS-2.cpp nutzt ohne Angabe "Speak clearly and naturally."
-          <textarea name="breeze_instruction" rows="2" placeholder="Speak in a warm, calm and friendly tone.">${esc(data.breeze_instruction)}</textarea>
-        </label>
+        <label>ID (klein, ohne Leerzeichen) <input name="id" required pattern="[a-z0-9][a-z0-9-]{0,30}" placeholder="meine-engine" autocomplete="off" spellcheck="false"></label>
+        <label>Name (optional) <input name="label" maxlength="60" placeholder="Meine Engine"></label>
+        <label class="full">Adresse &ndash; Container-Name:Port, IP:Port oder Domain <input name="url" required placeholder="http://tts-meine-engine:8000" autocomplete="off" spellcheck="false"></label>
         <div><button type="submit">Speichern</button></div>
       </form>
     </section>
@@ -649,7 +629,7 @@ views.voices = async () => {
 
   return `
     <h1>Stimmen</h1>
-    <p class="hint">Jede Stimme braucht ein WAV-Sample (~6-30s sauberes, deutsches Sprechmaterial) fuer das Voice-Cloning. Klonende Engines wie Qwen3-TTS, Breeze und die meisten audio.cpp-Modelle brauchen bzw. nutzen zusaetzlich das <strong>exakte Transkript</strong> des Samples: Es wird beim Upload per Whisper vorgeschlagen und laesst sich unter "Bearbeiten" korrigieren (Wiederholungen und Versprecher mit aufschreiben). Nach dem Austausch eines Samples: Filler neu generieren.</p>
+    <p class="hint">Jede Stimme braucht ein WAV-Sample (~6-30s sauberes, deutsches Sprechmaterial) fuer das Voice-Cloning. Die meisten audio.cpp-Modelle klonen ebenfalls aus diesem Sample und brauchen bzw. nutzen zusaetzlich das <strong>exakte Transkript</strong> des Samples: Es wird beim Upload per Whisper vorgeschlagen und laesst sich unter "Bearbeiten" korrigieren (Wiederholungen und Versprecher mit aufschreiben). Nach dem Austausch eines Samples: Filler neu generieren.</p>
     <section class="block">
       <table>
         <thead><tr><th>ID</th><th>Name</th><th>Sprache</th><th>Status</th><th>Transkript</th><th></th></tr></thead>
@@ -763,7 +743,7 @@ views.fillers = async () => {
     <tr data-trigger="${filler.trigger_id}"${shown(filler) ? "" : ' class="hidden"'}>
       <td>${esc(filler.title)}<br><small>"${esc(filler.text)}"</small></td>
       <td>${esc(filler.trigger_name)}</td>
-      <td class="nowrap" title="${esc(engineLabel[filler.engine] || "")}">${esc(engineShort(engineLabel[filler.engine] || filler.engine || "xtts"))}</td>
+      <td class="nowrap" title="${esc(engineLabel[filler.engine] || "Engine gibt es nicht mehr - Filler bearbeiten und eine andere waehlen")}">${engineLabel[filler.engine] || !filler.engine ? esc(engineShort(engineLabel[filler.engine] || "xtts")) : `${esc(filler.engine)} <span class="badge warn">gibt es nicht mehr</span>`}</td>
       <td class="nowrap">${filler.delay_ms} ms</td>
       <td>${filler.enabled ? '<span class="badge ok">aktiv</span>' : '<span class="badge off">aus</span>'}</td>
       <td>${audioCell}</td>
@@ -1086,12 +1066,6 @@ const formActions = {
     label: form.label.value.trim() || null,
   }),
 
-  saveTtsSettings: (form) => api.put("/v1/admin/tts/settings", {
-    breeze_url: form.breeze_url.value,
-    breeze_instruction: form.breeze_instruction.value,
-    breeze_enabled: form.breeze_enabled.checked,
-  }),
-
   saveAudioCpp: (form) => api.put("/v1/admin/tts/settings", {
     audiocpp_url: form.audiocpp_url.value,
     audiocpp_device: form.audiocpp_device.value,
@@ -1277,7 +1251,7 @@ const buttonActions = {
         const result = await api.request("POST", `/v1/admin/voices/${data.id}/sample`, body, true);
         if (result.transcript_error) {
           alert("Sample gespeichert, aber kein Transkript-Vorschlag moeglich: "
-            + `${result.transcript_error}\nFuer klonende Engines (Qwen3, Breeze, audio.cpp) bitte unter "Bearbeiten" von Hand eintragen.`);
+            + `${result.transcript_error}\nFuer klonende Engines (audio.cpp-Modelle) bitte unter "Bearbeiten" von Hand eintragen.`);
         }
         render();
       } catch (err) {
@@ -1334,6 +1308,8 @@ const buttonActions = {
     form.trigger_id.value = filler.trigger_id;
     form.delay_ms.value = filler.delay_ms;
     form.engine.value = filler.engine || "xtts";
+    // Engine gibt es nicht mehr (z. B. Breeze/Qwen3 bis v1.21) -> XTTS vorschlagen.
+    if (!form.engine.value) form.engine.value = "xtts";
     document.getElementById("filler-form-title").textContent = `Filler bearbeiten: ${filler.title}`;
     form.scrollIntoView({ behavior: "smooth" });
   },

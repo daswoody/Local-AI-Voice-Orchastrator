@@ -207,10 +207,6 @@ button.busy::after {
 .vram-bar span.hot { background: var(--danger); }
 .vram-text { color: var(--muted); font-size: .82rem; }
 
-/* Checkbox mit Text daneben statt darunter (v1.21) */
-label.check { flex-direction: row; align-items: center; gap: .5rem; color: var(--text); }
-label.check input { width: auto; }
-
 /* Button-Zeile unter einer Tabelle (audio.cpp, v1.21) */
 .actions-row { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .8rem; }
 section.block a { color: var(--accent); }

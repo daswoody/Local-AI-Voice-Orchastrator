@@ -56,11 +56,18 @@ def _form(request: httpx.Request) -> dict[str, bytes]:
     return fields
 
 
+@pytest.fixture(autouse=True)
+def demo_engine():
+    """Eine eingetragene Vertrags-Engine (seit v1.22 ist keine mehr
+    vorbelegt - Qwen3-TTS laeuft ueber audio.cpp)."""
+    repos.upsert_contract_engine("demo", "http://tts-demo:8000", "Demo-TTS")
+
+
 def _pcm_answer(request: httpx.Request) -> httpx.Response:
     return httpx.Response(200, headers={"x-sample-rate": "24000"}, content=b"\x07\x07" * 2400)
 
 
-qwen3 = ContractClient(lambda: "http://tts-qwen3:8000")
+demo = ContractClient(lambda: "http://tts-demo:8000")
 
 
 # ---- Client --------------------------------------------------------------------------------
@@ -72,11 +79,11 @@ async def test_client_sends_text_language_and_the_normalized_sample(monkeypatch)
     requests: list[httpx.Request] = []
     _mock_http(monkeypatch, lambda request: requests.append(request) or _pcm_answer(request))
 
-    chunks = [c async for c in qwen3.stream("Hallo Welt.", "default-de-female", load_timeout_s=240)]
+    chunks = [c async for c in demo.stream("Hallo Welt.", "default-de-female", load_timeout_s=240)]
 
     assert chunks == [(24000, b"\x07\x07" * 2400)]
     request = requests[0]
-    assert str(request.url) == "http://tts-qwen3:8000/v1/synthesize"
+    assert str(request.url) == "http://tts-demo:8000/v1/synthesize"
     form = _form(request)
     assert form["text"] == "Hallo Welt.".encode() and form["language"] == b"de"
     assert form["voice_id"] == b"default-de-female" and form["load_timeout_s"] == b"240"
@@ -90,8 +97,8 @@ async def test_sample_without_transcript_is_sent_alone_and_no_sample_sends_none(
     requests: list[httpx.Request] = []
     _mock_http(monkeypatch, lambda request: requests.append(request) or _pcm_answer(request))
 
-    [c async for c in qwen3.stream("Hallo.", "default-de-female")]
-    [c async for c in qwen3.stream("Hallo.", "default-de-male")]
+    [c async for c in demo.stream("Hallo.", "default-de-female")]
+    [c async for c in demo.stream("Hallo.", "default-de-male")]
 
     with_sample, without_sample = (_form(r) for r in requests)
     assert "ref_audio" in with_sample and "ref_text" not in with_sample
@@ -104,17 +111,17 @@ async def test_engine_errors_carry_its_reason(monkeypatch):
         503, json={"detail": "Modell wird geladen - gleich noch einmal versuchen"}))
 
     with pytest.raises(ContractEngineError, match="Modell wird geladen") as error:
-        [c async for c in qwen3.stream("Hallo.", "default-de-female")]
+        [c async for c in demo.stream("Hallo.", "default-de-female")]
     assert error.value.status_code == 503
 
 
 async def test_busy_engine_is_asked_again(monkeypatch):
-    monkeypatch.setattr(qwen3, "busy_wait_s", 0)
+    monkeypatch.setattr(demo, "busy_wait_s", 0)
     answers = iter([httpx.Response(409, json={"detail": "Engine ist belegt"}),
                     _pcm_answer(None)])
     _mock_http(monkeypatch, lambda request: next(answers))
 
-    assert [c async for c in qwen3.stream("Hallo.", "default-de-female")] == [(24000, b"\x07\x07" * 2400)]
+    assert [c async for c in demo.stream("Hallo.", "default-de-female")] == [(24000, b"\x07\x07" * 2400)]
 
 
 # ---- Registry und Verwaltung im Panel ------------------------------------------------------
@@ -149,8 +156,8 @@ def test_invalid_engine_entries_are_refused(client, admin_headers):
 
 
 def test_the_active_engine_cannot_be_removed(client, admin_headers):
-    repos.set_setting(tts_engines.ACTIVE_ENGINE_SETTING, "qwen3")
-    assert client.delete("/v1/admin/tts/engines/qwen3", headers=admin_headers).status_code == 409
+    repos.set_setting(tts_engines.ACTIVE_ENGINE_SETTING, "demo")
+    assert client.delete("/v1/admin/tts/engines/demo", headers=admin_headers).status_code == 409
 
 
 @pytest.mark.parametrize(("device", "expected"), [
@@ -163,14 +170,14 @@ def test_the_active_engine_cannot_be_removed(client, admin_headers):
 ])
 async def test_status_follows_the_engine_state(monkeypatch, device, expected):
     _mock_http(monkeypatch, lambda request: httpx.Response(200, json=device))
-    status = await tts_engines.engine_status("qwen3")
+    status = await tts_engines.engine_status("demo")
     assert {key: status[key] for key in expected} == expected
 
 
 async def test_overview_reads_the_engine_profile(client, admin_headers, monkeypatch):
     def handler(request):
         if request.url.path == "/v1/info":
-            return httpx.Response(200, json={"name": "Qwen3-TTS 1.7B", "languages": ["de", "en"],
+            return httpx.Response(200, json={"name": "Demo-TTS 1.0", "languages": ["de", "en"],
                                              "needs_sample": True, "description": "Klont."})
         if request.url.path == "/v1/device":
             return httpx.Response(200, json={"state": "idle"})
@@ -180,9 +187,9 @@ async def test_overview_reads_the_engine_profile(client, admin_headers, monkeypa
 
     engines = {e["id"]: e for e in await tts_engines.overview()}
 
-    assert engines["qwen3"]["label"] == "Qwen3-TTS"  # Name aus dem Panel geht vor
-    assert "Sprachen: de, en." in engines["qwen3"]["description"]
-    assert engines["qwen3"]["status"]["status"] == "idle"
+    assert engines["demo"]["label"] == "Demo-TTS"  # Name aus dem Panel geht vor
+    assert "Sprachen: de, en." in engines["demo"]["description"]
+    assert engines["demo"]["status"]["status"] == "idle"
 
 
 # ---- Aktivieren: laden, Nachbarn auf derselben Karte entladen -------------------------------
@@ -209,33 +216,33 @@ def _fake_services(monkeypatch, live: dict[str, dict]) -> list:
 
 async def test_activating_unloads_the_neighbour_on_the_same_card(monkeypatch):
     live = {"tts-xtts": {"assigned": "cuda:0", "effective": "cuda:0", "loaded": True},
-            "tts-qwen3": {"assigned": "cuda:0", "effective": None, "loaded": False, "state": "idle"}}
+            "tts-demo": {"assigned": "cuda:0", "effective": None, "loaded": False, "state": "idle"}}
     calls = _fake_services(monkeypatch, live)
 
-    notes = await tts_engines.activate("qwen3")
+    notes = await tts_engines.activate("demo")
 
-    assert calls == [("tts-xtts", "off"), ("tts-qwen3", "cuda:0")]
-    assert tts_engines.active_engine() == "qwen3"
+    assert calls == [("tts-xtts", "off"), ("tts-demo", "cuda:0")]
+    assert tts_engines.active_engine() == "demo"
     assert gpu_manager.is_off("tts-xtts") and gpu_manager.last_device("tts-xtts") == "cuda:0"
-    assert notes == ["XTTS entladen (gleiche Karte, cuda:0).", "Qwen3-TTS geladen auf cuda:0."]
+    assert notes == ["XTTS entladen (gleiche Karte, cuda:0).", "Demo-TTS geladen auf cuda:0."]
     # XTTS ist aus -> Piper faengt Ausfaelle ab
     assert tts_engines.fallback_engine() == "piper"
 
-    # Zurueck zu XTTS: wieder an auf seiner alten Karte, Qwen3 wird entladen.
+    # Zurueck zu XTTS: wieder an auf seiner alten Karte, die Demo-Engine wird entladen.
     calls.clear()
     await tts_engines.activate("xtts")
-    assert calls == [("tts-qwen3", "off"), ("tts-xtts", "cuda:0")]
+    assert calls == [("tts-demo", "off"), ("tts-xtts", "cuda:0")]
     assert tts_engines.fallback_engine() == "xtts"
 
 
 async def test_engines_on_the_other_card_stay_loaded(monkeypatch):
-    gpu_manager.store_assignment("tts-qwen3", "cuda:1")
+    gpu_manager.store_assignment("tts-demo", "cuda:1")
     live = {"tts-xtts": {"assigned": "cuda:0", "effective": "cuda:0", "loaded": True}}
     calls = _fake_services(monkeypatch, live)
 
-    await tts_engines.activate("qwen3")
+    await tts_engines.activate("demo")
 
-    assert calls == [("tts-qwen3", "cuda:1")]
+    assert calls == [("tts-demo", "cuda:1")]
     assert not gpu_manager.is_off("tts-xtts") and tts_engines.fallback_engine() == "xtts"
 
 
@@ -249,17 +256,17 @@ async def test_load_failure_is_reported_but_the_choice_stays(monkeypatch):
 
     monkeypatch.setattr(gpu_manager, "set_service_device", failing)
 
-    notes = await tts_engines.activate("qwen3")
+    notes = await tts_engines.activate("demo")
 
-    assert notes == ["Qwen3-TTS: Laden fehlgeschlagen: CUDA out of memory"]
-    assert tts_engines.active_engine() == "qwen3"
+    assert notes == ["Demo-TTS: Laden fehlgeschlagen: CUDA out of memory"]
+    assert tts_engines.active_engine() == "demo"
 
 
 # ---- Sprechen: Live-Turn, Probehoeren, Filler ------------------------------------------------
 
 
 async def test_live_answer_falls_back_while_the_engine_loads(monkeypatch):
-    repos.set_setting(tts_engines.ACTIVE_ENGINE_SETTING, "qwen3")
+    repos.set_setting(tts_engines.ACTIVE_ENGINE_SETTING, "demo")
     _mock_http(monkeypatch, lambda request: httpx.Response(503, json={"detail": "Modell wird geladen"}))
 
     async def xtts(text, voice_id=None, language=None):
@@ -277,7 +284,7 @@ def test_preview_waits_for_the_engine_to_load(client, admin_headers, monkeypatch
     _mock_http(monkeypatch, lambda request: requests.append(request) or _pcm_answer(request))
 
     response = client.post("/v1/admin/tts/preview", headers=admin_headers,
-                           json={"engine": "qwen3", "voice_id": "default-de-female", "text": "Hallo"})
+                           json={"engine": "demo", "voice_id": "default-de-female", "text": "Hallo"})
 
     assert response.status_code == 200
     assert _form(requests[0])["load_timeout_s"] == str(tts_engines.PREVIEW_LOAD_TIMEOUT_S).encode()
@@ -289,8 +296,8 @@ async def test_fillers_can_be_spoken_by_a_contract_engine(client, monkeypatch):
     tone = b"".join(int(8000 * math.sin(i / 8)).to_bytes(2, "little", signed=True) for i in range(24000))
     _mock_http(monkeypatch, lambda request: httpx.Response(
         200, headers={"x-sample-rate": "24000"}, content=tone))
-    trigger = repos.create_trigger("T-qwen3", "thinking", None)
-    filler = repos.create_filler("Titel", "Moment bitte.", trigger["id"], True, delay_ms=0, engine="qwen3")
+    trigger = repos.create_trigger("T-demo", "thinking", None)
+    filler = repos.create_filler("Titel", "Moment bitte.", trigger["id"], True, delay_ms=0, engine="demo")
 
     results = await filler_service.generate_audio(filler["id"])
 

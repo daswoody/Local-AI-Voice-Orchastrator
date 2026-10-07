@@ -249,7 +249,7 @@ async def _generate_with_xtts(filler: dict, voice_ids: list[str]) -> list[dict]:
 
 
 async def _generate_with_engine(filler: dict, voice_ids: list[str], engine_id: str) -> list[dict]:
-    """Weitere Engines aus der Registry (z. B. Breeze TTS 2, v1.17) ueber
+    """Weitere Engines aus der Registry (audio.cpp-Modelle, Vertrags-Engines) ueber
     ihren Stream: pro Stimme ein Versuch mit derselben Textaufbereitung,
     Trimmung und Plausibilitaetspruefung wie bei XTTS - nur ohne dessen
     Temperatur-Neuversuche, die kennt die gemeinsame Schnittstelle nicht."""

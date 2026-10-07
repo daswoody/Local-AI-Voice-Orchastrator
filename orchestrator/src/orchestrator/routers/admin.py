@@ -21,14 +21,7 @@ from ..security import hash_password, require_admin
 from ..services import audiocpp, filler_service, gpu_manager, tts_engines
 from ..services.litellm_client import litellm_client
 from ..services.stt_client import stt_client
-from ..services.tts_client import (
-    BREEZE_ENABLED_SETTING,
-    BREEZE_INSTRUCTION_SETTING,
-    BREEZE_URL_SETTING,
-    breeze_base_url,
-    breeze_enabled,
-    normalize_base_url,
-)
+from ..services.tts_client import normalize_base_url
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/admin", dependencies=[Depends(require_admin)])
@@ -163,8 +156,8 @@ class VoiceCreate(BaseModel):
 class VoiceUpdate(BaseModel):
     name: str | None = None
     language: str | None = None
-    # Exaktes Transkript des Samples (v1.17) - braucht Breeze TTS 2 fuers
-    # Voice-Cloning. Leer = keins.
+    # Exaktes Transkript des Samples (v1.17) - damit klonen audio.cpp-Modelle
+    # und Vertrags-Engines am genauesten. Leer = keins.
     sample_text: str | None = None
 
 
@@ -242,7 +235,7 @@ async def upload_voice_sample(voice_id: str, file: UploadFile) -> dict:
     # Achtung: Bereits vorgenerierte Filler dieser Stimme klingen noch nach
     # dem alten Sample - im Panel neu generieren.
 
-    # Transkript fuer Breeze (v1.17) gleich mit vorschlagen. Ein altes
+    # Transkript fuer klonende Engines (v1.17) gleich mit vorschlagen. Ein altes
     # Transkript passt zum neuen Sample nicht mehr und wird so oder so
     # ersetzt - ein falsches Transkript verdirbt das Voice-Cloning.
     transcript, error = await _transcribe_sample(content)
@@ -447,14 +440,6 @@ class ContractEnginePayload(BaseModel):
 
 class TtsSettingsPayload(BaseModel):
     # Nur mitgeschickte Felder werden geaendert.
-    # Optionale Sprechanweisung fuer Breeze ("Voice Direction"), z. B.
-    # "Speak in a warm, calm tone." - leer = keine.
-    breeze_instruction: str | None = None
-    # Adresse des Breeze-Servers (v1.18): Container-Name, IP:Port oder
-    # Domain - leer = BREEZE_BASE_URL aus der .env.
-    breeze_url: str | None = None
-    # Breeze-Engine anzeigen (v1.21) - aus, wenn Breeze ueber audio.cpp laeuft.
-    breeze_enabled: bool | None = None
     # audio.cpp (v1.21): Adresse (leer = AUDIOCPP_BASE_URL aus der .env) und
     # die Karte, auf der es rechnet ("" = nicht angegeben).
     audiocpp_url: str | None = None
@@ -486,11 +471,6 @@ async def tts_overview() -> dict:
         # Fuer die Auswahl "Karte von audio.cpp".
         "gpus": [{"device": gpu["device"], "label": f"GPU {gpu['index']} - {gpu['name']}"}
                  for gpu in gpu_manager.list_gpus().get("gpus", [])],
-        "breeze_enabled": breeze_enabled(),
-        "breeze_instruction": repos.get_setting(BREEZE_INSTRUCTION_SETTING) or "",
-        "breeze_url": repos.get_setting(BREEZE_URL_SETTING) or "",
-        "breeze_url_default": settings.breeze_base_url.rstrip("/"),
-        "breeze_url_effective": breeze_base_url(),
     }
 
 
@@ -579,26 +559,12 @@ async def preview_tts(payload: TtsPreviewPayload) -> Response:
 @router.put("/tts/settings")
 def save_tts_settings(payload: TtsSettingsPayload) -> dict:
     # Erst alles pruefen, dann speichern - ein Fehler soll nichts halb setzen.
-    breeze_url = audiocpp_url = None
-    try:
-        if payload.breeze_url is not None:
-            breeze_url = normalize_base_url(payload.breeze_url)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=f"Breeze-Adresse ungueltig: {exc}")
+    audiocpp_url = None
     try:
         if payload.audiocpp_url is not None:
             audiocpp_url = normalize_base_url(payload.audiocpp_url)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"audio.cpp-Adresse ungueltig: {exc}")
-    if payload.breeze_enabled is False and tts_engines.active_engine() == "breeze":
-        raise HTTPException(status_code=409, detail=(
-            "Breeze ist die aktive Hauptstimme - erst eine andere Engine aktivieren, dann ausblenden."))
-    if breeze_url is not None:
-        repos.set_setting(BREEZE_URL_SETTING, breeze_url)
-    if payload.breeze_instruction is not None:
-        repos.set_setting(BREEZE_INSTRUCTION_SETTING, payload.breeze_instruction.strip())
-    if payload.breeze_enabled is not None:
-        repos.set_setting(BREEZE_ENABLED_SETTING, "1" if payload.breeze_enabled else "0")
     if audiocpp_url is not None:
         before = audiocpp.base_url()
         repos.set_setting(audiocpp.URL_SETTING, audiocpp_url)
@@ -609,10 +575,6 @@ def save_tts_settings(payload: TtsSettingsPayload) -> dict:
     if payload.audiocpp_device is not None:
         repos.set_setting(audiocpp.DEVICE_SETTING, payload.audiocpp_device)
     return {
-        "breeze_enabled": breeze_enabled(),
-        "breeze_instruction": repos.get_setting(BREEZE_INSTRUCTION_SETTING) or "",
-        "breeze_url": repos.get_setting(BREEZE_URL_SETTING) or "",
-        "breeze_url_effective": breeze_base_url(),
         "audiocpp_url": repos.get_setting(audiocpp.URL_SETTING) or "",
         "audiocpp_url_effective": audiocpp.base_url(),
         "audiocpp_device": audiocpp.device(),

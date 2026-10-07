@@ -4,11 +4,13 @@ Eine Engine ist ein Dienst, der Text in PCM16 verwandelt. Alle Clients
 sprechen dieselbe Schnittstelle - stream(text, voice_id) liefert
 (Samplerate, PCM16-Chunk)-Tupel -, damit Antwort-Pipeline,
 Filler-Generierung und Probehoeren die Engine nur ueber ihre ID kennen.
-Fest eingebaut sind XTTS, Piper und Breeze (ENGINES); jede weitere Engine
-folgt dem Engine-Vertrag (tts-engine-kit) und wird im Admin-Panel nur mit
-ID + Adresse eingetragen - Client-Code braucht sie keinen (registry()).
-Dazu kommt jedes TTS-Modell eines audio.cpp-Servers als Engine
-"audiocpp:<Modell-ID>" (v1.21, angebunden wie LiteLLM, siehe audiocpp).
+Fest eingebaut sind XTTS und Piper (ENGINES). Dazu kommt jedes TTS-Modell
+eines audio.cpp-Servers als Engine "audiocpp:<Modell-ID>" (v1.21,
+angebunden wie LiteLLM, siehe audiocpp) und jede Engine nach dem
+Engine-Vertrag (tts-engine-kit), die im Admin-Panel nur mit ID + Adresse
+eingetragen wird - Client-Code braucht keine davon (registry()). Breeze
+TTS 2 und Qwen3-TTS als eigene Container sind seit v1.22 ausgebaut, beide
+laufen ueber audio.cpp.
 
 Welche Engine die Hauptantwort spricht, waehlt der Admin im Panel
 (app_settings, Fallback .env TTS_ENGINE) - server-weit wie das aktive LLM
@@ -28,14 +30,7 @@ import httpx
 from .. import repos
 from ..config import settings
 from . import audiocpp, gpu_manager
-from .tts_client import (
-    ContractClient,
-    breeze_base_url,
-    breeze_client,
-    breeze_enabled,
-    piper_client,
-    xtts_client,
-)
+from .tts_client import ContractClient, piper_client, xtts_client
 
 logger = logging.getLogger(__name__)
 
@@ -89,34 +84,6 @@ ENGINES: dict[str, dict] = {
                        "klingt nicht nach der Nutzerstimme. Guter Ausweg, "
                        "wenn eine GPU-Engine an einem Text scheitert.",
     },
-    "breeze": {
-        "label": "Breeze TTS 2 (Test)",
-        "name": "Breeze",
-        "client": breeze_client,
-        "per_voice": True,
-        "needs_sample": False,
-        "container": "heimai-tts-breeze",
-        "deploy_hint": "Breeze laeuft separat: als Container (docker-compose.breeze.yml "
-                       "oder docker-compose.breeze-cpp.yml, in Coolify anlegen bzw. starten - "
-                       "der erste Start dauert) oder als breeze-server auf einem Rechner im "
-                       "Netz. Laeuft er, die Adresse unter 'Breeze-Server' pruefen.",
-        "logs_hint": "Logs pruefen: 'docker logs heimai-tts-breeze' bzw. "
-                     "'heimai-tts-breeze-cpp', nativ die Konsole von breeze-server",
-        # Breeze-TTS-2.cpp schickt die Antwort-Header schon vor dem Kodieren
-        # der Referenz - ein CUDA-Fehler danach beendet den Prozess mitten
-        # im Stream.
-        "crash_hint": "Haeufigste Ursachen: VRAM der Karte voll (Log: 'out of memory' - "
-                      "andere Dienste von der Karte nehmen oder ein kuerzeres Sample) "
-                      "oder BREEZE_CUDA_ARCHS deckt die Karte nicht ab (Log: 'no kernel "
-                      "image is available').",
-        "base_url": breeze_base_url,
-        # Offizieller Server: /health antwortet 503, solange das Modell laedt.
-        "health_path": "/health",
-        "description": "Open-Weight-Modell: klont die Stimme aus Sample + exaktem "
-                       "Transkript, sonst eingebaute Stimme. Offiziell nur "
-                       "Englisch/Chinesisch. Eigener Server: PyTorch (~7,7 GB VRAM) "
-                       "oder Breeze-TTS-2.cpp (~4 GB), Adresse unter 'Breeze-Server'.",
-    },
 }
 
 
@@ -137,11 +104,7 @@ def registry() -> dict[str, dict]:
     """Alle Engines: fest eingebaute + Vertrags-Engines aus der Datenbank +
     die TTS-Modelle von audio.cpp (zuletzt gesehene Liste, v1.21)."""
     stored = repos.get_setting(ACTIVE_ENGINE_SETTING) or settings.tts_engine
-    engines = {
-        engine_id: spec for engine_id, spec in ENGINES.items()
-        # Breeze laesst sich ausblenden (v1.21) - nur nicht als Hauptstimme.
-        if engine_id != "breeze" or stored == "breeze" or breeze_enabled()
-    }
+    engines = dict(ENGINES)
     for row in repos.list_contract_engines():
         engines[row["id"]] = _contract_spec(row)
     models = _audiocpp_models(stored)
@@ -655,7 +618,7 @@ async def _revive(service: str) -> None:
 class Synthesis:
     pcm: bytes
     rate: int
-    # Zeit bis zum ersten Chunk (bei XTTS/Breeze ~1 s Audio) und fuer die
+    # Zeit bis zum ersten Chunk (bei XTTS ~1 s Audio) und fuer die
     # komplette Synthese - Grundlage fuer den Engine-Vergleich im Panel.
     first_chunk_ms: float
     total_ms: float
@@ -769,11 +732,8 @@ def stream_abort_detail(engine_id: str) -> str:
     httpx-Wortlauts, der wie ein Fehler des Orchestrators aussieht."""
     spec = get_engine(engine_id)
     logs = spec.get("logs_hint") or f"Logs pruefen: 'docker logs {spec['container']}'"
-    detail = (f"{spec['name']}-Server hat die Verbindung mitten in der Synthese abgebrochen - "
-              f"er ist dabei vermutlich abgestuerzt. {logs} (Fehlertext), dazu nvidia-smi (VRAM).")
-    if spec.get("crash_hint"):
-        detail += " " + spec["crash_hint"]
-    return detail
+    return (f"{spec['name']}-Server hat die Verbindung mitten in der Synthese abgebrochen - "
+            f"er ist dabei vermutlich abgestuerzt. {logs} (Fehlertext), dazu nvidia-smi (VRAM).")
 
 
 def _caused_by(exc: BaseException, kind: type) -> bool:

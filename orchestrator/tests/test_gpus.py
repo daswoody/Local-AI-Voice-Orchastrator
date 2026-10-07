@@ -47,17 +47,17 @@ def test_gpu_overview_requires_admin(client):
 def test_overview_lists_all_services(client, admin_headers, monkeypatch):
     """Alle Dienste stehen in der Liste - auch die, die wir nicht
     umschalten koennen (Piper: CPU per Design, LM Studio: laeuft auf dem
-    Host, Breeze: Karte fest per Compose)."""
+    Host) - und jede Engine nach dem Engine-Vertrag als eigener Dienst."""
     _unreachable_services(monkeypatch)
+    from orchestrator import repos
+
+    repos.upsert_contract_engine("demo", "http://tts-demo:8000", "Demo-TTS")
 
     body = client.get("/v1/admin/gpus", headers=admin_headers).json()
 
     services = {entry["name"]: entry for entry in body["services"]}
-    # tts-qwen3: vorbelegte Engine nach dem Engine-Vertrag (v1.20)
-    assert set(services) == {"stt", "tts-xtts", "tts-breeze", "tts-piper", "llm", "tts-qwen3"}
-    assert services["tts-qwen3"]["controllable"] is True and services["tts-qwen3"]["can_disable"] is True
-    assert services["tts-breeze"]["controllable"] is False
-    assert "BREEZE_GPU" in services["tts-breeze"]["control_hint"]
+    assert set(services) == {"stt", "tts-xtts", "tts-piper", "llm", "tts-demo"}
+    assert services["tts-demo"]["controllable"] is True and services["tts-demo"]["can_disable"] is True
     assert services["stt"]["controllable"] is True
     assert services["tts-xtts"]["controllable"] is True
     assert services["tts-piper"]["controllable"] is False
@@ -260,7 +260,7 @@ def test_xtts_stays_on_while_it_speaks_the_main_answer(client, admin_headers, mo
 def test_xtts_can_be_switched_off_and_the_choice_is_remembered(client, admin_headers, monkeypatch):
     from orchestrator.services import tts_engines
 
-    tts_engines.set_active_engine("breeze")
+    tts_engines.set_active_engine("piper")
     calls = _recording_set(monkeypatch)
     _unreachable_services(monkeypatch)
 

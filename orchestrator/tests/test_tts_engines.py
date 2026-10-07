@@ -1,4 +1,5 @@
-"""TTS-Engine-Wechsel der Hauptstimme + Breeze TTS 2 als Test-Engine (v1.17)."""
+"""TTS-Engine-Wechsel der Hauptstimme (v1.17): Wahl im Panel, Rueckfallebene,
+Probehoeren, Filler mit anderen Engines, Sample-Transkript."""
 
 import base64
 import io
@@ -18,9 +19,7 @@ from orchestrator.config import settings
 from orchestrator.routers import stream as stream_module
 from orchestrator.services import filler_service, tts_engines
 from orchestrator.services.tts_client import (
-    BREEZE_INSTRUCTION_SETTING,
-    BREEZE_URL_SETTING,
-    breeze_client,
+    ContractClient,
     normalize_base_url,
     piper_client,
     xtts_client,
@@ -51,6 +50,19 @@ def _fake_engine(marker: bytes, calls: list | None = None):
         yield 24000, marker * 1200
 
     return stream
+
+
+def _demo_engine(monkeypatch, stream=None, url: str = "http://tts-demo:8000") -> str:
+    """Eine dritte Engine neben XTTS und Piper: eine eingetragene
+    Vertrags-Engine, deren Client (optional) durch `stream` ersetzt wird."""
+    repos.upsert_contract_engine("demo", url, "Demo-TTS")
+    if stream is not None:
+        async def fake(self, text, voice_id, language=None, load_timeout_s=0.0):
+            async for item in stream(text, voice_id, language):
+                yield item
+
+        monkeypatch.setattr(ContractClient, "stream", fake)
+    return "demo"
 
 
 def _voice_turn(client, monkeypatch) -> list[dict]:
@@ -97,8 +109,8 @@ def test_active_engine_defaults_to_xtts_and_follows_env_and_admin(monkeypatch):
     assert tts_engines.active_engine() == "piper"
 
     # Admin-Wahl schlaegt .env
-    tts_engines.set_active_engine("breeze")
-    assert tts_engines.active_engine() == "breeze"
+    tts_engines.set_active_engine("xtts")
+    assert tts_engines.active_engine() == "xtts"
 
 
 def test_unknown_stored_engine_falls_back_to_xtts():
@@ -113,17 +125,17 @@ def test_admin_overview_and_activation(client, admin_headers, monkeypatch):
     body = client.get("/v1/admin/tts", headers=admin_headers).json()
     assert body["active_engine"] == "xtts"
     by_id = {engine["id"]: engine for engine in body["engines"]}
-    assert set(by_id) == {"xtts", "piper", "breeze", "qwen3"}
-    assert body["contract_engines"] == [
-        {"id": "qwen3", "url": "http://tts-qwen3:8000", "label": "Qwen3-TTS"}]
-    assert by_id["breeze"]["status"]["status"] == "ok"
+    # Breeze und Qwen3 laufen seit v1.22 ueber audio.cpp, nichts vorbelegt
+    assert set(by_id) == {"xtts", "piper"}
+    assert body["contract_engines"] == []
+    assert by_id["piper"]["status"]["status"] == "ok"
 
     activated = client.post(
-        "/v1/admin/tts/activate", json={"engine": "breeze"}, headers=admin_headers
+        "/v1/admin/tts/activate", json={"engine": "piper"}, headers=admin_headers
     ).json()
-    assert activated["active_engine"] == "breeze"
+    assert activated["active_engine"] == "piper"
     assert "warning" not in activated
-    assert client.get("/v1/admin/tts", headers=admin_headers).json()["active_engine"] == "breeze"
+    assert client.get("/v1/admin/tts", headers=admin_headers).json()["active_engine"] == "piper"
 
 
 def test_activating_unreachable_engine_warns_but_is_allowed(client, admin_headers, monkeypatch):
@@ -132,10 +144,10 @@ def test_activating_unreachable_engine_warns_but_is_allowed(client, admin_header
     _ok_status(monkeypatch, status="unreachable")
 
     body = client.post(
-        "/v1/admin/tts/activate", json={"engine": "breeze"}, headers=admin_headers
+        "/v1/admin/tts/activate", json={"engine": "piper"}, headers=admin_headers
     ).json()
 
-    assert body["active_engine"] == "breeze"
+    assert body["active_engine"] == "piper"
     assert "XTTS" in body["warning"]
 
     # Auch XTTS selbst meldet, wenn es gerade nicht antwortet
@@ -155,7 +167,7 @@ def test_activating_unknown_engine_is_rejected(client, admin_headers):
 
 async def test_unknown_host_says_the_container_is_missing(monkeypatch):
     """Nutzer-Report: "[Errno -2] Name or service not known" beim Aktivieren
-    sah wie ein Programmfehler aus - gemeint ist: Breeze-Container laeuft
+    sah wie ein Programmfehler aus - gemeint ist: der Container laeuft
     nicht. Die Meldung sagt jetzt genau das und was zu tun ist."""
 
     def handler(request):
@@ -167,13 +179,12 @@ async def test_unknown_host_says_the_container_is_missing(monkeypatch):
 
     _mock_http(monkeypatch, handler)
 
-    status = await tts_engines.engine_status("breeze")
+    status = await tts_engines.engine_status("xtts")
 
     assert status["status"] == "unreachable"
     assert "Server nicht gefunden" in status["detail"]
-    assert "'tts-breeze'" in status["detail"]
-    assert "docker-compose.breeze.yml" in status["detail"]
-    assert "docker-compose.breeze-cpp.yml" in status["detail"]
+    assert "'tts-xtts'" in status["detail"]
+    assert "Voice-Stack" in status["detail"]
 
 
 async def test_refused_connection_points_to_the_logs(monkeypatch):
@@ -185,11 +196,10 @@ async def test_refused_connection_points_to_the_logs(monkeypatch):
 
     _mock_http(monkeypatch, handler)
 
-    status = await tts_engines.engine_status("breeze")
+    status = await tts_engines.engine_status("xtts")
 
     assert status["status"] == "unreachable"
-    assert "docker logs heimai-tts-breeze" in status["detail"]
-    assert "breeze-server" in status["detail"]  # auch der native Weg
+    assert "docker logs heimai-tts-xtts" in status["detail"]
 
 
 async def test_timeout_is_named_as_such(monkeypatch):
@@ -204,79 +214,27 @@ async def test_timeout_is_named_as_such(monkeypatch):
                       "detail": "'tts-xtts' antwortet nicht innerhalb von 3 s."}
 
 
-# ---- Breeze-Server-Adresse (v1.18) ------------------------------------------------------
+# ---- Adressen aus dem Panel (audio.cpp, Vertrags-Engines) ---------------------------------
 
 
 @pytest.mark.parametrize("raw, expected", [
     ("", ""),
     ("   ", ""),
-    ("http://tts-breeze-cpp:7860", "http://tts-breeze-cpp:7860"),
-    ("192.168.2.105:7860/", "http://192.168.2.105:7860"),
-    ("breeze.example.org", "http://breeze.example.org"),
-    ("https://ai.example.org/breeze/", "https://ai.example.org/breeze"),
+    ("http://audiocpp:8080", "http://audiocpp:8080"),
+    ("192.168.2.105:8080/", "http://192.168.2.105:8080"),
+    ("audiocpp.example.org", "http://audiocpp.example.org"),
+    ("https://ai.example.org/audiocpp/", "https://ai.example.org/audiocpp"),
 ])
-def test_breeze_url_is_normalized(raw, expected):
+def test_base_url_is_normalized(raw, expected):
     assert normalize_base_url(raw) == expected
 
 
 @pytest.mark.parametrize("raw", [
-    "ftp://breeze:21", "http://", "http://breeze:99999", "http://breeze:7860/?x=1",
+    "ftp://audiocpp:21", "http://", "http://audiocpp:99999", "http://audiocpp:8080/?x=1",
 ])
-def test_invalid_breeze_url_is_rejected(raw):
+def test_invalid_base_url_is_rejected(raw):
     with pytest.raises(ValueError):
         normalize_base_url(raw)
-
-
-def test_breeze_url_can_be_set_and_reset_in_the_panel(client, admin_headers, monkeypatch):
-    _ok_status(monkeypatch)
-    body = client.get("/v1/admin/tts", headers=admin_headers).json()
-    assert body["breeze_url"] == ""
-    assert body["breeze_url_effective"] == "http://tts-breeze:7860"  # .env-Standard
-
-    saved = client.put("/v1/admin/tts/settings", json={"breeze_url": "192.168.2.105:7860"},
-                       headers=admin_headers)
-    assert saved.status_code == 200
-    assert saved.json()["breeze_url_effective"] == "http://192.168.2.105:7860"
-    # Nur mitgeschickte Felder aendern sich
-    client.put("/v1/admin/tts/settings", json={"breeze_instruction": "Speak calmly."},
-               headers=admin_headers)
-    body = client.get("/v1/admin/tts", headers=admin_headers).json()
-    assert body["breeze_url"] == "http://192.168.2.105:7860"
-    assert body["breeze_instruction"] == "Speak calmly."
-
-    # Leeren = zurueck zur .env
-    client.put("/v1/admin/tts/settings", json={"breeze_url": ""}, headers=admin_headers)
-    body = client.get("/v1/admin/tts", headers=admin_headers).json()
-    assert body["breeze_url_effective"] == "http://tts-breeze:7860"
-
-
-def test_invalid_breeze_url_is_refused_and_keeps_the_old_one(client, admin_headers):
-    client.put("/v1/admin/tts/settings", json={"breeze_url": "http://tts-breeze-cpp:7860"},
-               headers=admin_headers)
-    response = client.put("/v1/admin/tts/settings", json={"breeze_url": "ftp://x"},
-                          headers=admin_headers)
-    assert response.status_code == 400
-    assert repos.get_setting(BREEZE_URL_SETTING) == "http://tts-breeze-cpp:7860"
-
-
-async def test_breeze_client_and_status_use_the_configured_url(monkeypatch):
-    repos.set_setting(BREEZE_URL_SETTING, "http://breeze.lan:8137/prefix")
-    urls: list[str] = []
-
-    def handler(request):
-        urls.append(str(request.url))
-        if request.url.path.endswith("/health"):
-            return httpx.Response(200, json={"status": "ok", "sample_rate": 24000})
-        return httpx.Response(200, headers={"x-sample-rate": "24000"}, content=b"\x01\x02")
-
-    _mock_http(monkeypatch, handler)
-
-    [c async for c in breeze_client.stream("Hallo.", "default-de-female")]
-    status = await tts_engines.engine_status("breeze")
-
-    assert urls == ["http://breeze.lan:8137/prefix/v1/audio/speech",
-                    "http://breeze.lan:8137/prefix/health"]
-    assert status["status"] == "ok"
 
 
 def test_tts_routes_require_admin(client):
@@ -289,9 +247,9 @@ def test_tts_routes_require_admin(client):
 
 def test_voice_turn_is_spoken_by_active_engine(client, monkeypatch):
     xtts_calls: list = []
-    monkeypatch.setattr(breeze_client, "stream", _fake_engine(b"\x0b\x0b"))
+    monkeypatch.setattr(piper_client, "stream", _fake_engine(b"\x0b\x0b"))
     monkeypatch.setattr(xtts_client, "stream", _fake_engine(b"\x0a\x0a", xtts_calls))
-    tts_engines.set_active_engine("breeze")
+    tts_engines.set_active_engine("piper")
 
     frames = _voice_turn(client, monkeypatch)
 
@@ -301,16 +259,15 @@ def test_voice_turn_is_spoken_by_active_engine(client, monkeypatch):
 
 
 def test_failing_test_engine_falls_back_to_xtts(client, monkeypatch):
-    """Breeze-Container gestoppt/laedt noch -> XTTS spricht, der Nutzer
+    """Container der Engine gestoppt/laedt noch -> XTTS spricht, der Nutzer
     bekommt trotzdem eine Sprachantwort."""
 
     async def stopped(text, voice_id=None, language=None):
         raise httpx.ConnectError("Name or service not known")
         yield  # pragma: no cover
 
-    monkeypatch.setattr(breeze_client, "stream", stopped)
+    tts_engines.set_active_engine(_demo_engine(monkeypatch, stopped))
     monkeypatch.setattr(xtts_client, "stream", _fake_engine(b"\x0a\x0a"))
-    tts_engines.set_active_engine("breeze")
 
     frames = _voice_turn(client, monkeypatch)
 
@@ -327,9 +284,8 @@ def test_no_fallback_once_audio_is_flowing(client, monkeypatch):
         yield 24000, b"\x0b\x0b" * 1200
         raise httpx.RemoteProtocolError("peer closed connection")
 
-    monkeypatch.setattr(breeze_client, "stream", breaks_midway)
+    tts_engines.set_active_engine(_demo_engine(monkeypatch, breaks_midway))
     monkeypatch.setattr(xtts_client, "stream", _fake_engine(b"\x0a\x0a", xtts_calls))
-    tts_engines.set_active_engine("breeze")
 
     frames = _voice_turn(client, monkeypatch)
 
@@ -343,17 +299,16 @@ def _xtts_off():
 
 
 def test_piper_steps_in_while_xtts_is_switched_off(client, monkeypatch):
-    """XTTS im Panel aus (v1.19) und Breeze faellt aus -> Piper spricht,
-    XTTS wird gar nicht erst gefragt."""
+    """XTTS im Panel aus (v1.19) und die aktive Engine faellt aus -> Piper
+    spricht, XTTS wird gar nicht erst gefragt."""
     xtts_calls: list = []
 
     async def stopped(text, voice_id=None, language=None):
         raise httpx.ConnectError("Name or service not known")
         yield  # pragma: no cover
 
-    tts_engines.set_active_engine("breeze")
+    tts_engines.set_active_engine(_demo_engine(monkeypatch, stopped))
     _xtts_off()
-    monkeypatch.setattr(breeze_client, "stream", stopped)
     monkeypatch.setattr(xtts_client, "stream", _fake_engine(b"\x0a\x0a", xtts_calls))
     monkeypatch.setattr(piper_client, "stream", _fake_engine(b"\x0c\x0c"))
 
@@ -369,7 +324,7 @@ def test_activating_a_switched_off_xtts_turns_it_back_on(client, admin_headers, 
     ausgeschaltete wird dafuer wieder auf ihre letzte Karte geladen."""
     from orchestrator.services import gpu_manager
 
-    tts_engines.set_active_engine("breeze")
+    tts_engines.set_active_engine("piper")
     _xtts_off()
     repos.set_setting("gpu_last_device_tts-xtts", "cuda:1")
     loads = []
@@ -400,7 +355,7 @@ async def test_switched_off_xtts_reports_off_without_asking_the_service():
 
 
 async def test_preview_and_fillers_leave_a_switched_off_xtts_alone(client, admin_headers, monkeypatch):
-    tts_engines.set_active_engine("breeze")
+    tts_engines.set_active_engine("piper")
     _xtts_off()
     calls: list = []
     monkeypatch.setattr(xtts_client, "stream", _fake_engine(b"\x03\x04", calls))
@@ -440,7 +395,7 @@ def test_piper_can_speak_the_main_answer(client, monkeypatch):
     assert len(_spoken(frames)) == pytest.approx(1.5 * 24000 * 2, abs=8)
 
 
-# ---- Breeze-Client (Multipart gegen den offiziellen Server) ---------------------------
+# ---- Abgerissener Stream (Server stuerzt mitten in der Synthese ab) -------------------------
 
 
 def _mock_http(monkeypatch, handler):
@@ -453,113 +408,9 @@ def _mock_http(monkeypatch, handler):
     monkeypatch.setattr(httpx, "AsyncClient", client_with_transport)
 
 
-async def test_breeze_clones_voice_from_sample_and_transcript(monkeypatch):
-    _write_sample("default-de-female")
-    repos.update_voice("default-de-female", {"sample_text": "Das ist mein Sample."})
-    repos.set_setting(BREEZE_INSTRUCTION_SETTING, "Speak calmly.")
-    requests: list[httpx.Request] = []
-
-    def handler(request):
-        requests.append(request)
-        return httpx.Response(
-            200, headers={"x-sample-rate": "24000", "x-sample-format": "s16le"},
-            content=b"\x01\x02" * 100,
-        )
-
-    _mock_http(monkeypatch, handler)
-
-    chunks = [c async for c in breeze_client.stream("Hallo Welt.", "default-de-female")]
-
-    assert chunks == [(24000, b"\x01\x02" * 100)]
-    request = requests[0]
-    assert request.url.path == "/v1/audio/speech"
-    body = request.content
-    assert b'name="text"' in body and "Hallo Welt.".encode() in body
-    assert b'name="ref_audio"; filename="default-de-female.wav"' in body
-    assert b'name="ref_text"' in body and "Das ist mein Sample.".encode() in body
-    assert b'name="instruction"' in body and b"Speak calmly." in body
-    assert b'name="cfg_scale"' in body
-
-
-async def test_breeze_without_transcript_uses_its_builtin_voice(monkeypatch):
-    """Sample ohne Transkript reicht nicht (der Server verlangt beides) -
-    dann ohne Referenz, statt mit falschem Transkript zu klonen."""
-    _write_sample("default-de-female")
-    requests: list[httpx.Request] = []
-
-    def handler(request):
-        requests.append(request)
-        return httpx.Response(200, headers={"x-sample-rate": "24000"}, content=b"\x01\x02")
-
-    _mock_http(monkeypatch, handler)
-
-    [c async for c in breeze_client.stream("Hallo.", "default-de-female")]
-
-    body = requests[0].content
-    assert b"ref_audio" not in body and b"ref_text" not in body
-    assert b"instruction" not in body
-
-
-async def test_breeze_waits_while_the_server_is_busy(monkeypatch):
-    """Der Breeze-Server nimmt nur einen Request zur Zeit (409) - z. B. wenn
-    parallel Filler generiert werden."""
-    monkeypatch.setattr(breeze_client, "busy_wait_s", 0)
-    answers = iter([
-        httpx.Response(409, json={"detail": "An inference request is already running."}),
-        httpx.Response(200, headers={"x-sample-rate": "24000"}, content=b"\x01\x02"),
-    ])
-    _mock_http(monkeypatch, lambda request: next(answers))
-
-    chunks = [c async for c in breeze_client.stream("Hallo.", "default-de-female")]
-
-    assert chunks == [(24000, b"\x01\x02")]
-
-
-def _multipart_file(request: httpx.Request, field: str) -> bytes:
-    boundary = request.headers["content-type"].split("boundary=")[1].encode()
-    for part in request.content.split(b"--" + boundary):
-        head, _, body = part.partition(b"\r\n\r\n")
-        if f'name="{field}"'.encode() in head:
-            return body.removesuffix(b"\r\n")
-    raise AssertionError(f"kein Feld {field} im Request")
-
-
-async def test_breeze_gets_the_sample_as_mono_pcm16_24k(monkeypatch):
-    """Breeze-TTS-2.cpp liest nur 16/32-Bit-WAVs - ein 24-Bit-Sample kaeme
-    dort als Stille an. Der Client schickt deshalb immer mono PCM16, 24 kHz."""
-    path = Path(settings.voices_dir) / "default-de-female.wav"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    frames = b"".join(
-        int(0.5 * 8388607 * math.sin(2 * math.pi * 220 * i / 48000)).to_bytes(3, "little", signed=True) * 2
-        for i in range(48000)
-    )  # 1 s Ton, 24 Bit, stereo, 48 kHz
-    with wave.open(str(path), "wb") as wav:
-        wav.setnchannels(2)
-        wav.setsampwidth(3)
-        wav.setframerate(48000)
-        wav.writeframes(frames)
-    repos.update_voice("default-de-female", {"sample_text": "Das ist mein Sample."})
-    requests: list[httpx.Request] = []
-
-    def handler(request):
-        requests.append(request)
-        return httpx.Response(200, headers={"x-sample-rate": "24000"}, content=b"\x01\x02")
-
-    _mock_http(monkeypatch, handler)
-
-    [c async for c in breeze_client.stream("Hallo.", "default-de-female")]
-
-    with wave.open(io.BytesIO(_multipart_file(requests[0], "ref_audio")), "rb") as ref:
-        assert (ref.getnchannels(), ref.getsampwidth(), ref.getframerate()) == (1, 2, 24000)
-        pcm = ref.readframes(ref.getnframes())
-    assert abs(len(pcm) / 2 / 24000 - 1.0) < 0.01
-    samples = [int.from_bytes(pcm[i:i + 2], "little", signed=True) for i in range(0, len(pcm), 2)]
-    assert max(samples) > 12000  # Ton kommt an (0,5 Vollaussteuerung), keine Stille
-
-
-def _crashing_breeze_server() -> str:
-    """Echter Socket-Server wie Breeze-TTS-2.cpp bei einem CUDA-Absturz:
-    Header (chunked) sind raus, dann endet der Prozess mitten im Stream."""
+def _crashing_server() -> str:
+    """Echter Socket-Server wie eine Engine bei einem CUDA-Absturz: Header
+    (chunked) sind raus, dann endet der Prozess mitten im Stream."""
     server = socket.socket()
     server.bind(("127.0.0.1", 0))
     server.listen(1)
@@ -575,48 +426,38 @@ def _crashing_breeze_server() -> str:
     return f"http://127.0.0.1:{server.getsockname()[1]}"
 
 
-def test_preview_explains_an_aborted_breeze_stream(client, admin_headers):
-    repos.set_setting(BREEZE_URL_SETTING, _crashing_breeze_server())
+def test_preview_explains_an_aborted_stream(client, admin_headers, monkeypatch):
+    engine = _demo_engine(monkeypatch, url=_crashing_server())
 
     response = client.post(
         "/v1/admin/tts/preview",
-        json={"engine": "breeze", "voice_id": "default-de-female", "text": "Hallo"},
+        json={"engine": engine, "voice_id": "default-de-female", "text": "Hallo"},
         headers=admin_headers,
     )
 
     assert response.status_code == 502
     detail = response.json()["detail"]
     assert "mitten in der Synthese abgebrochen" in detail
-    assert "docker logs heimai-tts-breeze" in detail and "BREEZE_CUDA_ARCHS" in detail
+    assert "docker logs heimai-tts-demo" in detail and "nvidia-smi" in detail
     assert "incomplete chunked read" not in detail
 
 
-async def test_breeze_filler_names_an_aborted_stream(client, monkeypatch):
-    trigger = repos.create_trigger("T-breeze-abort", "thinking", None)
-    filler = repos.create_filler("Titel", "Moment bitte.", trigger["id"], True,
-                                 delay_ms=0, engine="breeze")
-
+async def test_filler_names_an_aborted_stream(client, monkeypatch):
     async def aborted(text, voice_id=None, language=None):
         raise httpx.ReadError("[Errno 104] Connection reset by peer")
         yield  # pragma: no cover
 
-    monkeypatch.setattr(breeze_client, "stream", aborted)
+    engine = _demo_engine(monkeypatch, aborted)
+    _write_sample("default-de-male")
+    trigger = repos.create_trigger("T-abort", "thinking", None)
+    filler = repos.create_filler("Titel", "Moment bitte.", trigger["id"], True,
+                                 delay_ms=0, engine=engine)
 
     results = await filler_service.generate_audio(filler["id"], "default-de-male")
 
     assert results[0]["ok"] is False
     assert "mitten in der Synthese abgebrochen" in results[0]["error"]
     assert "Piper" in results[0]["error"]
-
-
-async def test_breeze_error_carries_server_detail(monkeypatch):
-    _mock_http(
-        monkeypatch,
-        lambda request: httpx.Response(400, json={"detail": "cfg_scale must be greater than 0."}),
-    )
-
-    with pytest.raises(RuntimeError, match="Breeze-Fehler 400.*cfg_scale"):
-        [c async for c in breeze_client.stream("Hallo.", "default-de-female")]
 
 
 # ---- Probehoeren -------------------------------------------------------------------
@@ -643,20 +484,20 @@ def test_preview_returns_wav_with_timing(client, admin_headers, monkeypatch):
 
 
 def test_preview_uses_exactly_the_chosen_engine(client, admin_headers, monkeypatch):
-    """Kein Fallback beim Probehoeren: ein Breeze-Fehler kommt als Fehler an,
+    """Kein Fallback beim Probehoeren: ein Engine-Fehler kommt als Fehler an,
     statt still XTTS abzuspielen."""
 
     async def broken(text, voice_id=None, language=None):
-        raise RuntimeError("Breeze-Fehler 500: CUDA out of memory")
+        raise RuntimeError("Engine-Fehler 500: CUDA out of memory")
         yield  # pragma: no cover
 
     xtts_calls: list = []
-    monkeypatch.setattr(breeze_client, "stream", broken)
+    engine = _demo_engine(monkeypatch, broken)
     monkeypatch.setattr(xtts_client, "stream", _fake_engine(b"\x03\x04", xtts_calls))
 
     response = client.post(
         "/v1/admin/tts/preview",
-        json={"engine": "breeze", "voice_id": "default-de-female", "text": "Hallo"},
+        json={"engine": engine, "voice_id": "default-de-female", "text": "Hallo"},
         headers=admin_headers,
     )
 
@@ -683,28 +524,18 @@ def test_preview_rejects_unknown_engine_and_empty_text(client, admin_headers):
     ).status_code == 400
 
 
-def test_breeze_instruction_is_stored(client, admin_headers, monkeypatch):
-    _ok_status(monkeypatch)
-    client.put(
-        "/v1/admin/tts/settings",
-        json={"breeze_instruction": "  Speak slowly.  "},
-        headers=admin_headers,
-    )
-    body = client.get("/v1/admin/tts", headers=admin_headers).json()
-    assert body["breeze_instruction"] == "Speak slowly."
+# ---- Filler mit weiteren Engines -------------------------------------------------------
 
 
-# ---- Filler mit Breeze -----------------------------------------------------------------
-
-
-async def test_breeze_fillers_are_generated_per_voice_without_sample(client, monkeypatch):
-    """Breeze braucht (anders als XTTS) kein Sample - ohne spricht es mit
-    seiner eingebauten Stimme."""
-    trigger = repos.create_trigger("T-breeze", "thinking", None)
-    filler = repos.create_filler("Titel", "Moment bitte.", trigger["id"], True,
-                                 delay_ms=0, engine="breeze")
+async def test_fillers_are_generated_per_voice_without_sample(client, monkeypatch):
+    """Engines, die kein Sample brauchen (Steckbrief), sprechen ohne mit
+    ihrer eingebauten Stimme - pro Stimme ein Audio."""
     calls: list = []
-    monkeypatch.setattr(breeze_client, "stream", _fake_engine(b"\x09\x09", calls))
+    engine = _demo_engine(monkeypatch, _fake_engine(b"\x09\x09", calls))
+    tts_engines._INFO[engine] = {"needs_sample": False}
+    trigger = repos.create_trigger("T-ohne-sample", "thinking", None)
+    filler = repos.create_filler("Titel", "Moment bitte.", trigger["id"], True,
+                                 delay_ms=0, engine=engine)
 
     results = await filler_service.generate_audio(filler["id"])
 
@@ -714,22 +545,24 @@ async def test_breeze_fillers_are_generated_per_voice_without_sample(client, mon
         assert filler_service.has_audio(filler["id"], voice["id"])
 
 
-async def test_breeze_filler_runs_through_the_shared_preparation(client, monkeypatch):
-    """Breeze-Filler bekommen dieselbe Aufbereitung wie XTTS (v1.16): sauberes
-    Satzende, getrimmte Stille - und mit voice_id nur diese eine Stimme."""
-    trigger = repos.create_trigger("T-breeze-2", "thinking", None)
-    filler = repos.create_filler("Titel", "Moment bitte...", trigger["id"], True,
-                                 delay_ms=0, engine="breeze")
+async def test_filler_runs_through_the_shared_preparation(client, monkeypatch):
+    """Filler weiterer Engines bekommen dieselbe Aufbereitung wie XTTS (v1.16):
+    sauberes Satzende, getrimmte Stille - und mit voice_id nur diese eine
+    Stimme."""
     silence = b"\x00\x00" * 4800  # 0,2 s
     tone = b"".join(int(8000 * math.sin(i / 8)).to_bytes(2, "little", signed=True)
                     for i in range(24000))  # 1 s, plausibel fuer 13 Zeichen
     calls: list = []
 
-    async def fake_breeze(text, voice_id=None, language=None):
+    async def fake_engine(text, voice_id=None, language=None):
         calls.append((text, voice_id))
         yield 24000, silence + tone + silence
 
-    monkeypatch.setattr(breeze_client, "stream", fake_breeze)
+    engine = _demo_engine(monkeypatch, fake_engine)
+    _write_sample("default-de-male")
+    trigger = repos.create_trigger("T-aufbereitung", "thinking", None)
+    filler = repos.create_filler("Titel", "Moment bitte...", trigger["id"], True,
+                                 delay_ms=0, engine=engine)
 
     results = await filler_service.generate_audio(filler["id"], "default-de-male")
 
@@ -742,15 +575,22 @@ async def test_breeze_filler_runs_through_the_shared_preparation(client, monkeyp
     assert len(pcm) < len(silence + tone + silence)  # Stille vorn/hinten gekappt
 
 
-def test_filler_can_be_created_with_breeze_engine(client, admin_headers):
+def test_filler_can_be_created_with_another_engine(client, admin_headers, monkeypatch):
+    engine = _demo_engine(monkeypatch)
     trigger = client.get("/v1/admin/triggers", headers=admin_headers).json()[0]
     response = client.post(
         "/v1/admin/fillers",
-        json={"title": "x", "text": "y", "trigger_id": trigger["id"], "engine": "breeze"},
+        json={"title": "x", "text": "y", "trigger_id": trigger["id"], "engine": engine},
         headers=admin_headers,
     )
     assert response.status_code == 201
-    assert response.json()["engine"] == "breeze"
+    assert response.json()["engine"] == engine
+    # Ausgebaute Engines (Breeze, v1.22) werden abgelehnt
+    assert client.post(
+        "/v1/admin/fillers",
+        json={"title": "x", "text": "y", "trigger_id": trigger["id"], "engine": "breeze"},
+        headers=admin_headers,
+    ).status_code == 422
 
 
 # ---- Stimmen: Sample-Transkript --------------------------------------------------------
@@ -841,3 +681,56 @@ def test_transcribe_failure_keeps_existing_transcript(client, admin_headers):
 
     assert response.status_code == 502
     assert repos.get_voice("default-de-male")["sample_text"] == "Bleibt stehen."
+
+
+# ---- Ausbau von Breeze und Qwen3-TTS (v1.22) --------------------------------------------
+
+
+def _old_database(**settings_values: str) -> None:
+    """Stand vor v1.22 nachstellen: vorbelegtes Qwen3, Breeze-Einstellungen."""
+    from orchestrator.db import db_session
+
+    with db_session() as conn:
+        conn.execute("DELETE FROM app_settings WHERE key = 'retired_breeze_qwen3'")
+        conn.execute("INSERT INTO tts_contract_engines (id, url, label)"
+                     " VALUES ('qwen3', 'http://tts-qwen3:8000', 'Qwen3-TTS')")
+        for key, value in {"breeze_base_url": "http://tts-breeze-cpp:7860",
+                           "breeze_instruction": "Speak calmly.", **settings_values}.items():
+            conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)", (key, value))
+        conn.commit()
+
+
+def test_update_removes_breeze_and_the_preset_qwen3_once():
+    from orchestrator.db import init_db
+    from orchestrator.services import gpu_manager
+
+    _old_database(**{"tts_engine": "qwen3", "gpu_device_tts-xtts": "off",
+                     "gpu_last_device_tts-xtts": "cuda:1", "gpu_auto_off_tts-xtts": "qwen3"})
+
+    init_db()
+
+    assert repos.list_contract_engines() == []
+    assert repos.get_setting("breeze_base_url") is None and repos.get_setting("breeze_instruction") is None
+    # Die alte Hauptstimme gibt es nicht mehr -> XTTS, wieder auf seiner Karte
+    assert repos.get_setting(tts_engines.ACTIVE_ENGINE_SETTING) is None
+    assert tts_engines.active_engine() == "xtts"
+    assert gpu_manager.assigned_device("tts-xtts") == "cuda:1" and not gpu_manager.auto_off("tts-xtts")
+
+    # Einmalig: eine danach bewusst eingetragene Engine "qwen3" bleibt.
+    repos.upsert_contract_engine("qwen3", "http://tts-qwen3:8000", "Qwen3-TTS")
+    init_db()
+    assert [e["id"] for e in repos.list_contract_engines()] == ["qwen3"]
+
+
+def test_update_keeps_a_qwen3_entry_the_admin_pointed_elsewhere():
+    from orchestrator.db import db_session, init_db
+
+    _old_database(tts_engine="audiocpp:qwen3-tts")
+    with db_session() as conn:
+        conn.execute("UPDATE tts_contract_engines SET url = 'http://192.168.2.50:8000' WHERE id = 'qwen3'")
+        conn.commit()
+
+    init_db()
+
+    assert [e["url"] for e in repos.list_contract_engines()] == ["http://192.168.2.50:8000"]
+    assert repos.get_setting(tts_engines.ACTIVE_ENGINE_SETTING) == "audiocpp:qwen3-tts"

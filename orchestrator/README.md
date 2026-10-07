@@ -3,13 +3,14 @@
 Siehe `../docs/heim-ai-projektspezifikation.md` fuer den Gesamtkontext.
 Die Nachbar-Services der Voice-Pipeline liegen im selben Repo:
 `../stt-service` (1.8, faster-whisper), `../tts-piper` (1.9, Filler),
-`../tts-xtts` (1.10, Hauptstimme), `../tts-breeze` (v1.17, Test-Engine
-Breeze TTS 2, eigener Deploy), `../tts-engine-kit` (v1.20, gemeinsamer
-Engine-Vertrag fuer weitere Sprachausgaben) und `../tts-qwen3` (v1.20,
-Qwen3-TTS, erste Engine nach diesem Vertrag, eigener Deploy). Seit v1.21
-laesst sich ausserdem ein [audio.cpp](https://github.com/0xShug0/audio.cpp)-Server
-anbinden - ein Container fuer viele Sprachmodelle, siehe
-[audio.cpp anschliessen](#audiocpp-anschliessen-v121).
+`../tts-xtts` (1.10, Hauptstimme) und `../tts-engine-kit` (v1.20,
+gemeinsamer Engine-Vertrag fuer eigene Sprachausgabe-Container). Weitere
+Sprachmodelle kommen ueber einen
+[audio.cpp](https://github.com/0xShug0/audio.cpp)-Server (v1.21) - ein
+Container fuer viele Modelle, siehe
+[audio.cpp anschliessen](#audiocpp-anschliessen-v121). Die frueheren eigenen
+Anbindungen fuer Breeze TTS 2 und Qwen3-TTS sind seit v1.22 ausgebaut; beide
+laufen ueber audio.cpp.
 
 ## Admin-Panel (/admin)
 
@@ -21,12 +22,12 @@ aus `ADMIN_USERNAME`/`ADMIN_PASSWORD` in die leere DB geschrieben.
 | Bereich | Funktion |
 |---|---|
 | Modelle | In LiteLLM registrierte Modelle anzeigen und das aktive Modell setzen (LM Studio laedt per JIT beim ersten Request, Entladen per Idle-TTL) |
-| Sprachausgabe | TTS-Engine der gesprochenen Antworten waehlen (XTTS / Piper / Breeze TTS 2 / Qwen3-TTS, jede weitere Engine nach dem Engine-Vertrag und jedes Sprachmodell eines audio.cpp-Servers) mit Live-Status; Aktivieren laedt die Engine und entlaedt andere Sprachausgaben auf derselben Karte; Probehoeren pro Engine + Stimme mit Latenzmessung (Vergleich auf der echten Hardware); audio.cpp-Adresse, -Karte und eingebaute Stimme je Modell; Vertrags-Engines per ID + Adresse eintragen; Breeze ausblenden, optionale Breeze-Sprechanweisung |
-| GPUs | Karten mit Name, Compute-Capability und live belegtem VRAM; pro Dienst die Karte waehlen (CPU / GPU 0 / GPU 1), XTTS und Vertrags-Engines (z. B. Qwen3) auch ganz ausschalten ("Aus"). STT, XTTS und Vertrags-Engines laden ihr Modell dabei zur Laufzeit neu - kein Container-Neustart. Piper ist CPU-only, LM Studio laeuft auf dem Host und wird dort eingestellt (4.2) |
+| Sprachausgabe | TTS-Engine der gesprochenen Antworten waehlen (XTTS / Piper, jedes Sprachmodell eines audio.cpp-Servers und jede Engine nach dem Engine-Vertrag) mit Live-Status; Aktivieren laedt die Engine und entlaedt andere Sprachausgaben auf derselben Karte; Probehoeren pro Engine + Stimme mit Latenzmessung (Vergleich auf der echten Hardware); audio.cpp-Adresse, -Karte und eingebaute Stimme je Modell; Vertrags-Engines per ID + Adresse eintragen |
+| GPUs | Karten mit Name, Compute-Capability und live belegtem VRAM; pro Dienst die Karte waehlen (CPU / GPU 0 / GPU 1), XTTS und Vertrags-Engines auch ganz ausschalten ("Aus"); audio.cpp als Info-Zeile. STT, XTTS und Vertrags-Engines laden ihr Modell dabei zur Laufzeit neu - kein Container-Neustart. Piper ist CPU-only, LM Studio laeuft auf dem Host und wird dort eingestellt (4.2) |
 | Charakter | Globaler System-Prompt; pro Nutzer ueberschreibbar (Nutzer-Formular) |
 | Nutzer | Anlegen/Bearbeiten/Loeschen, Tier 1-3, Standard-Stimme, Charakter-Override |
-| Stimmen | Anlegen + WAV-Sample-Upload (landet im XTTS-Voices-Volume, kein docker cp mehr); Transkript des Samples (fuer klonende Engines wie Qwen3, Breeze und die audio.cpp-Modelle), beim Upload per Whisper vorgeschlagen und editierbar |
-| Filler & Trigger | Eigene Trigger (Nachdenken/Suche/Tool inkl. Tool-Muster wie `Calendar-*`), Filler mit Titel+Text, Engine pro Filler (XTTS = Nutzerstimme, Piper = feste Stimme/robust, Breeze/Qwen3/audio.cpp-Modelle = Test), "Alle generieren" rendert vor, pro Stimme Play-Button zum Probehoeren und &#8635; zum Neu-Generieren nur dieser Stimme, Filter-Chips nach Trigger |
+| Stimmen | Anlegen + WAV-Sample-Upload (landet im XTTS-Voices-Volume, kein docker cp mehr); Transkript des Samples (fuer die klonenden audio.cpp-Modelle), beim Upload per Whisper vorgeschlagen und editierbar |
+| Filler & Trigger | Eigene Trigger (Nachdenken/Suche/Tool inkl. Tool-Muster wie `Calendar-*`), Filler mit Titel+Text, Engine pro Filler (XTTS = Nutzerstimme, Piper = feste Stimme/robust, audio.cpp-Modelle = je nach Modell), "Alle generieren" rendert vor, pro Stimme Play-Button zum Probehoeren und &#8635; zum Neu-Generieren nur dieser Stimme, Filter-Chips nach Trigger |
 | Agenten | Spezial-Agenten (4.16) mit eigener ID, Beschreibung, System-Prompt und eigenem LiteLLM-Modell; erscheinen der Haupt-KI als Tool `agent-<id>` - z. B. Websuche/Coding an Cloud-Modelle delegieren. Reservierte ID `code-card`: schreibt automatisch die HTML-Layouts fuer Karten ohne passendes Template |
 | Karten | Layout-Templates (4.12) anlegen/bearbeiten/loeschen, Version zaehlt automatisch hoch; Format JSON (Layout-Baum) oder HTML (Fragment mit `{{data.*}}`-Platzhaltern, sandboxed gerendert) |
 
@@ -59,7 +60,7 @@ ganz, hat der Orchestrator-Container keinen GPU-Zugriff: den
 neu deployen.
 
 **XTTS ausschalten (v1.19):** In der Zeile von XTTS "Aus (Modell entladen)"
-waehlen - z. B. um fuer einen Breeze-Test Platz auf der Karte zu schaffen.
+waehlen - z. B. um Platz fuer ein audio.cpp-Modell auf der Karte zu schaffen.
 Der Dienst entlaedt sein Modell (~3 GB), der Container laeuft weiter (der
 Orchestrator hat bewusst keinen Docker-Zugriff, 4.2). Die Einstellung
 ueberlebt Neustarts. Einige hundert MB (CUDA-Kontext) gibt erst
@@ -69,8 +70,9 @@ Piper statt XTTS ein. Vorhandene XTTS-Filler bleiben abspielbar, neue
 lassen sich erst nach dem Einschalten erzeugen. Wieder an: eine Karte
 waehlen.
 
-**Qwen3 und andere Vertrags-Engines (v1.20)** stehen hier als eigene Zeile
-("Sprachausgabe (Qwen3-TTS)", ...) mit denselben Optionen. "Aus" beendet
+**Engines nach dem Engine-Vertrag (v1.20)** stehen hier - sobald eine
+eingetragen ist - als eigene Zeile ("Sprachausgabe (<Name>)") mit denselben
+Optionen. "Aus" beendet
 dort den ganzen Modell-Prozess - das VRAM ist danach komplett frei, auch der
 CUDA-Kontext, ohne Container-Neustart. Meist musst du hier aber nur die
 Karte festlegen: Unter Sprachausgabe **Aktivieren** laedt die Engine auf
@@ -114,9 +116,8 @@ Die Wahl greift ab dem naechsten Sprach-Turn, ohne Neustart.
 |---|---|---|---|
 | XTTS-v2 (Default) | klont die Nutzerstimme aus dem Sample, Deutsch | ~3 GB VRAM | bewaehrte Hauptstimme |
 | Piper | eine feste deutsche Stimme | CPU | robuster Notbetrieb, z. B. wenn die GPUs fuer einen LLM-Test gebraucht werden |
-| Breeze TTS 2 | klont aus Sample **+ exaktem Transkript**, sonst eingebaute Stimme | ~7,7 GB (PyTorch) bzw. ~4 GB (Breeze-TTS-2.cpp) | Test-Engine (eigener Server, s. u.) |
-| Qwen3-TTS (v1.20) | klont aus Sample, mit exaktem Transkript am aehnlichsten; 10 Sprachen inkl. Deutsch | ~5 GB (1.7B) bzw. ~2,5 GB (0.6B) | Test-Engine nach dem Engine-Vertrag (eigener Deploy, s. u.) |
-| audio.cpp · &lt;Modell&gt; (v1.21) | je nach Modell: klont aus Sample + Transkript oder eingebaute Stimme | je nach Modell, GGUF (Q8 spart VRAM) | viele Modelle ueber EINEN Server testen - Qwen3-TTS und Breeze gibt es dort auch (s. u.) |
+| audio.cpp · &lt;Modell&gt; (v1.21) | je nach Modell: klont aus Sample + Transkript oder eingebaute Stimme | je nach Modell, GGUF (Q8 spart VRAM) | viele Modelle ueber EINEN Server, u. a. Qwen3-TTS und Breeze TTS 2 (s. u.) |
+| &lt;Vertrags-Engine&gt; (v1.20) | je nach Engine | je nach Engine | eigener Container nach dem Engine-Vertrag, falls audio.cpp ein Modell nicht kann |
 
 Wie es funktioniert:
 
@@ -129,19 +130,19 @@ Wie es funktioniert:
   `/v1/device`, Synthese `/v1/synthesize`), wird unter Sprachausgabe ->
   *Engines nach dem Engine-Vertrag* nur mit ID und Adresse eingetragen - Name,
   Sprachen und Faehigkeiten meldet er selbst. Danach steht er in der
-  Engine-Tabelle, beim Probehoeren, bei den Fillern und unter GPUs. Qwen3-TTS
-  ist dort als `qwen3` -> `http://tts-qwen3:8000` schon vorbelegt. Wie man
-  eine Engine baut: `../tts-engine-kit/README.md`.
+  Engine-Tabelle, beim Probehoeren, bei den Fillern und unter GPUs. Wie man
+  eine Engine baut: `../tts-engine-kit/README.md`. Fuer die meisten Modelle
+  ist audio.cpp der einfachere Weg (kein eigener Container pro Modell).
 - **Aktivieren laedt, was gebraucht wird:** Die Engine wird auf ihre Karte
   (GPUs) geladen - war sie ausgeschaltet, auf die zuletzt genutzte. Andere
   Sprachausgaben, die auf **derselben** Karte geladen sind (XTTS, andere
-  Vertrags-Engines), werden dafuer entladen; die andere Karte bleibt
-  unberuehrt. Breeze kann sein Modell nicht entladen - dafuer weiterhin den
-  Container stoppen. Solange geladen wird, zeigt der Button "laedt...",
+  Vertrags-Engines, audio.cpp-Modelle, falls die Karte von audio.cpp
+  angegeben ist), werden dafuer entladen; die andere Karte bleibt
+  unberuehrt. Solange geladen wird, zeigt der Button "laedt...",
   danach nennt ein Hinweis, was entladen und geladen wurde; dauert das Laden
   laenger als ~2,5 Minuten, meldet er "laedt noch" und bis dahin spricht die
-  Rueckfallebene. Zurueck zu XTTS: XTTS aktivieren - dann wird z. B. Qwen3
-  entladen und XTTS wieder eingeschaltet.
+  Rueckfallebene. Zurueck zu XTTS: XTTS aktivieren - dann wird z. B. das
+  audio.cpp-Modell entladen und XTTS wieder eingeschaltet.
 - **Sicherheitsnetz:** Faellt eine andere Engine als XTTS aus, bevor Audio
   geflossen ist (Server/Container gestoppt, Modell laedt noch, belegt),
   spricht XTTS die Antwort - bzw. Piper, solange XTTS unter GPUs
@@ -277,15 +278,21 @@ beim naechsten Turn, bis dahin spricht XTTS).
   bekommt bewusst keinen Docker-Zugriff (4.2); "pausieren" heisst Modell
   entladen.
 
-#### Breeze und Qwen3 ueber audio.cpp statt eigener Container
+#### Breeze TTS 2 und Qwen3-TTS
 
-audio.cpp bringt `qwen3_tts` und `breeze_tts` als GGUF mit (Q8 spart VRAM).
-Wenn das klingt wie gewuenscht: die Container `heimai-tts-qwen3` und
-`heimai-tts-breeze(-cpp)` in Coolify stoppen, unter Sprachausgabe die
-Vertrags-Engine `qwen3` **Entfernen** und bei "Breeze TTS 2 (eigener Server)"
-den Haken **"Breeze-Engine anzeigen"** herausnehmen. Breeze bleibt dabei ein
-Englisch/Chinesisch-Modell; eine Sprechanweisung gibt man in der
-`server.json` mit: `"default_request_options": {"instruction": "Speak warmly."}`.
+Beide gibt es seit v1.22 nur noch ueber audio.cpp (Familien `breeze_tts` und
+`qwen3_tts`, als GGUF, Q8 spart VRAM) - die frueheren eigenen Container
+(`tts-breeze`, `tts-breeze-cpp`, `tts-qwen3`) und ihre Compose-Dateien sind
+ausgebaut. Beim Update raeumt der Orchestrator selbst auf: Der einst
+vorbelegte Eintrag `qwen3` (Adresse `http://tts-qwen3:8000`) und die
+Breeze-Einstellungen verschwinden; war eine der beiden die Hauptstimme,
+spricht wieder XTTS. In Coolify die alten Resources (Breeze, Qwen3) samt
+ihren Volumes loeschen, das gibt Platte frei. Filler, die noch auf Breeze
+oder Qwen3 stehen, zeigt das Panel mit "gibt es nicht mehr" - ihr Audio
+spielt weiter; zum Neu-Generieren eine andere Engine waehlen. Breeze bleibt
+auch in audio.cpp ein Englisch/Chinesisch-Modell; eine Sprechanweisung gibt
+man in der `server.json` mit:
+`"default_request_options": {"instruction": "Speak warmly."}`.
 
 **Probleme:**
 
@@ -315,321 +322,6 @@ Englisch/Chinesisch-Modell; eine Sprechanweisung gibt man in der
 - *"Verbindung mitten in der Synthese abgebrochen"* - audio.cpp ist
   abgestuerzt: dessen Logs pruefen (Coolify bzw. `docker logs <Name>`), dazu
   `nvidia-smi`.
-
-### Breeze TTS 2 testen
-
-> Seit v1.21 laeuft Breeze auch ueber audio.cpp (Familie `breeze_tts`), siehe
-> [audio.cpp anschliessen](#audiocpp-anschliessen-v121) - dort steht auch, wie
-> man die eigene Breeze-Engine ausblendet.
-
-Vorab, weil es die Erwartung praegt: Laut [offiziellem Repo](https://github.com/breezeblue-ai/breeze-tts)
-spricht das Open-Weight-Modell **nur Englisch und Chinesisch** - deutsche
-Antworten koennen mit Akzent oder falsch ausgesprochen klingen. Die Gewichte
-stehen unter der *BreezeBlue Research and Non-Commercial License* (privat ok,
-kommerziell nicht). Die Cloud-API von breezeblue.ai (mehr Sprachen) ist
-bewusst **nicht** angebunden: Jede Antwort wuerde das Haus verlassen.
-
-Es gibt zwei Server-Varianten mit **derselben HTTP-Schnittstelle** - der
-Orchestrator merkt keinen Unterschied, im Panel wird nur die Adresse
-eingetragen (Sprachausgabe -> Breeze-Server):
-
-| | A: offizieller PyTorch-Server | B: Breeze-TTS-2.cpp |
-|---|---|---|
-| Ordner / Compose | `tts-breeze/`, `docker-compose.breeze.yml` | `tts-breeze-cpp/`, `docker-compose.breeze-cpp.yml` - oder nativ (B2) |
-| Adresse im Panel | `http://tts-breeze:7860` (Standard) | `http://tts-breeze-cpp:7860` bzw. `http://<ip>:7860` |
-| VRAM | ~7,7 GB (bf16) | ~4 GB (Q8_0), ~3 GB (Q4_K) |
-| Tempo | offen: die 2080 Ti (Turing) kann bf16 nicht nativ | laut Projekt ~1,25x Echtzeit auf einer RTX 3060 (Q8_0) |
-| Gewichte | `BreezeBlue/breeze-tts-2`, ~6,5 GB | `HoppouAI/Breeze-TTS-2.cpp`, Q8_0 ~3,3 GB |
-| Erster Build | grosses Image (PyTorch + CUDA-Bibliotheken) | CUDA-Kompilierung, dauert |
-| Herkunft | offizieller Code | Community-Portierung auf ggml, jung |
-
-Ein Unterschied im Verhalten: Ohne Sprechanweisung konditioniert B auf ein
-eingebautes "Speak clearly and naturally.", A klont dann ohne Anweisung.
-Beide nehmen genau **einen** Request zur Zeit an (weitere bekommen 409, der
-Orchestrator wartet bis ~5 s, danach springt XTTS ein) und kodieren die
-Referenz bei jedem Request neu.
-
-#### Vorbereitung (beide Varianten)
-
-1. **Karte planen** (GPU-Panel): A braucht ~7,7 GB am Stueck - auf 11 GB +
-   8 GB heisst das die grosse Karte freiraeumen (XTTS/STT auf die andere
-   Karte, das LLM in LM Studio entladen bzw. umziehen). B passt mit ~4 GB
-   auch auf die 8-GB-Karte neben Whisper - aber nicht zusaetzlich neben
-   XTTS: Beim Klonen braucht Breeze kurzzeitig mehr als im Leerlauf (langes
-   Sample = mehr). Fuer den Test XTTS unter GPUs ausschalten ("Aus") oder
-   auf die andere Karte legen - vorher Breeze unter Sprachausgabe aktivieren.
-2. **Transkripte pflegen:** Breeze klont eine Stimme nur mit dem exakten
-   Wortlaut des Samples. Unter **Stimmen** bei vorhandenen Samples
-   "Transkribieren" klicken (Whisper schlaegt den Text vor) und unter
-   "Bearbeiten" korrigieren. Ohne Transkript spricht Breeze mit seiner
-   eingebauten Stimme. Das Sample geht als mono 16 Bit/24 kHz an Breeze -
-   auch 24-Bit-Aufnahmen, die Breeze-TTS-2.cpp sonst als Stille liest.
-
-#### Variante A: offizieller PyTorch-Server (Docker)
-
-1. Coolify -> New Resource -> Docker Compose: dasselbe Repo und derselbe
-   Branch wie der Voice-Stack, **Base Directory `/`** und Docker Compose
-   Location `/orchestrator/docker-compose.breeze.yml`. Nicht `/orchestrator`
-   als Base Directory: Coolify nimmt es als Projektordner und sucht den
-   Build-Context `tts-breeze/` dann unter `orchestrator/` (Deploy bricht ab
-   mit `unable to prepare context: path ".../orchestrator/tts-breeze" not
-   found`).
-2. Environment Variables: `BREEZE_GPU` = Index der Karte (wie im GPU-Panel,
-   Default `0`); `HF_TOKEN` nur, falls Hugging Face eine Lizenz-Zustimmung
-   verlangt (auf der Modellseite zustimmen, Lese-Token anlegen).
-3. Advanced -> Build arguments -> "Managed manually in Dockerfile". Sonst
-   schreibt Coolify jede Variable als `ARG` ins Dockerfile: Eine geaenderte
-   Laufzeit-Einstellung wie `BREEZE_GPU` loest dann einen kompletten Neubau
-   aus, und `HF_TOKEN` landet in der Build-History des Images.
-4. Deploy. Der erste Start laedt die Gewichte (~6,5 GB) ins Volume
-   `breeze-models`, danach das Modell auf die Karte - das Panel zeigt so
-   lange "laedt Modell...". Verfolgen mit `docker logs -f heimai-tts-breeze`.
-5. Im Panel unter Sprachausgabe -> Breeze-Server nichts eintragen (Standard
-   `http://tts-breeze:7860`) - die Tabelle zeigt Breeze als "erreichbar".
-
-#### Variante B1: Breeze-TTS-2.cpp im Container
-
-1. Coolify -> New Resource -> Docker Compose: gleiches Repo/Branch, **Base
-   Directory `/`** und Docker Compose Location
-   `/orchestrator/docker-compose.breeze-cpp.yml` (warum nicht
-   `/orchestrator`: siehe A).
-2. Environment Variables:
-   - `BREEZE_GPU` = Index der Karte (Default `0`)
-   - `BREEZE_CUDA_ARCHS` = Compute-Capability der Karte(n) ohne Punkt, z. B.
-     `75` fuer die 2080 Ti allein (baut am schnellsten). Die Karte aus
-     `BREEZE_GPU` muss dabei sein (fehlt z. B. `61` fuer eine Pascal-Karte,
-     bricht der Server mit "no kernel image is available" ab). Nachsehen mit
-     `nvidia-smi --query-gpu=index,name,compute_cap --format=csv`. Default
-     `61;75;86;89` deckt Pascal bis Ada ab.
-   - optional `BREEZE_GGUF_QUANT` = `q8_0` (Default, empfohlen) oder `q4_k`
-     (~3 GB, etwas schlechter), `HF_TOKEN` wie bei A, `BREEZE_BUILD_JOBS`
-     (Default 4 - kleiner, falls der VM beim Build der RAM ausgeht)
-   - `BREEZE_CUDA_ARCHS` und `BREEZE_BUILD_JOBS` brauchen "Available during
-     build", alle anderen nur zur Laufzeit.
-3. Advanced -> Build arguments -> "Managed manually in Dockerfile" (wie bei
-   A) - hier besonders wichtig, sonst kompiliert jede geaenderte Variable
-   CUDA neu.
-4. Deploy. Der Build kompiliert ggml mit CUDA (hier gemessen: ~30 Minuten fuer
-   die vier Standard-Architekturen auf 4 Kernen, mit nur `75` deutlich
-   schneller). Der erste Start laedt die GGUF-Datei ins Volume
-   `breeze-cpp-models`.
-   `docker logs -f heimai-tts-breeze-cpp` zeigt am Ende
-   `backend: CUDA0, sample rate: 24000` und `listening on http://0.0.0.0:7860`.
-   Steht dort `backend: CPU`, hat der Container keine GPU bekommen.
-5. Im Panel unter Sprachausgabe -> Breeze-Server `http://tts-breeze-cpp:7860`
-   eintragen und speichern.
-
-#### Variante B2: Breeze-TTS-2.cpp nativ (ohne Docker)
-
-Fuer einen Rechner ausserhalb von Coolify - die VM selbst oder ein anderer
-Linux-Rechner (hier Ubuntu 24.04) mit NVIDIA-Karte. Fertige Binaries gibt es
-(noch) nicht; gebaut wird mit dem Vulkan-Backend, das nur den NVIDIA-Treiber
-braucht (hier getestet: ~3 Minuten auf 4 Kernen):
-
-```bash
-sudo apt install build-essential cmake ninja-build git libvulkan-dev glslc spirv-headers vulkan-tools
-vulkaninfo --summary        # muss die NVIDIA-Karte auflisten (sonst fehlt der Vulkan-Teil des Treibers)
-git clone https://github.com/HoppouAI/Breeze-TTS-2.cpp.git && cd Breeze-TTS-2.cpp
-git checkout a5436642d4c64304b398ceeda9b8fce4577bfdb1   # derselbe Stand wie im Container
-git submodule update --init --recursive
-cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
-cmake --build build --target breeze-server -j4
-```
-
-`-DBUILD_SHARED_LIBS=OFF` macht `build/breeze-server` zu einem eigenstaendigen
-Binary, das man auch verschieben kann. Mit installiertem CUDA-Toolkit geht
-statt Vulkan `-DBREEZE_CUDA=ON -DBREEZE_VULKAN=OFF` - fuer CUDA ist aber
-Variante B1 der einfachere Weg (Toolkit steckt im Build-Image).
-
-Gewichte: auf https://huggingface.co/HoppouAI/Breeze-TTS-2.cpp/tree/main die
-`...q8_0.gguf` (ohne `-dd` im Namen) laden, z. B.
-`wget https://huggingface.co/HoppouAI/Breeze-TTS-2.cpp/resolve/main/<datei>`.
-
-Starten - der Server hat **keine Authentifizierung**, deshalb nur an eine
-interne Adresse binden:
-
-```bash
-# Auf der VM selbst: an das Gateway des ai-lab-Netzes - dann erreichen ihn nur Container
-docker network inspect ai-lab -f '{{(index .IPAM.Config 0).Gateway}}'    # z. B. 172.18.0.1
-./build/breeze-server <datei>.gguf --host 172.18.0.1 --port 7860 --ws-port -1
-# Auf einem anderen Rechner: an dessen LAN-IP, Port 7860 per Firewall nur fuer die VM freigeben
-```
-
-Im Panel dann `http://172.18.0.1:7860` bzw. `http://<lan-ip>:7860` eintragen.
-Damit der Server den Neustart ueberlebt, z. B. als systemd-Dienst:
-
-```ini
-# /etc/systemd/system/breeze-tts.service
-[Unit]
-Description=Breeze-TTS-2.cpp
-After=network-online.target docker.service
-
-[Service]
-WorkingDirectory=/opt/Breeze-TTS-2.cpp
-ExecStart=/opt/Breeze-TTS-2.cpp/build/breeze-server /opt/Breeze-TTS-2.cpp/<datei>.gguf --host 172.18.0.1 --port 7860 --ws-port -1
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-```
-
-`sudo systemctl enable --now breeze-tts`. Unter Windows baut das Projekt mit
-MSVC oder mingw plus Vulkan SDK (siehe `docs/build.md` im Projekt), der
-Server-Aufruf ist derselbe.
-
-#### Testen und aktivieren (alle Varianten)
-
-1. Sprachausgabe -> Probehoeren: Engine "Breeze TTS 2" und denselben Satz mit
-   XTTS - Klang und Latenz direkt vergleichen (Echtzeitfaktor unter 1 =
-   schneller als Echtzeit). Optional eine Sprechanweisung setzen ("Voice
-   Direction", z. B. *Speak in a warm, calm tone.*).
-2. **Aktivieren**, wenn es ueberzeugt. Zum Aufhoeren den Breeze-Deploy in
-   Coolify stoppen (bzw. den nativen Dienst) - das VRAM ist dann wieder frei,
-   bis dahin bzw. danach spricht XTTS.
-
-**Panel zeigt Breeze als "nicht erreichbar"?** Die Meldung nennt die Ursache:
-
-- *Server nicht gefunden* - den Namen aus der eingetragenen Adresse kennt das
-  Netzwerk nicht: Der Breeze-Deploy laeuft (noch) nicht oder die Adresse
-  stimmt nicht. In Coolify pruefen, ob die Resource existiert und fertig
-  deployt ist (der erste Build dauert). Auf der VM:
-  ```bash
-  docker ps --filter name=heimai-tts-breeze          # laeuft ein Breeze-Container (A oder B1)?
-  docker network inspect ai-lab --format '{{range .Containers}}{{.Name}} {{end}}'
-  docker exec heimai-orchestrator python -c "import socket; print(socket.gethostbyname('tts-breeze'))"
-  ```
-- *nimmt keine Verbindungen an* - der Container/Rechner ist da, der Server
-  aber (noch) nicht: `docker logs -f heimai-tts-breeze` bzw.
-  `heimai-tts-breeze-cpp` (nativ: die Konsole von breeze-server) zeigen
-  Download, Modell-Laden oder den Fehler (z. B. Lizenz-Zustimmung ->
-  `HF_TOKEN`, CUDA out of memory -> Karte freiraeumen).
-- *laedt Modell...* - einfach warten, danach steht dort "erreichbar".
-
-**Probehoeren meldet "Verbindung mitten in der Synthese abgebrochen"?**
-Breeze hat die Antwort begonnen und ist dann abgestuerzt (Container startet
-neu). Den Grund zeigen die letzten Log-Zeilen direkt danach:
-
-```bash
-docker logs --tail 40 heimai-tts-breeze-cpp      # bzw. heimai-tts-breeze
-nvidia-smi                                        # VRAM der Breeze-Karte
-```
-
-- `out of memory` / `cudaMalloc failed` / `failed to allocate` - die Karte
-  ist voll: XTTS unter GPUs ausschalten oder umziehen, das LLM entladen, ein
-  kuerzeres Sample (~10 s) nehmen oder `BREEZE_GPU` auf die freiere Karte.
-- `no kernel image is available` - `BREEZE_CUDA_ARCHS` enthaelt die Karte
-  aus `BREEZE_GPU` nicht (Compute-Capability pruefen, neu bauen).
-
-Aktivieren geht trotzdem (nach Rueckfrage) - bis Breeze antwortet, spricht
-XTTS (bzw. Piper, solange XTTS ausgeschaltet ist).
-
-Zu Variante A: Das offizielle Dockerfile baut FlashAttention (laeuft erst ab
-Ampere) - `tts-breeze/` verzichtet darauf, der Server rechnet ohnehin
-"eager". Ob die 2080 Ti ohne natives bf16 schnell genug ist, zeigt der
-Echtzeitfaktor im Probehoeren; ist sie zu langsam, ist B die Alternative.
-
-### Qwen3-TTS testen (Engine-Vertrag, v1.20)
-
-> Seit v1.21 geht Qwen3-TTS auch ohne eigenen Container ueber audio.cpp
-> (Familie `qwen3_tts`, GGUF), siehe
-> [audio.cpp anschliessen](#audiocpp-anschliessen-v121).
-
-[Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) (Qwen-Team, Apache-2.0)
-klont eine Stimme aus einem kurzen Sample und spricht 10 Sprachen, darunter
-**Deutsch**. Genutzt werden die *Base*-Modelle:
-
-| Modell (`QWEN3_MODEL`) | VRAM (Richtwert) | |
-|---|---|---|
-| `Qwen/Qwen3-TTS-12Hz-1.7B-Base` (Default) | ~5 GB | klingt besser |
-| `Qwen/Qwen3-TTS-12Hz-0.6B-Base` | ~2,5 GB | schneller, passt neben XTTS |
-
-Die Engine laeuft als eigener Container `heimai-tts-qwen3` auf Basis von
-`../tts-engine-kit`. Das Python-Paket von Qwen3 erzeugt ganze Aeusserungen
-(echtes Streaming gibt es nur ueber vLLM) - die Engine spricht deshalb
-**Satz fuer Satz**: Das erste Audio kommt nach dem ersten Satz. Mit exaktem
-Transkript des Samples klont sie am aehnlichsten; ohne Transkript nutzt sie
-nur den Stimm-Fingerabdruck (funktioniert, klingt weniger nach dem
-Original). Die Sprache kommt aus der Stimme (Stimmen -> Sprache, Default
-Deutsch).
-
-#### Deployen
-
-1. Coolify -> New Resource -> Docker Compose: dasselbe Repo und derselbe
-   Branch wie der Voice-Stack, **Base Directory `/`** und Docker Compose
-   Location `/orchestrator/docker-compose.qwen3.yml` (warum nicht
-   `/orchestrator`: siehe Breeze Variante A).
-2. Environment Variables - alle optional, alle nur zur Laufzeit (kein
-   "Available during build"):
-   - `QWEN3_DEVICE` = Karte beim Start, Nummer wie im GPU-Panel (`cuda:0`
-     Default, `cuda:1`, `cpu`, `off`). Spaeter waehlst du sie im GPU-Panel.
-   - `QWEN3_MODEL` = eines der Modelle aus der Tabelle.
-   - `QWEN3_DTYPE` = `auto` (Default: bfloat16 ab Ampere, float16 auf
-     aelteren Karten wie der 2080 Ti) oder `float32` (s. u.).
-   - `QWEN3_PRELOAD` = `true` laedt das Modell schon beim Container-Start.
-     Default `false`: Es laedt beim Aktivieren bzw. beim ersten
-     Probehoeren, damit ein frischer Deploy nicht ungefragt VRAM neben XTTS
-     belegt.
-   - `HF_TOKEN` braucht es nicht (die Modelle sind frei), nur falls Hugging
-     Face Downloads drosselt.
-3. Advanced -> Build arguments -> "Managed manually in Dockerfile" (wie bei
-   Breeze: sonst loest jede geaenderte Variable einen Neubau aus, und
-   `HF_TOKEN` landet in der Build-History).
-4. Deploy. Das Image ist gross (~6 GB, PyTorch mit CUDA-Bibliotheken - die
-   gleiche Version wie XTTS, es laeuft also auf jeder Karte, auf der XTTS
-   laeuft). Der erste Start laedt die Gewichte ins Volume `qwen3-models`
-   (1.7B: mehrere GB, wird nach Abbruch fortgesetzt); das Panel zeigt so
-   lange "laedt die Gewichte herunter", danach "nicht geladen". Verfolgen
-   mit `docker logs -f heimai-tts-qwen3`.
-5. Den **Voice-Stack neu deployen**, falls er noch auf einem Stand vor v1.20
-   ist. Im Panel ist Qwen3 unter Sprachausgabe -> *Engines nach dem
-   Engine-Vertrag* als `qwen3` -> `http://tts-qwen3:8000` schon eingetragen.
-
-#### Testen und aktivieren
-
-1. **Stimme vorbereiten:** Unter Stimmen ein Sample mit 5-15 s sauberer
-   Sprache, "Transkribieren" klicken und den Text Wort fuer Wort
-   korrigieren (wie bei Breeze).
-2. **Karte waehlen** (GPUs, Zeile "Sprachausgabe (Qwen3-TTS)"): z. B. die
-   Karte ohne XTTS, dann laufen beide nebeneinander. Die Wahl laedt das
-   Modell sofort.
-3. Sprachausgabe -> **Probehoeren**: Engine "Qwen3-TTS", deine Stimme,
-   ein deutscher Satz, danach derselbe mit XTTS. Das erste Mal laedt das
-   Modell (bis zu einer Minute, auf der CPU deutlich laenger) - fuer echte
-   Latenzwerte zweimal anhoeren.
-4. **Aktivieren**, wenn es ueberzeugt. Liegt XTTS auf derselben Karte, wird
-   es dafuer entladen (Hinweis im Panel); bis Qwen3 antwortet bzw. falls es
-   ausfaellt, spricht dann Piper. Zurueck: XTTS aktivieren - Qwen3 wird
-   entladen, XTTS laedt wieder.
-5. Optional die **Filler** auf Qwen3 umstellen und neu generieren, damit
-   alles in einer Stimme klingt.
-
-Zum Aufhoeren XTTS wieder aktivieren und Qwen3 - falls es auf der anderen
-Karte liegt und deshalb geladen bleibt - unter GPUs auf "Aus" stellen: Der
-Modell-Prozess endet, das VRAM ist komplett frei. Der Container kann laufen
-bleiben (braucht dann nur etwas RAM) oder in Coolify gestoppt werden.
-
-**Probleme:**
-
-- *Server nicht gefunden* - der Deploy laeuft (noch) nicht:
-  `docker ps --filter name=heimai-tts-qwen3`, Status in Coolify.
-- *Fehler "Vorbereitung fehlgeschlagen"* - der Download ist gescheitert
-  (Netz, Platte voll): Ursache beheben; die Engine versucht es nach einer
-  Minute von selbst oder sofort, wenn du unter GPUs eine Karte waehlst.
-- *"Laden fehlgeschlagen: ... CUDA out of memory"* - die Karte ist voll:
-  XTTS auf die andere Karte, das LLM entladen, eine andere Karte waehlen
-  oder das 0.6B-Modell nehmen.
-- *"Qwen3 hat ungueltiges Audio (NaN) erzeugt"* - float16 laeuft auf dieser
-  Karte ueber: `QWEN3_DTYPE=float32` setzen (doppeltes VRAM, beim 1.7B
-  also besser die 11-GB-Karte) oder das 0.6B-Modell.
-- *Stimme klingt fremd* - Transkript pruefen (muss exakt zum Sample passen),
-  ein ruhigeres Sample ohne Hall/Musik nehmen.
-- *"Verbindung mitten in der Synthese abgebrochen"* - der Modell-Prozess ist
-  abgestuerzt (der Container laeuft weiter, der naechste Aufruf laedt neu):
-  `docker logs --tail 40 heimai-tts-qwen3` und `nvidia-smi`.
-
-Eine weitere Engine nach demselben Vertrag einbinden:
-`../tts-engine-kit/README.md` - Container bauen und deployen, dann unter
-Sprachausgabe ID und Adresse eintragen.
 
 ## 1. Lokal testen (ohne echtes LiteLLM/Weaviate)
 
@@ -666,11 +358,12 @@ Infrastruktur zeigt. Die Weaviate-Abfrage selbst scheitert dabei bewusst
 
 ### Kompletter Voice-Loop ohne GPU (Fake-Backends)
 
-`scripts/dev_fake_services.py` stellt LiteLLM, STT, Piper, XTTS, Breeze,
-eine Vertrags-Engine (Qwen3) und einen audio.cpp-Server auf einem Port nach
-(inkl. simulierter LLM-Latenz, damit die Filler-Logik sichtbar wird; Fake-Breeze
-und Fake-audio.cpp klingen beim Voice-Cloning tiefer als mit eingebauter
-Stimme, so hoert man im Probehoeren, welcher Modus gegriffen hat):
+`scripts/dev_fake_services.py` stellt LiteLLM, STT, Piper, XTTS, einen
+audio.cpp-Server und eine Vertrags-Engine (`/engine`, bei Bedarf im Panel
+eintragen) auf einem Port nach (inkl. simulierter LLM-Latenz, damit die
+Filler-Logik sichtbar wird; Fake-audio.cpp klingt beim Voice-Cloning tiefer
+als mit eingebauter Stimme, so hoert man im Probehoeren, welcher Modus
+gegriffen hat):
 
 ```bash
 # Terminal 1: Fake-Backends
@@ -681,8 +374,6 @@ LITELLM_BASE_URL=http://127.0.0.1:9100/llm \
 STT_BASE_URL=http://127.0.0.1:9100/stt \
 PIPER_BASE_URL=http://127.0.0.1:9100/piper \
 XTTS_BASE_URL=http://127.0.0.1:9100/xtts \
-BREEZE_BASE_URL=http://127.0.0.1:9100/breeze \
-QWEN3_BASE_URL=http://127.0.0.1:9100/qwen3 \
 AUDIOCPP_BASE_URL=http://127.0.0.1:9100/audiocpp \
 WEAVIATE_URL=http://127.0.0.1:9100/weaviate-gibtsnicht \
 FILLER_DELAY_MS=800 \

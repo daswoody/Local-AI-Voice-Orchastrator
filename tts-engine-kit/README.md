@@ -7,7 +7,12 @@ Engine-Vertrag* nur ID und Adresse eintragen. Name, Sprachen und
 Faehigkeiten meldet sie selbst, Laden/Entladen und Kartenwahl steuert das
 Panel (GPUs).
 
-Erste Engine: [`tts-qwen3/`](../tts-qwen3) (Qwen3-TTS).
+Im Repo liegt derzeit keine Engine nach diesem Vertrag: Die erste,
+Qwen3-TTS (`tts-qwen3/`, v1.20), ist seit v1.22 wieder ausgebaut - Qwen3-TTS,
+Breeze TTS 2 und viele weitere Modelle laufen ueber einen audio.cpp-Server
+(siehe `../orchestrator/README.md`, "audio.cpp anschliessen"). Der Vertrag
+bleibt fuer Sprachausgaben, die audio.cpp nicht kann; die Vorlagen unten
+zeigen, wie so ein Container aussieht.
 
 ## Vertrag (HTTP)
 
@@ -80,12 +85,46 @@ beim Probehoeren und Filler-Erzeugen wartet er.
 
 2. `main.py`: `app = create_app("tts_<name>.backend:MeinBackend")`, gestartet
    mit uvicorn.
-3. Dockerfile nach dem Muster von `tts-qwen3/Dockerfile` (Build-Context =
-   Repo-Root, damit das Kit mit ins Image kommt) und eine Compose-Datei wie
-   `orchestrator/docker-compose.qwen3.yml` (ai-lab-Netzwerk, GPU-Freigabe
-   `count: all`, Volume fuer die Gewichte).
-4. In Coolify als eigene Resource deployen (Base Directory `/`), im Panel
-   ID + Adresse eintragen - fertig.
+3. Dockerfile (Build-Context = Repo-Root, damit das Kit mit ins Image kommt):
+
+   ```dockerfile
+   FROM python:3.11-slim
+   COPY --from=ghcr.io/astral-sh/uv:0.8 /uv /uvx /bin/
+   WORKDIR /src/tts-<name>
+   COPY tts-engine-kit /src/tts-engine-kit
+   COPY tts-<name>/pyproject.toml tts-<name>/uv.lock ./
+   RUN uv sync --frozen --no-install-project --no-dev
+   COPY tts-<name>/src ./src
+   RUN uv sync --frozen --no-dev
+   ENV PATH="/src/tts-<name>/.venv/bin:$PATH" PYTHONUNBUFFERED=1
+   EXPOSE 8000
+   CMD ["uvicorn", "tts_<name>.main:app", "--host", "0.0.0.0", "--port", "8000"]
+   ```
+
+   und eine Compose-Datei unter `orchestrator/docker-compose.<name>.yml`:
+
+   ```yaml
+   services:
+     tts-<name>:
+       build: {context: ., dockerfile: tts-<name>/Dockerfile}
+       container_name: heimai-tts-<name>
+       restart: unless-stopped
+       environment:
+         ENGINE_DEVICE: cuda:0          # Startkarte; danach waehlt das Panel
+         CUDA_DEVICE_ORDER: PCI_BUS_ID
+       volumes: [<name>-models:/models]
+       networks: [ai-lab]
+       deploy:
+         resources:
+           reservations:
+             devices: [{driver: nvidia, count: all, capabilities: [gpu]}]
+   networks: {ai-lab: {external: true}}
+   volumes: {<name>-models: {}}
+   ```
+4. In Coolify als eigene Resource deployen (Base Directory `/`, Docker
+   Compose Location `/orchestrator/docker-compose.<name>.yml`, Build
+   arguments "Managed manually in Dockerfile"), im Panel ID + Adresse
+   `http://tts-<name>:8000` eintragen - fertig.
 
 ## Einstellungen (Umgebung)
 

@@ -17,7 +17,10 @@ laufen ueber audio.cpp.
 Verwaltungsoberflaeche unter `https://<domain>/admin/` (statisches
 Vanilla-JS, kein Build-Step - Entscheidung siehe Spezifikation 4.14).
 Login mit einem Tier-3-Konto; beim allerersten Start wird der Seed-Admin
-aus `ADMIN_USERNAME`/`ADMIN_PASSWORD` in die leere DB geschrieben.
+aus `ADMIN_USERNAME`/`ADMIN_PASSWORD` in die leere DB geschrieben. Panel und
+Web-UI gehen mit `Cache-Control: no-cache` raus (v1.23): Der Browser fragt
+bei jedem Laden kurz nach (unveraendert = 304), nach einem Deploy laeuft
+also sofort die neue Version statt einer alten aus dem Cache.
 
 | Bereich | Funktion |
 |---|---|
@@ -157,8 +160,8 @@ Wie es funktioniert:
   und die Rueckfallebene spricht, bis es bereit ist.
 - **Probehoeren & vergleichen:** Testsatz + Stimme waehlen, "Anhoeren" -
   ohne Fallback, damit du wirklich die gewaehlte Engine hoerst. Das Panel
-  zeigt die Zeit bis zur ersten Sekunde Audio, die Gesamtdauer und den
-  Echtzeitfaktor (< 1 = schneller als Echtzeit). Eine nicht geladene
+  zeigt die Zeit bis zum ersten Ton (erstes Audio-Stueck), die Gesamtdauer
+  und den Echtzeitfaktor (< 1 = schneller als Echtzeit). Eine nicht geladene
   Vertrags-Engine wird dafuer geladen (bis zu 4 Minuten Wartezeit, die
   gemessene Zeit enthaelt das Laden - fuer echte Werte ein zweites Mal
   anhoeren). Anders als Aktivieren entlaedt Probehoeren nichts: Ist die
@@ -207,9 +210,9 @@ fertig. Ist audio.cpp nicht erreichbar, spricht XTTS.
        "models": [
          {"id": "qwen3-tts", "family": "qwen3_tts", "task": "tts", "mode": "offline",
           "path": "/app/models/Qwen3-TTS-12Hz-1.7B-Base-GGUF/qwen3-tts-12hz-1.7b-base-q8_0_v2.gguf"},
-         {"id": "voxcpm2", "family": "voxcpm2", "task": "tts", "mode": "offline",
+         {"id": "voxcpm2", "family": "voxcpm2", "task": "tts", "mode": "streaming",
           "path": "/app/models/VoxCPM2-GGUF/voxcpm2-q8_0.gguf"},
-         {"id": "pocket-tts-de", "family": "pocket_tts", "task": "tts", "mode": "offline",
+         {"id": "pocket-tts-de", "family": "pocket_tts", "task": "tts", "mode": "streaming",
           "path": "/app/models/PocketTTS-GGUF/german/pocket-tts-german-q8_0.gguf"}
        ]
      }
@@ -220,6 +223,16 @@ fertig. Ist audio.cpp nicht erreichbar, spricht XTTS.
    - *In der audio.cpp-WebUI laden* (Start mit `--ui --ui-management`): Auch
      so geladene Modelle erscheinen - aber nur bis zum naechsten Neustart von
      audio.cpp.
+
+   `"mode": "streaming"` (v1.23) laesst ein Modell sein Audio schon waehrend
+   der Berechnung liefern: Der erste Ton kommt nach einem Bruchteil des
+   Satzes statt nach dem ganzen Satz. Das koennen nur manche Familien (laut
+   den Modell-Spezifikationen von audio.cpp u. a. `voxcpm2`, `omnivoice`,
+   `pocket_tts`, `breeze_tts`, `supertonic`, `kugelaudio`; mit Deutsch und
+   Klonen: VoxCPM2, OmniVoice, PocketTTS). **Qwen3-TTS kann audio.cpp nur
+   offline** - dort bleibt es bei `"mode": "offline"`, sonst laedt das Modell
+   nicht ("does not provide streaming execution"). Normale Requests (Laden,
+   Filler) beantwortet ein Streaming-Modell weiterhin mit einem WAV.
 
    `lazy_load: true` heisst: Ein Modell belegt erst VRAM, wenn es gebraucht
    wird. `max_loaded_models: 1` haelt hoechstens eins im Speicher (der
@@ -243,8 +256,10 @@ fertig. Ist audio.cpp nicht erreichbar, spricht XTTS.
 2. **Probehoeren:** Engine "audio.cpp &middot; qwen3-tts" (usw.), deine Stimme,
    ein deutscher Satz - danach derselbe Satz mit XTTS. Das erste Mal laedt
    audio.cpp das Modell (zaehlt in die Messung), also zweimal anhoeren.
-   audio.cpp-Modelle sprechen Satz fuer Satz; "erste Sekunde" ist hier die
-   Zeit bis zum ersten Satz.
+   audio.cpp-Modelle ohne Streaming sprechen Satz fuer Satz - der erste Ton
+   kommt erst mit dem ersten fertigen Satz. Streaming-Modelle zeigen ab dem
+   zweiten Anhoeren die kurze Zeit bis zum ersten Ton (beim ersten lernt der
+   Orchestrator die Samplerate).
 3. **Spalte "Stimme"** im audio.cpp-Abschnitt: Standard ist "Voice-Sample
    der Stimme klonen". Modelle ohne Klonen (z. B. Kokoro, Supertonic,
    MagpieTTS) bieten dort ihre eingebauten Stimmen an - die gewaehlte gilt
@@ -261,8 +276,24 @@ beim naechsten Turn, bis dahin spricht XTTS).
 
 #### Wie der Orchestrator mit audio.cpp spricht
 
-- **Satz fuer Satz** ueber `POST /v1/audio/speech` (WAV je Satz) - das erste
-  Audio kommt nach dem ersten Satz.
+- **Satz fuer Satz** ueber `POST /v1/audio/speech`. Offline-Modelle liefern
+  je Satz ein fertiges WAV - das erste Audio kommt nach dem ersten Satz.
+- **Streaming-Modelle** (`"mode": "streaming"`, v1.23) liefern jeden Satz als
+  SSE-Stream (`stream_format: "sse"`, `response_format: "pcm"`); der
+  Orchestrator gibt das Audio in Stuecken ab 0,2 s sofort weiter. Die
+  Samplerate nennt audio.cpp im Stream nicht: Der Orchestrator merkt sie sich
+  aus der ersten normalen Antwort des Modells (Laden beim Aktivieren,
+  Probehoeren, Filler - notfalls kommt der erste Satz noch am Stueck),
+  zusammen mit Server, Familie und Pfad; steckt spaeter ein anderes Modell
+  hinter der ID, lernt er neu. VoxCPM2 bekommt `retry_badcase: false` mit
+  (sonst lehnt audio.cpp den Stream ab; ein missglueckter Satz wird dann
+  nicht automatisch neu erzeugt). Bricht ein Stream nach dem ersten Ton ab,
+  endet die Sprachausgabe dieses Turns - Gespieltes laesst sich nicht
+  zuruecknehmen; Fehler vor dem ersten Ton laufen wie unten (Feld weglassen,
+  Modell frisch laden, Rueckfallebene).
+- **Samplerate:** Liefert eine Engine nicht 24 kHz (z. B. VoxCPM2 mit 48 kHz),
+  rechnet der Orchestrator den ganzen Stream mit durchgehendem Zustand um -
+  einzeln umgerechnete Chunks wuerden an jeder Grenze knacken.
 - **Klonen:** Das Voice-Sample geht als mono 24 kHz (Base64, audio.cpp nimmt
   bis 5 MiB, also Samples bis ~100 s) mit dem Transkript mit; audio.cpp
   cacht die Referenz selbst. Die Sprache kommt aus der Stimme (Qwen3 bekommt
@@ -303,6 +334,12 @@ man in der `server.json` mit:
 - *Modell fehlt in der Liste* - in der `server.json` eingetragen, mit
   `"task": "tts"`? In der WebUI geladene Modelle verschwinden beim Neustart
   von audio.cpp.
+- *Antwort kommt trotzdem erst nach dem ganzen Satz* - nur Modelle mit
+  `"mode": "streaming"` streamen (im Panel steht dann "(Streaming)" hinter
+  der Familie); Qwen3-TTS kann es in audio.cpp gar nicht. Gleich nach dem
+  Umstellen kommt ein Satz noch am Stueck (Samplerate lernen).
+- *"... does not provide streaming execution"* - die Familie kann in
+  audio.cpp nicht streamen: beim Modell `"mode": "offline"` eintragen.
 - *"... constant tensor cache graph used a different tensor sequence"* - ein
   Folgefehler in audio.cpp: Der erste Satz mit diesem Modell ist gescheitert
   (fast immer zu wenig VRAM beim Hochladen der Decoder-Daten), seitdem steckt

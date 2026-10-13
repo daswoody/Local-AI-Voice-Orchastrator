@@ -14,6 +14,11 @@ engine = [
     # Zieht den qwen-tts-Fork (qwen-tts-hf, Modul `qwen_tts`) und neuere
     # transformers mit - deshalb nie zusammen mit `qwen-tts`.
     "faster-qwen3-tts==0.5.4",
+    # Ab 5.17 laedt der Audio-Tokenizer nicht mehr ("MimiConfig object has no
+    # attribute 'rope_theta'"): transformers nimmt dort den "default"-Eintrag
+    # aus qwen-tts-hf statt Mimis eigener Rope-Funktion. 5.15.1 nennt auch das
+    # faster-qwen3-tts-README; bis 5.16 getestet (test_real_library.py).
+    "transformers==5.15.1",
     # Dieselbe torch-Version wie tts-xtts - laeuft nachweislich
     # mit dem Treiber der VM. Das neueste Wheel kann einen neueren Treiber
     # verlangen.

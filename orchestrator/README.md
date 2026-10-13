@@ -418,6 +418,10 @@ erhoehen oder Qwen3 ueber audio.cpp (offline) nehmen.
 
 **Probleme:**
 
+- *"Laden fehlgeschlagen: AttributeError: 'MimiConfig' object has no
+  attribute 'rope_theta'"* - Image mit zu neuem `transformers` (ab 5.17, v1.24
+  hatte 5.19). Seit v1.24.1 auf 5.15.1 gepinnt: **neu deployen** (Build, kein
+  reiner Neustart), dann laedt das Modell.
 - *"braucht eine Nvidia-Karte (CUDA-Graphen)"* - der Engine wurde `cpu`
   zugewiesen: unter GPUs eine Karte waehlen.
 - *Das erste Probehoeren dauert lange* - das Laden nimmt die CUDA-Graphen auf

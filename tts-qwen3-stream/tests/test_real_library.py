@@ -52,3 +52,13 @@ def test_reference_tuple_is_accepted_by_the_real_audio_normalizer():
     model = qwen_tts.Qwen3TTSModel.__new__(qwen_tts.Qwen3TTSModel)
     [(audio, audio_rate)] = model._normalize_audio_inputs([(samples, rate)])
     assert audio_rate == 24000 and audio.dtype == np.float32 and audio.ndim == 1
+
+
+def test_audio_tokenizer_codec_builds_with_the_pinned_transformers():
+    """Regression (v1.24.1): Mit transformers >= 5.17 scheiterte das Laden mit
+    "'MimiConfig' object has no attribute 'rope_theta'" - qwen_tts' Rope-Eintrag
+    ueberschrieb dort Mimis eigene Funktion. Baut denselben Codec (ohne Gewichte)."""
+    import qwen_tts  # noqa: F401 - registriert den Rope-Eintrag
+    from transformers import MimiConfig, MimiModel
+
+    MimiModel(MimiConfig())

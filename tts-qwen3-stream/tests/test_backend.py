@@ -77,7 +77,7 @@ def test_invalid_settings_are_rejected_before_anything_loads(monkeypatch, name, 
 
 
 @pytest.mark.parametrize(("device", "capability", "expected"), [
-    ("cuda:1", "7.5", "torch.float16"),   # 2080 Ti: kein natives bfloat16
+    ("cuda:1", "7.5", "torch.float32"),   # 2080 Ti: kein natives bfloat16, float16 laeuft ueber (NaN)
     ("cuda", "8.6", "torch.bfloat16"),
 ])
 def test_dtype_follows_the_card_and_graphs_are_captured_on_load(monkeypatch, device, capability, expected):
@@ -241,5 +241,5 @@ def test_engine_app_clones_and_streams_through_the_kit(monkeypatch, tmp_path):
     assert len(pcm) == 4 * 2400 and np.abs(pcm).max() > 7000
     calls = [json.loads(line) for line in log.read_text().splitlines()]
     assert [call["call"] for call in calls] == ["from_pretrained", "warmup", "prompt", "generate", "generate"]
-    assert calls[0]["dtype"] == "torch.float16" and calls[0]["device"] == "cuda:1"
+    assert calls[0]["dtype"] == "torch.float32" and calls[0]["device"] == "cuda:1"
     assert calls[2]["ref_text"] == "Mein Sample." and calls[3]["language"] == "german"

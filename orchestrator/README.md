@@ -123,7 +123,7 @@ Die Wahl greift ab dem naechsten Sprach-Turn, ohne Neustart.
 | XTTS-v2 (Default) | klont die Nutzerstimme aus dem Sample, Deutsch | ~3 GB VRAM | bewaehrte Hauptstimme |
 | Piper | eine feste deutsche Stimme | CPU | robuster Notbetrieb, z. B. wenn die GPUs fuer einen LLM-Test gebraucht werden |
 | audio.cpp · &lt;Modell&gt; (v1.21) | je nach Modell: klont aus Sample + Transkript oder eingebaute Stimme | je nach Modell, GGUF (Q8 spart VRAM) | viele Modelle ueber EINEN Server, u. a. Qwen3-TTS und Breeze TTS 2 (s. u.) |
-| Qwen3-TTS Streaming (v1.24) | klont aus Sample (mit Transkript am aehnlichsten), 10 Sprachen inkl. Deutsch, Audio waehrend der Erzeugung | ~3,5 GB (0.6B) bzw. ~6,5 GB (1.7B), nur Nvidia | Qwen3 mit Streaming - audio.cpp kann Qwen3 nur offline; Engine nach dem Engine-Vertrag, eigener Deploy (s. u.) |
+| Qwen3-TTS Streaming (v1.24) | klont aus Sample (mit Transkript am aehnlichsten), 10 Sprachen inkl. Deutsch, Audio waehrend der Erzeugung | ~3,5 GB (0.6B) bzw. ~6,5 GB (1.7B) in bfloat16, auf Karten vor Ampere float32 (~doppelt), nur Nvidia | Qwen3 mit Streaming - audio.cpp kann Qwen3 nur offline; Engine nach dem Engine-Vertrag, eigener Deploy (s. u.) |
 | &lt;Vertrags-Engine&gt; (v1.20) | je nach Engine | je nach Engine | eigener Container nach dem Engine-Vertrag, falls audio.cpp ein Modell nicht kann |
 
 Wie es funktioniert:
@@ -392,8 +392,11 @@ herunter"). Variablen (alle optional, nur zur Laufzeit):
 - `QWEN3_STREAM_DEVICE` - Karte beim Start (`cuda:0` Default).
 - `QWEN3_STREAM_MODEL` - `Qwen/Qwen3-TTS-12Hz-0.6B-Base` (Default) oder
   `Qwen/Qwen3-TTS-12Hz-1.7B-Base`.
-- `QWEN3_STREAM_DTYPE` - `auto` (bfloat16 ab Ampere, float16 auf der 2080 Ti)
-  oder `float32`, falls das Audio kaputt klingt.
+- `QWEN3_STREAM_DTYPE` - `auto` (bfloat16 ab Ampere, **float32** auf der
+  2080 Ti, weil Qwen3 in float16 ueberlaeuft - s. Probleme); erzwingen:
+  `bfloat16`, `float16`, `float32`. float32 braucht etwa doppelt so viel VRAM
+  (0.6B: ~6 GB statt ~3,5 GB, ungemessen) und rechnet auf Turing langsamer als
+  float16 - der Echtzeitfaktor im Probehoeren zeigt, ob es reicht.
 - `QWEN3_STREAM_CHUNK_STEPS` - Chunk-Groesse in Codec-Schritten: kleiner =
   frueher das erste Audio, aber die Karte muss deutlich schneller als
   Echtzeit rechnen, sonst stockt die Wiedergabe.
@@ -439,8 +442,13 @@ erhoehen oder Qwen3 ueber audio.cpp (offline) nehmen.
   nie darauf (Rueckfallebene wie bei jeder Engine).
 - *Stockt, Knackser zwischen den Chunks* - die Karte erzeugt langsamer als
   Echtzeit: groesseres `QWEN3_STREAM_CHUNK_STEPS`, 0.6B statt 1.7B, andere Karte.
-- *"Qwen3 hat ungueltiges Audio (NaN) erzeugt"* - float16 laeuft auf dieser
-  Karte ueber: `QWEN3_STREAM_DTYPE=float32` (doppeltes VRAM).
+- *"Qwen3 hat ungueltiges Audio (NaN) erzeugt"* oder im Log `Assertion
+  `probability tensor contains either `inf`, `nan` or element < 0` failed`
+  gefolgt von `Segmentation fault` (Exit-Code -11) - das Modell rechnet in
+  float16 oder bfloat16 ueber (NaN): `QWEN3_STREAM_DTYPE=float32` (doppeltes
+  VRAM). Seit v1.24.3 ist das bei `auto` auf Karten vor Ampere schon so; wer
+  noch den Stand davor deployt hat, setzt es von Hand (Umgebungsvariable, kein
+  Neubau noetig, nur Neustart des Containers).
 - *Stimme klingt fremd* - Transkript pruefen (muss exakt zum Sample passen),
   ein ruhigeres Sample ohne Hall/Musik nehmen.
 - *"Verbindung mitten in der Synthese abgebrochen"* - der Modell-Prozess ist

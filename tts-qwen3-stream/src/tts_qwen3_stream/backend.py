@@ -29,8 +29,10 @@ logger = logging.getLogger(__name__)
 # 1.7B klingt besser, braucht ~5 GB. Alternativ ein Pfad zu eigenen Gewichten.
 MODEL = os.environ.get("QWEN3_MODEL", "Qwen/Qwen3-TTS-12Hz-0.6B-Base").strip()
 MODELS_DIR = Path(os.environ.get("QWEN3_MODELS_DIR", "/models"))
-# auto = bfloat16 ab Ampere, float16 auf aelteren Karten (2080 Ti). Klingt das
-# Audio kaputt, QWEN3_DTYPE=float32 (doppeltes VRAM). Kein CPU-Betrieb: die
+# auto = bfloat16 ab Ampere, float32 auf aelteren Karten (2080 Ti): Qwen3 ist in
+# bfloat16 trainiert, und in float16 laufen seine Aktivierungen ueber - das
+# Modell erzeugt NaN, ein CUDA-Assert beendet den Prozess (Exit-Code -11, v1.24.3).
+# float32 braucht doppelt so viel VRAM. Kein CPU-Betrieb: die
 # CUDA-Graphen brauchen eine Nvidia-Karte.
 DTYPE = os.environ.get("QWEN3_DTYPE", "auto").strip().lower()
 ATTENTION = os.environ.get("QWEN3_ATTENTION", "sdpa").strip()
@@ -79,7 +81,8 @@ class Qwen3StreamBackend(Backend):
             # Modell + Audio-Tokenizer + CUDA-Graphen und statischer Cache
             vram_mb=3500 if size == "0.6B" else 6500,
             description=("Klont die Stimme aus dem Voice-Sample (mit Transkript am aehnlichsten), "
-                         "10 Sprachen inkl. Deutsch, streamt das Audio waehrend der Erzeugung."),
+                         "10 Sprachen inkl. Deutsch, streamt das Audio waehrend der Erzeugung. "
+                         "VRAM-Richtwert fuer bfloat16 (Ampere+); float32 auf aelteren Karten ~doppelt."),
             license="Apache-2.0 (Modell), MIT (faster-qwen3-tts)",
         )
 
@@ -144,8 +147,9 @@ class Qwen3StreamBackend(Backend):
             return getattr(torch, DTYPE)
         index = int(device.partition(":")[2] or 0)
         major, _ = torch.cuda.get_device_capability(index)
-        # bfloat16 rechnen erst Ampere-Karten (8.x) nativ.
-        return torch.bfloat16 if major >= 8 else torch.float16
+        # bfloat16 rechnen erst Ampere-Karten (8.x) nativ; float16 laeuft bei
+        # Qwen3 ueber (NaN), darum auf aelteren Karten float32.
+        return torch.bfloat16 if major >= 8 else torch.float32
 
     def prepare_voice(self, voice: Voice):
         import numpy as np

@@ -35,6 +35,9 @@ services:
       # Codec-Schritte je Chunk (1 Schritt = 1/12 s Audio): 4 = frueher, aber
       # die Karte muss deutlich schneller als Echtzeit sein; 12 = ruhiger.
       QWEN3_CHUNK_STEPS: ${QWEN3_STREAM_CHUNK_STEPS:-8}
+      # false = ohne CUDA-Graphen (langsam): nur zum Eingrenzen, falls der
+      # Modell-Prozess mit Exit-Code -11 abstuerzt.
+      QWEN3_CUDA_GRAPHS: ${QWEN3_STREAM_CUDA_GRAPHS:-true}
       HF_TOKEN: ${HF_TOKEN:-}
     volumes:
       - qwen3-stream-models:/models

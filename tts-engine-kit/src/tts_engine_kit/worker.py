@@ -12,6 +12,7 @@ Zustaende: preparing (Gewichte laden o. ae., Backend.prepare) -> idle
 error = Laden/Prozess gescheitert (detail sagt warum). Immer nur EINE
 Synthese zur Zeit - weitere warten bis busy_wait_s, dann EngineBusy."""
 
+import faulthandler
 import importlib
 import itertools
 import logging
@@ -104,6 +105,9 @@ def _describe(exc: BaseException) -> str:
 
 
 def _child_main(conn, backend_path: str, kwargs: dict, device: str, cache_size: int) -> None:
+    # Segfault in einer nativen Bibliothek (CUDA, torch): Python-Stack ins Log
+    # statt nur "Exit-Code -11" - zeigt, in welchem Schritt es passiert ist.
+    faulthandler.enable()
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s [modell] %(name)s: %(message)s")
     try:

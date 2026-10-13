@@ -23,8 +23,10 @@ def test_backend_calls_use_real_parameter_names():
     load = inspect.signature(faster.FasterQwen3TTS.from_pretrained).parameters
     stream = inspect.signature(faster.FasterQwen3TTS.generate_voice_clone_streaming).parameters
     assert {"device", "dtype", "attn_implementation", "max_seq_len"} <= set(load)
-    assert {"text", "language", "voice_clone_prompt", "chunk_size"} <= set(stream)
+    assert {"text", "language", "voice_clone_prompt", "chunk_size", "parity_mode"} <= set(stream)
     assert callable(faster.FasterQwen3TTS.warmup)
+    # Der Schalter QWEN3_CUDA_GRAPHS=false setzt dieses Attribut des Wrappers
+    assert "_warmed_up" in inspect.getsource(faster.FasterQwen3TTS)
 
 
 def test_prompt_comes_from_the_wrapped_qwen_tts_model():

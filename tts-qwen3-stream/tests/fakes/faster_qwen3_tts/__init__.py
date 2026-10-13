@@ -53,13 +53,16 @@ class FasterQwen3TTS:
               "attn": attn_implementation, "max_seq_len": max_seq_len})
         return cls()
 
+    _warmed_up = False
+
     def warmup(self, prefill_len=100):
         _log({"call": "warmup"})
 
     def generate_voice_clone_streaming(self, text, language, ref_audio=None, ref_text="",
                                        chunk_size=12, voice_clone_prompt=None, **kwargs):
         _log({"call": "generate", "text": text, "language": language,
-              "chunk_size": chunk_size, "prompt": voice_clone_prompt})
+              "chunk_size": chunk_size, "prompt": voice_clone_prompt,
+              "parity": kwargs.get("parity_mode", False)})
         # Zwei Chunks je Satz (bei "Lang" drei) - 0,1 s bei 24 kHz, wie ein Stream.
         for index in range(3 if "Lang" in text else 2):
             if "NaN" in text and index == 1:

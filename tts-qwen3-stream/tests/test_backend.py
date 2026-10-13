@@ -90,6 +90,23 @@ def test_dtype_follows_the_card_and_graphs_are_captured_on_load(monkeypatch, dev
     assert len(_calls("warmup")) == 1
 
 
+def test_without_cuda_graphs_nothing_is_captured_and_the_slow_path_is_used(monkeypatch):
+    monkeypatch.setattr(backend, "CUDA_GRAPHS", False)
+    engine = _loaded()
+    voice = engine.prepare_voice(Voice(key="a", wav=wav_bytes(), transcript=None))
+    list(engine.synthesize("Ein ganz normaler Satz hier.", "de", voice, None))
+    assert _calls("warmup") == []
+    assert engine._model._warmed_up is True  # sonst holt das Paket die Aufnahme beim ersten Satz nach
+    assert _calls("generate")[0]["parity"] is True
+
+
+def test_graphs_are_on_by_default():
+    engine = _loaded()
+    voice = engine.prepare_voice(Voice(key="a", wav=wav_bytes(), transcript=None))
+    list(engine.synthesize("Ein ganz normaler Satz hier.", "de", voice, None))
+    assert _calls("generate")[0]["parity"] is False
+
+
 def test_dtype_can_be_forced(monkeypatch):
     monkeypatch.setattr(backend, "DTYPE", "float32")
     _loaded("cuda:0")

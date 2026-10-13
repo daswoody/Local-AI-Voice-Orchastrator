@@ -43,6 +43,11 @@ MAX_SEQ_LEN = int(os.environ.get("QWEN3_MAX_SEQ_LEN", "2048"))
 # Stille am Ende des Samples (ICL-Modus): sonst faerbt dessen letzter Laut den
 # Anfang der Sprache (Empfehlung von faster-qwen3-tts). 0 = aus.
 REF_SILENCE_S = float(os.environ.get("QWEN3_REF_SILENCE_S", "0.5"))
+# CUDA-Graphen sind der Grund fuer das Tempo. Stuerzt der Modell-Prozess damit
+# ab (Exit-Code -11), mit QWEN3_CUDA_GRAPHS=false pruefen, ob sie die Ursache
+# sind: dann rechnet das Modell ohne Graphen (Pfad "parity" von
+# faster-qwen3-tts) - deutlich langsamer, eher zum Eingrenzen als zum Sprechen.
+CUDA_GRAPHS = os.environ.get("QWEN3_CUDA_GRAPHS", "true").strip().lower() not in ("0", "false", "no", "off")
 
 # ISO-639-1 (Orchestrator) -> Sprachname, wie ihn Qwen3-TTS erwartet.
 LANGUAGES = {
@@ -119,9 +124,18 @@ class Qwen3StreamBackend(Backend):
             attn_implementation=ATTENTION, max_seq_len=MAX_SEQ_LEN)
         supported = self._model.model.model.get_supported_languages() or []
         self._languages = {str(language).lower() for language in supported}
-        # CUDA-Graphen jetzt aufnehmen (dauert einige Sekunden) statt beim
-        # ersten Satz: Der Live-Turn wartet nie auf das Laden.
-        self._model.warmup()
+        logger.info("Gewichte geladen")
+        if CUDA_GRAPHS:
+            # CUDA-Graphen jetzt aufnehmen (dauert einige Sekunden) statt beim
+            # ersten Satz: Der Live-Turn wartet nie auf das Laden.
+            logger.info("Nehme CUDA-Graphen auf ...")
+            self._model.warmup()
+            logger.info("CUDA-Graphen bereit")
+        else:
+            # "Schon aufgenommen" vortaeuschen, sonst holt das Paket es beim
+            # ersten Satz nach.
+            self._model._warmed_up = True
+            logger.warning("QWEN3_CUDA_GRAPHS=false: ohne CUDA-Graphen, deutlich langsamer")
         return device
 
     @staticmethod
@@ -136,6 +150,7 @@ class Qwen3StreamBackend(Backend):
     def prepare_voice(self, voice: Voice):
         import numpy as np
 
+        logger.info("Bereite die Referenz vor (%s)", "mit Transkript" if voice.transcript else "ohne Transkript")
         samples, rate = wav_to_float(voice.wav)
         transcript = (voice.transcript or "").strip()
         if transcript and REF_SILENCE_S > 0:
@@ -161,7 +176,7 @@ class Qwen3StreamBackend(Backend):
         for sentence in split_sentences(text):
             stream = self._model.generate_voice_clone_streaming(
                 text=sentence, language=language_name, voice_clone_prompt=voice,
-                chunk_size=CHUNK_STEPS)
+                chunk_size=CHUNK_STEPS, parity_mode=not CUDA_GRAPHS)
             for audio, rate, _timing in stream:
                 audio = np.asarray(audio, dtype=np.float32).reshape(-1)
                 if not audio.size:

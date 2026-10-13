@@ -397,6 +397,8 @@ herunter"). Variablen (alle optional, nur zur Laufzeit):
 - `QWEN3_STREAM_CHUNK_STEPS` - Chunk-Groesse in Codec-Schritten: kleiner =
   frueher das erste Audio, aber die Karte muss deutlich schneller als
   Echtzeit rechnen, sonst stockt die Wiedergabe.
+- `QWEN3_STREAM_CUDA_GRAPHS` - `false` rechnet ohne CUDA-Graphen (deutlich
+  langsamer): nur zum Eingrenzen eines Absturzes, s. Probleme.
 - `QWEN3_STREAM_PRELOAD` - `true` laedt das Modell schon beim Start. Default
   `false`: Es laedt beim Aktivieren bzw. beim ersten Probehoeren.
 
@@ -422,6 +424,14 @@ erhoehen oder Qwen3 ueber audio.cpp (offline) nehmen.
   attribute 'rope_theta'"* - Image mit zu neuem `transformers` (ab 5.17, v1.24
   hatte 5.19). Seit v1.24.1 auf 5.15.1 gepinnt: **neu deployen** (Build, kein
   reiner Neustart), dann laedt das Modell.
+- *"Modell-Prozess unerwartet beendet (Exit-Code -11)"* - Segfault im
+  Modell-Prozess (native CUDA-/torch-Bibliothek). `docker logs --tail 100
+  heimai-tts-qwen3-stream`: Die Zeile `Fatal Python error: Segmentation fault`
+  mit den Python-Zeilen darunter zeigt, wo es passiert ist; davor steht, wie
+  weit das Laden kam ("Gewichte geladen", "Nehme CUDA-Graphen auf ...",
+  "CUDA-Graphen bereit", "Bereite die Referenz vor"). Zum Eingrenzen
+  `QWEN3_STREAM_CUDA_GRAPHS=false` setzen und neu deployen: Laeuft es dann,
+  sind die Graphen auf dieser Karte/diesem Treiber die Ursache.
 - *"braucht eine Nvidia-Karte (CUDA-Graphen)"* - der Engine wurde `cpu`
   zugewiesen: unter GPUs eine Karte waehlen.
 - *Das erste Probehoeren dauert lange* - das Laden nimmt die CUDA-Graphen auf

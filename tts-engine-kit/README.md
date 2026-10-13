@@ -7,12 +7,14 @@ Engine-Vertrag* nur ID und Adresse eintragen. Name, Sprachen und
 Faehigkeiten meldet sie selbst, Laden/Entladen und Kartenwahl steuert das
 Panel (GPUs).
 
-Im Repo liegt derzeit keine Engine nach diesem Vertrag: Die erste,
-Qwen3-TTS (`tts-qwen3/`, v1.20), ist seit v1.22 wieder ausgebaut - Qwen3-TTS,
-Breeze TTS 2 und viele weitere Modelle laufen ueber einen audio.cpp-Server
-(siehe `../orchestrator/README.md`, "audio.cpp anschliessen"). Der Vertrag
-bleibt fuer Sprachausgaben, die audio.cpp nicht kann; die Vorlagen unten
-zeigen, wie so ein Container aussieht.
+Qwen3-TTS, Breeze TTS 2 und viele weitere Modelle laufen ueber einen
+audio.cpp-Server (siehe `../orchestrator/README.md`, "audio.cpp
+anschliessen"). Der Vertrag ist fuer Sprachausgaben, die audio.cpp nicht kann.
+Im Repo liegt eine solche Engine: [`tts-qwen3-stream/`](../tts-qwen3-stream)
+(v1.24) - Qwen3-TTS mit echtem Chunk-Streaming, das audio.cpp fuer Qwen3
+nicht kann (`streaming="chunk"`: `synthesize` liefert die Chunks, sobald sie
+entstehen). Als Vorlage fuer eigene Container taugt sie ebenso wie die
+Beispiele unten.
 
 ## Vertrag (HTTP)
 
@@ -78,6 +80,10 @@ beim Probehoeren und Filler-Erzeugen wartet er.
                ...
                yield 24000, float_to_pcm16(audio)
    ```
+
+   Streamt das Modell selbst, einfach jeden Chunk `yield`en und in `info()`
+   `streaming="chunk"` melden - das Kit reicht jeden Chunk sofort an den
+   Client weiter (Beispiel: `tts-qwen3-stream/`).
 
    `info()` und `prepare()` laufen im Hauptprozess (dort keine schweren
    Imports), alles andere im Modell-Unterprozess. `ValueError` in

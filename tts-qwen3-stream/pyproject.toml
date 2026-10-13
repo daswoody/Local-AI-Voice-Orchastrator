@@ -1,28 +1,20 @@
 [project]
 name = "heimai-tts-qwen3-stream"
-version = "0.1.0"
-description = "Qwen3-TTS mit echtem Streaming als Heim-AI-Sprachausgabe nach dem Engine-Vertrag v1 (v1.22)"
+version = "0.2.0"
+description = "Qwen3-TTS mit Streaming und GGUF-Quantisierung als Heim-AI-Sprachausgabe nach dem Engine-Vertrag v1 (v1.25)"
 requires-python = ">=3.11"
 dependencies = [
     "tts-engine-kit",
-    "huggingface_hub>=1.5,<2",
+    "huggingface_hub>=0.34",
     "numpy>=1.26",
 ]
 
 [project.optional-dependencies]
 engine = [
-    # Zieht den qwen-tts-Fork (qwen-tts-hf, Modul `qwen_tts`) und neuere
-    # transformers mit - deshalb nie zusammen mit `qwen-tts`.
-    "faster-qwen3-tts==0.5.4",
-    # Ab 5.17 laedt der Audio-Tokenizer nicht mehr ("MimiConfig object has no
-    # attribute 'rope_theta'"): transformers nimmt dort den "default"-Eintrag
-    # aus qwen-tts-hf statt Mimis eigener Rope-Funktion. 5.15.1 nennt auch das
-    # faster-qwen3-tts-README; bis 5.16 getestet (test_real_library.py).
-    "transformers==5.15.1",
-    # Dieselbe torch-Version wie tts-xtts - laeuft nachweislich
-    # mit dem Treiber der VM. Das neueste Wheel kann einen neueren Treiber
-    # verlangen.
-    "torch==2.12.1",
+    # qwentts.cpp (ggml) mit Streaming. Das Linux-Wheel (CUDA 12.8) enthaelt
+    # fuer Turing (sm_75) nur PTX: Der Treiber uebersetzt beim ersten Mal (JIT).
+    # Es bringt libcudart/libcublas nicht mit - die liefert das Image.
+    "qwentts-cpp-python==0.5.0",
 ]
 dev = [
     "pytest>=8.3",

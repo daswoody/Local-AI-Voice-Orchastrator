@@ -13,7 +13,7 @@ Anbindungen fuer Breeze TTS 2 und Qwen3-TTS sind seit v1.22 ausgebaut; beide
 laufen ueber audio.cpp. Nur wer Qwen3-TTS **streamen** will (audio.cpp kann es
 nur offline), nimmt seit v1.24 den eigenen Container `../tts-qwen3-stream`
 (Engine-Vertrag), siehe
-[Qwen3-TTS mit Streaming](#qwen3-tts-mit-streaming-engine-vertrag-v124).
+[Qwen3-TTS mit Streaming](#qwen3-tts-mit-streaming-und-q8q4-engine-vertrag-v125).
 
 ## Admin-Panel (/admin)
 
@@ -123,7 +123,7 @@ Die Wahl greift ab dem naechsten Sprach-Turn, ohne Neustart.
 | XTTS-v2 (Default) | klont die Nutzerstimme aus dem Sample, Deutsch | ~3 GB VRAM | bewaehrte Hauptstimme |
 | Piper | eine feste deutsche Stimme | CPU | robuster Notbetrieb, z. B. wenn die GPUs fuer einen LLM-Test gebraucht werden |
 | audio.cpp · &lt;Modell&gt; (v1.21) | je nach Modell: klont aus Sample + Transkript oder eingebaute Stimme | je nach Modell, GGUF (Q8 spart VRAM) | viele Modelle ueber EINEN Server, u. a. Qwen3-TTS und Breeze TTS 2 (s. u.) |
-| Qwen3-TTS Streaming (v1.24) | klont aus Sample (mit Transkript am aehnlichsten), 10 Sprachen inkl. Deutsch, Audio waehrend der Erzeugung | ~3,5 GB (0.6B) bzw. ~6,5 GB (1.7B) in bfloat16, auf Karten vor Ampere float32 (~doppelt), nur Nvidia | Qwen3 mit Streaming - audio.cpp kann Qwen3 nur offline; Engine nach dem Engine-Vertrag, eigener Deploy (s. u.) |
+| Qwen3-TTS Streaming (v1.25) | klont aus Sample (mit Transkript am aehnlichsten), 10 Sprachen inkl. Deutsch, Audio waehrend der Erzeugung | GGUF Q8/Q4: 0.6B ~1,6 GB bzw. ~1,3 GB (geschaetzt) | Qwen3 mit Streaming und Q8/Q4 - audio.cpp kann Qwen3 nur offline; Engine nach dem Engine-Vertrag, eigener Deploy (s. u.) |
 | &lt;Vertrags-Engine&gt; (v1.20) | je nach Engine | je nach Engine | eigener Container nach dem Engine-Vertrag, falls audio.cpp ein Modell nicht kann |
 
 Wie es funktioniert:
@@ -364,96 +364,105 @@ man in der `server.json` mit:
   abgestuerzt: dessen Logs pruefen (Coolify bzw. `docker logs <Name>`), dazu
   `nvidia-smi`.
 
-### Qwen3-TTS mit Streaming (Engine-Vertrag, v1.24)
+### Qwen3-TTS mit Streaming und Q8/Q4 (Engine-Vertrag, v1.25)
 
 audio.cpp spricht Qwen3-TTS nur **offline**, also Satz fuer Satz (die ersten
 Toene kommen nach dem ersten ganzen Satz). Fuer echtes Streaming gibt es
 `../tts-qwen3-stream`: ein eigener Container nach dem Engine-Vertrag, der das
-Modell ueber [faster-qwen3-tts](https://github.com/andimarafioti/faster-qwen3-tts)
-(MIT, CUDA-Graphen) fuehrt und alle `QWEN3_CHUNK_STEPS` Codec-Schritte (1 Schritt
-= 1/12 s Audio; Default 8 = ~0,67 s) einen Chunk schickt. Die ersten Toene
-kommen so nach wenigen hundert Millisekunden. Der Orchestrator braucht dafuer
-**keinen Code**: Die Engine steht im Panel nur mit ID und Adresse.
+Modell ueber [qwentts.cpp](https://github.com/andimarafioti/qwentts-cpp-python)
+(ggml, MIT) fuehrt - dieselbe GGUF-Technik wie audio.cpp, aber mit Streaming.
+Alle `QWEN3_CHUNK_STEPS` Codec-Frames (1 Frame = 80 ms Audio; Default 8 =
+0,64 s) kommt ein Chunk, der erste nach `QWEN3_FIRST_CHUNK_STEPS` (Default 4 =
+0,32 s). Der Orchestrator braucht dafuer **keinen Code**: Die Engine steht im
+Panel nur mit ID und Adresse.
 
-Das Modell ist das gleiche wie bei audio.cpp (`Qwen3-TTS-12Hz-*-Base`, Apache-2.0);
-Default hier ist **0.6B** (~3,5 GB VRAM inkl. CUDA-Graphen und Cache), alternativ
-1.7B (~6,5 GB). Mit exaktem Transkript des Samples klont es am aehnlichsten,
-ohne nur ueber den Stimm-Fingerabdruck. Es laeuft **nur auf Nvidia-Karten**
-(CUDA-Graphen, kein `cpu`).
+**Quantisierung** (`QWEN3_STREAM_QUANT`): `Q8_0` (Default, nahezu verlustfrei),
+`Q4_K_M` (kleiner, etwas schlechter - zum Ausprobieren), `BF16`, `F32`. Die
+Gewichte kommen als GGUF aus dem Repo
+[Serveurperso/Qwen3-TTS-GGUF](https://huggingface.co/Serveurperso/Qwen3-TTS-GGUF)
+und liegen nach dem ersten Start im Volume. VRAM (Gewichte plus ~0,8 GB fuer
+Cache und Rechenpuffer, **geschaetzt, nicht gemessen** - `nvidia-smi` zeigt es):
+
+| Modell | `Q4_K_M` | `Q8_0` | `BF16` | `F32` |
+|---|---|---|---|---|
+| 0.6B (Default) | ~1,3 GB | ~1,6 GB | ~2,2 GB | ~3,6 GB |
+| 1.7B | ~2,2 GB | ~3,1 GB | ~5,0 GB | ~9,2 GB |
+
+Wechsel der Stufe: Variable aendern, Container neu starten (der Download der
+neuen Datei laeuft beim Start); das Panel zeigt die Stufe im Namen der Engine.
+Nur der Codec in anderer Stufe: `QWEN3_STREAM_CODEC_QUANT` (leer = wie der
+Rest) - sinnvoll z. B. fuer Talker `Q4_K_M` und Codec `Q8_0`, falls Q4 den
+Klang hoerbar verschlechtert.
+
+Das Modell ist das gleiche wie bei audio.cpp (`Qwen3-TTS-12Hz-*-Base`,
+Apache-2.0). Mit exaktem Transkript des Samples klont es am aehnlichsten, ohne
+nur ueber den Stimm-Fingerabdruck.
 
 **Deployen** (eigene Coolify-Resource wie die anderen Container, Docker Compose,
 **Base Directory `/`**, Location `/orchestrator/docker-compose.qwen3-stream.yml`,
 Build-Argumente "Managed manually in Dockerfile"). Container
-`heimai-tts-qwen3-stream`, Volume `qwen3-stream-models`. Das Image ist gross
-(~6 GB, PyTorch mit CUDA-Bibliotheken - dieselbe Version wie XTTS); der erste
-Start laedt die Gewichte ins Volume (das Panel zeigt "laedt die Gewichte
-herunter"). Variablen (alle optional, nur zur Laufzeit):
+`heimai-tts-qwen3-stream`, Volume `qwen3-stream-models`. Das Image ist klein
+(~2 GB, CUDA-Runtime ohne PyTorch); der erste Start laedt die GGUF-Dateien
+(das Panel zeigt "laedt die Gewichte herunter"). Variablen (alle optional,
+nur zur Laufzeit):
 
-- `QWEN3_STREAM_DEVICE` - Karte beim Start (`cuda:0` Default).
+- `QWEN3_STREAM_DEVICE` - Karte beim Start (`cuda:0` Default; `cpu` geht, ist aber langsam).
 - `QWEN3_STREAM_MODEL` - `Qwen/Qwen3-TTS-12Hz-0.6B-Base` (Default) oder
   `Qwen/Qwen3-TTS-12Hz-1.7B-Base`.
-- `QWEN3_STREAM_DTYPE` - `auto` (bfloat16 ab Ampere, **float32** auf der
-  2080 Ti, weil Qwen3 in float16 ueberlaeuft - s. Probleme); erzwingen:
-  `bfloat16`, `float16`, `float32`. float32 braucht etwa doppelt so viel VRAM
-  (0.6B: ~6 GB statt ~3,5 GB, ungemessen) und rechnet auf Turing langsamer als
-  float16 - der Echtzeitfaktor im Probehoeren zeigt, ob es reicht.
-- `QWEN3_STREAM_CHUNK_STEPS` - Chunk-Groesse in Codec-Schritten: kleiner =
-  frueher das erste Audio, aber die Karte muss deutlich schneller als
-  Echtzeit rechnen, sonst stockt die Wiedergabe.
-- `QWEN3_STREAM_CUDA_GRAPHS` - `false` rechnet ohne CUDA-Graphen (deutlich
-  langsamer): nur zum Eingrenzen eines Absturzes, s. Probleme.
+- `QWEN3_STREAM_QUANT`, `QWEN3_STREAM_CODEC_QUANT` - s. o.
+- `QWEN3_STREAM_CHUNK_STEPS`, `QWEN3_STREAM_FIRST_CHUNK_STEPS` - Chunk-Groesse in
+  Codec-Frames (80 ms): kleiner = frueher das Audio, aber die Karte muss
+  deutlich schneller als Echtzeit rechnen, sonst stockt die Wiedergabe.
 - `QWEN3_STREAM_PRELOAD` - `true` laedt das Modell schon beim Start. Default
   `false`: Es laedt beim Aktivieren bzw. beim ersten Probehoeren.
 
 Dann im Panel unter Sprachausgabe -> *Engines nach dem Engine-Vertrag*
 eintragen: ID `qwen3-stream`, Adresse `http://tts-qwen3-stream:8000`, Name
 optional (z. B. "Qwen3-TTS Streaming" - so heisst dann auch die Zeile unter
-GPUs). Karte waehlen, Probehoeren, Aktivieren
-- wie bei jeder Engine; Aktivieren entlaedt andere Sprachausgaben auf
-derselben Karte. Die Engine und das Qwen3-Modell in audio.cpp nicht
-gleichzeitig auf einer knappen Karte laden.
+GPUs). Karte waehlen, Probehoeren, Aktivieren - wie bei jeder Engine;
+Aktivieren entlaedt andere Sprachausgaben auf derselben Karte. Die Engine und
+das Qwen3-Modell in audio.cpp nicht gleichzeitig auf einer knappen Karte laden.
 
-**Tempo:** Streaming laeuft fluessig, solange die Karte schneller als
-Echtzeit erzeugt (Echtzeitfaktor > 1 im Probehoeren, "erster Ton" zeigt die
-Latenz). faster-qwen3-tts nennt fuer 0.6B auf einer Tesla T4 (Turing wie die
-2080 Ti, aber langsamer) einen Faktor ~1 bei ~0,9 s bis zum ersten Audio, auf
-einer RTX 4090 ~4,8 bei ~0,16 s; fuer die 2080 Ti gibt es keine Messung - das
-Probehoeren zeigt es. Ist der Faktor < 1: `QWEN3_STREAM_CHUNK_STEPS` auf 12
-erhoehen oder Qwen3 ueber audio.cpp (offline) nehmen.
+**Wichtig fuer die 2080 Ti (Turing):** Das qwentts.cpp-Wheel enthaelt fuer
+sm_75 keinen fertigen Karten-Code, nur PTX. Der Treiber uebersetzt die Kernel
+beim **ersten** Laden und Sprechen (das kann einige Minuten dauern; das erste
+Probehoeren wartet bis zu 240 s) und legt das Ergebnis im Volume ab
+(`/models/cuda-cache`, bis 4 GB) - danach startet es schnell. Reicht das
+nicht oder bricht es ab, ist der Ausweg ein eigener Build von qwentts.cpp fuer
+`sm_75` (wie bei audio.cpp).
+
+**Tempo:** Ob die 2080 Ti schneller als Echtzeit erzeugt, ist ungemessen -
+das Probehoeren zeigt Echtzeitfaktor und "erster Ton". Ist der Faktor < 1:
+`QWEN3_STREAM_CHUNK_STEPS` auf 12 erhoehen, `Q4_K_M` versuchen oder Qwen3 ueber
+audio.cpp (offline) nehmen.
+
+**Aus dem Update von v1.24 (PyTorch-Version):** Das Volume enthaelt noch die
+alten PyTorch-Gewichte (~2,4 GB) - in Coolify das Volume `qwen3-stream-models`
+loeschen gibt Platz frei (die GGUF-Dateien laden danach neu). Die Variablen
+`QWEN3_STREAM_DTYPE` und `QWEN3_STREAM_CUDA_GRAPHS` gibt es nicht mehr und
+werden ignoriert.
 
 **Probleme:**
 
-- *"Laden fehlgeschlagen: AttributeError: 'MimiConfig' object has no
-  attribute 'rope_theta'"* - Image mit zu neuem `transformers` (ab 5.17, v1.24
-  hatte 5.19). Seit v1.24.1 auf 5.15.1 gepinnt: **neu deployen** (Build, kein
-  reiner Neustart), dann laedt das Modell.
-- *"Modell-Prozess unerwartet beendet (Exit-Code -11)"* - Segfault im
-  Modell-Prozess (native CUDA-/torch-Bibliothek). `docker logs --tail 100
-  heimai-tts-qwen3-stream`: Die Zeile `Fatal Python error: Segmentation fault`
-  mit den Python-Zeilen darunter zeigt, wo es passiert ist; davor steht, wie
-  weit das Laden kam ("Gewichte geladen", "Nehme CUDA-Graphen auf ...",
-  "CUDA-Graphen bereit", "Bereite die Referenz vor"). Zum Eingrenzen
-  `QWEN3_STREAM_CUDA_GRAPHS=false` setzen und neu deployen: Laeuft es dann,
-  sind die Graphen auf dieser Karte/diesem Treiber die Ursache.
-- *"braucht eine Nvidia-Karte (CUDA-Graphen)"* - der Engine wurde `cpu`
-  zugewiesen: unter GPUs eine Karte waehlen.
-- *Das erste Probehoeren dauert lange* - das Laden nimmt die CUDA-Graphen auf
-  (einige Sekunden zusaetzlich); danach ist es schnell. Live-Turns warten
-  nie darauf (Rueckfallebene wie bei jeder Engine).
+- *"libcudart.so.12 ... cannot open shared object file"* oder
+  *"libcuda.so.1"* - die GPU ist im Container nicht freigegeben (Compose-Block
+  `deploy ... nvidia`, NVIDIA-Container-Toolkit auf dem Host).
+- *Das erste Probehoeren dauert sehr lange* - PTX-Uebersetzung fuer Turing
+  (s. o.), nur beim ersten Mal. `docker exec heimai-tts-qwen3-stream du -sh
+  /models/cuda-cache` zeigt, dass der Cache waechst.
+- *Es ist trotz Karte sehr langsam* - im Log (`docker logs
+  heimai-tts-qwen3-stream`) muss ein ggml-Eintrag mit "CUDA" und dem
+  Kartennamen stehen; fehlt er, rechnet es auf der CPU.
 - *Stockt, Knackser zwischen den Chunks* - die Karte erzeugt langsamer als
-  Echtzeit: groesseres `QWEN3_STREAM_CHUNK_STEPS`, 0.6B statt 1.7B, andere Karte.
-- *"Qwen3 hat ungueltiges Audio (NaN) erzeugt"* oder im Log `Assertion
-  `probability tensor contains either `inf`, `nan` or element < 0` failed`
-  gefolgt von `Segmentation fault` (Exit-Code -11) - das Modell rechnet in
-  float16 oder bfloat16 ueber (NaN): `QWEN3_STREAM_DTYPE=float32` (doppeltes
-  VRAM). Seit v1.24.3 ist das bei `auto` auf Karten vor Ampere schon so; wer
-  noch den Stand davor deployt hat, setzt es von Hand (Umgebungsvariable, kein
-  Neubau noetig, nur Neustart des Containers).
+  Echtzeit: groesseres `QWEN3_STREAM_CHUNK_STEPS`, 0.6B statt 1.7B, `Q4_K_M`.
+- *"Qwen3 hat ungueltiges Audio (NaN) erzeugt"* oder kaputtes Audio -
+  `QWEN3_STREAM_QUANT=BF16` versuchen (zur Eingrenzung, ob die Quantisierung
+  schuld ist).
+- *"Modell-Prozess unerwartet beendet (Exit-Code -11)"* - Segfault in der
+  nativen Bibliothek: `docker logs --tail 100 heimai-tts-qwen3-stream`, die
+  Zeilen ab `Fatal Python error` zeigen die Stelle.
 - *Stimme klingt fremd* - Transkript pruefen (muss exakt zum Sample passen),
   ein ruhigeres Sample ohne Hall/Musik nehmen.
-- *"Verbindung mitten in der Synthese abgebrochen"* - der Modell-Prozess ist
-  abgestuerzt (der Container laeuft weiter, der naechste Aufruf laedt neu):
-  `docker logs --tail 40 heimai-tts-qwen3-stream` und `nvidia-smi`.
 
 ## 1. Lokal testen (ohne echtes LiteLLM/Weaviate)
 

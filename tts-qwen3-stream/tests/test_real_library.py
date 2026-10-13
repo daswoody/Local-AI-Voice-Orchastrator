@@ -1,66 +1,62 @@
-"""Abgleich mit dem ECHTEN faster-qwen3-tts-Paket (nur wenn installiert, z. B.
+"""Abgleich mit dem ECHTEN qwentts-cpp-python-Paket (nur wenn installiert, z. B.
 im Image bzw. mit `uv sync --extra engine`): Die Aufrufe des Backends und der
-Nachbau in tests/fakes muessen zu dessen API passen. Gewichte braucht das
-nicht - die gibt es nur im Container."""
+Nachbau in tests/fakes muessen zu dessen API passen. Bibliothek (libqwen),
+Karte und Gewichte braucht das nicht - die gibt es nur im Container."""
 
 import inspect
-from types import SimpleNamespace
 
-import numpy as np
 import pytest
-from conftest import wav_bytes
 
-from tts_engine_kit.audio import wav_to_float
-from tts_qwen3_stream.backend import LANGUAGES
+from tts_qwen3_stream import backend
 
-pytestmark = pytest.mark.real_faster
-faster = pytest.importorskip("faster_qwen3_tts", reason="echtes faster-qwen3-tts nicht installiert")
-if not hasattr(faster, "__file__") or "fakes" in str(faster.__file__):
+pytestmark = pytest.mark.real_qwentts
+qwentts_cpp = pytest.importorskip("qwentts_cpp", reason="echtes qwentts-cpp-python nicht installiert")
+if not hasattr(qwentts_cpp, "__file__") or "fakes" in str(qwentts_cpp.__file__):
     pytest.skip("nur der Nachbau gefunden", allow_module_level=True)
 
 
 def test_backend_calls_use_real_parameter_names():
-    load = inspect.signature(faster.FasterQwen3TTS.from_pretrained).parameters
-    stream = inspect.signature(faster.FasterQwen3TTS.generate_voice_clone_streaming).parameters
-    assert {"device", "dtype", "attn_implementation", "max_seq_len"} <= set(load)
-    assert {"text", "language", "voice_clone_prompt", "chunk_size", "parity_mode"} <= set(stream)
-    assert callable(faster.FasterQwen3TTS.warmup)
-    # Der Schalter QWEN3_CUDA_GRAPHS=false setzt dieses Attribut des Wrappers
-    assert "_warmed_up" in inspect.getsource(faster.FasterQwen3TTS)
+    init = inspect.signature(qwentts_cpp.QwenTTS.__init__).parameters
+    stream = inspect.signature(qwentts_cpp.QwenTTS.stream).parameters
+    assert {"talker_path", "codec_path", "use_fa", "clamp_fp16", "log_level"} <= set(init)
+    assert {"text", "lang", "ref_spk_emb", "ref_codes", "ref_text", "codec_chunk_sec",
+            "first_chunk_frames"} <= set(stream)
+    for method in ("extract_voice_ref", "language_names", "model_type"):
+        assert callable(getattr(qwentts_cpp.QwenTTS, method))
 
 
-def test_prompt_comes_from_the_wrapped_qwen_tts_model():
-    import qwen_tts
+def test_voice_ref_has_the_fields_the_backend_reads():
+    import numpy as np
 
-    create = inspect.signature(qwen_tts.Qwen3TTSModel.create_voice_clone_prompt).parameters
-    assert {"ref_audio", "ref_text", "x_vector_only_mode"} <= set(create)
-
-
-def test_our_language_names_pass_the_real_validation():
-    import qwen_tts
-
-    model = qwen_tts.Qwen3TTSModel.__new__(qwen_tts.Qwen3TTSModel)
-    model.model = SimpleNamespace(get_supported_languages=lambda: ["auto", *LANGUAGES.values()])
-    model._validate_languages(["german", "auto", "English"])
-    with pytest.raises(ValueError):
-        model._validate_languages(["klingonisch"])
+    ref = qwentts_cpp.VoiceRef(ref_spk_emb=np.ones(4, dtype=np.float32), ref_codes=np.ones((2, 3), dtype=np.int32))
+    assert ref.ref_spk_emb.shape == (4,) and ref.ref_codes.shape == (2, 3)
 
 
-def test_reference_tuple_is_accepted_by_the_real_audio_normalizer():
-    import qwen_tts
-
-    samples, rate = wav_to_float(wav_bytes(width=3, channels=2))
-    samples = np.concatenate([samples, np.zeros(12000, dtype=samples.dtype)])
-    model = qwen_tts.Qwen3TTSModel.__new__(qwen_tts.Qwen3TTSModel)
-    [(audio, audio_rate)] = model._normalize_audio_inputs([(samples, rate)])
-    assert audio_rate == 24000 and audio.dtype == np.float32 and audio.ndim == 1
+def test_codec_frames_are_80_ms():
+    """CHUNK_STEPS / 12.5 -> Frames: das Paket rechnet codec_chunk_sec * 12.5."""
+    source = inspect.getsource(qwentts_cpp.QwenTTS.stream)
+    assert "codec_chunk_sec * 12.5" in source
 
 
-def test_audio_tokenizer_codec_builds_with_the_pinned_transformers():
-    """Regression (v1.24.1): Mit transformers >= 5.17 scheiterte das Laden mit
-    "'MimiConfig' object has no attribute 'rope_theta'" - qwen_tts' Rope-Eintrag
-    ueberschrieb dort Mimis eigene Funktion. Baut denselben Codec (ohne Gewichte)."""
-    import qwen_tts  # noqa: F401 - registriert den Rope-Eintrag
-    from transformers import MimiConfig, MimiModel
+@pytest.mark.parametrize(("model", "quant", "codec_quant"), [
+    ("Qwen/Qwen3-TTS-12Hz-0.6B-Base", "Q8_0", ""),
+    ("Qwen/Qwen3-TTS-12Hz-0.6B-Base", "Q4", ""),
+    ("Qwen/Qwen3-TTS-12Hz-1.7B-Base", "BF16", ""),
+    ("Qwen/Qwen3-TTS-12Hz-1.7B-Base", "fp32", ""),
+    ("Qwen/Qwen3-TTS-12Hz-0.6B-Base", "Q4_K_M", "Q8"),
+])
+def test_gguf_file_names_match_the_real_package(monkeypatch, model, quant, codec_quant):
+    import huggingface_hub
+    from qwentts_cpp.models import GGUF_REPO, resolve_gguf_paths
 
-    MimiModel(MimiConfig())
+    asked = []
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download",
+                        lambda filename, **kwargs: asked.append(filename) or f"/x/{filename}")
+    resolve_gguf_paths(model, quant=quant)
+    talker, codec = backend.gguf_names(model, quant)
+    assert asked == [talker, codec] and backend.GGUF_REPO == GGUF_REPO
+
+    if codec_quant:  # getrennte Codec-Stufe: Talker wie QUANT, Codec wie CODEC_QUANT
+        asked.clear()
+        resolve_gguf_paths(model, quant=codec_quant)
+        assert backend.gguf_names(model, quant, codec_quant)[1] == asked[1]

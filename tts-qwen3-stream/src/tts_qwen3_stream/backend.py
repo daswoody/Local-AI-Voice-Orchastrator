@@ -1,20 +1,19 @@
-"""Qwen3-TTS mit echtem Streaming als Engine nach dem Engine-Vertrag v1 (v1.22).
+"""Qwen3-TTS mit echtem Streaming und GGUF-Quantisierung als Engine nach dem
+Engine-Vertrag v1 (Heim-AI v1.25).
 
-Modell: Qwen3-TTS-12Hz-*-Base (Apache-2.0, QwenLM/Qwen3-TTS), geklont aus
-einem kurzen Sample, 10 Sprachen inkl. Deutsch. Das Paket `qwen-tts` erzeugt
-nur ganze Aeusserungen, und audio.cpp kann Qwen3 nur offline; deshalb fuehrt
-diese Engine das Modell ueber faster-qwen3-tts (MIT, CUDA-Graphen) und
-liefert das Audio waehrend der Erzeugung in Chunks von `QWEN3_CHUNK_STEPS`
-Codec-Schritten (1 Schritt = 1/12 s Audio). Das erste Audio kommt so nach
-wenigen hundert Millisekunden statt nach dem ersten ganzen Satz.
+Modell: Qwen3-TTS-12Hz-*-Base (Apache-2.0, QwenLM/Qwen3-TTS), geklont aus einem
+kurzen Sample, 10 Sprachen inkl. Deutsch. Laufzeit: qwentts.cpp (ggml, MIT) ueber
+`qwentts-cpp-python` - dieselbe GGUF-Technik wie audio.cpp, aber mit
+Streaming: Das Audio kommt in Chunks von `QWEN3_CHUNK_STEPS` Codec-Frames
+(1 Frame = 80 ms), noch waehrend das Modell rechnet. Das erste Audio kommt so
+nach wenigen hundert Millisekunden statt nach dem ersten ganzen Satz.
 
-Der Text wird trotzdem in Saetze geteilt: Qwen3 driftet bei langen Texten,
-und der statische Cache fasst nur `QWEN3_MAX_SEQ_LEN` Positionen (Referenz +
-Text + Audio). Pro Satz kostet das nur einen schnellen Prefill.
+Gewichte: GGUF-Dateien (`QWEN3_QUANT`: Q8_0 Default, Q4_K_M, BF16, F32). Kein
+torch: Die frueheren float16-Abstuerze (NaN) und der doppelte VRAM von float32
+auf Turing entfallen; Q8_0/Q4_K_M rechnen ueber ggml-Kernel.
 
-Eigenes Image: faster-qwen3-tts bringt einen Fork von qwen-tts (`qwen-tts-hf`,
-gleicher Modulname `qwen_tts`) und neuere transformers mit - nicht neben dem
-Original `qwen-tts` installierbar."""
+Der Text wird in Saetze geteilt (Qwen3 driftet bei langen Texten), jeder Satz
+aber gestreamt."""
 
 import logging
 import os
@@ -25,38 +24,53 @@ from tts_engine_kit.audio import float_to_pcm16, wav_to_float
 
 logger = logging.getLogger(__name__)
 
-# 0.6B: ~2,5 GB VRAM und schnell genug fuer Echtzeit auf Turing (T4: Faktor ~1);
-# 1.7B klingt besser, braucht ~5 GB. Alternativ ein Pfad zu eigenen Gewichten.
+# Base-Modell (Hugging-Face-ID, bestimmt die GGUF-Dateien). 0.6B ist der
+# Streaming-Default; 1.7B klingt besser und braucht mehr VRAM.
 MODEL = os.environ.get("QWEN3_MODEL", "Qwen/Qwen3-TTS-12Hz-0.6B-Base").strip()
+# Quantisierung der Gewichte: Q8_0 (Default, nahezu verlustfrei), Q4_K_M
+# (kleiner, etwas schlechter), BF16, F32.
+QUANT = os.environ.get("QWEN3_QUANT", "Q8_0").strip()
+# Optional eine andere Stufe nur fuer den Audio-Codec (leer = wie QUANT): Der
+# Codec ist klein, ein tieferes Quant spart dort kaum etwas, kostet aber Klang.
+CODEC_QUANT = os.environ.get("QWEN3_CODEC_QUANT", "").strip()
+GGUF_REPO = os.environ.get("QWEN3_GGUF_REPO", "Serveurperso/Qwen3-TTS-GGUF").strip()
+# Eigene GGUF-Dateien im Volume statt Download (beide setzen).
+TALKER_GGUF = os.environ.get("QWEN3_TALKER_GGUF", "").strip()
+CODEC_GGUF = os.environ.get("QWEN3_CODEC_GGUF", "").strip()
 MODELS_DIR = Path(os.environ.get("QWEN3_MODELS_DIR", "/models"))
-# auto = bfloat16 ab Ampere, float32 auf aelteren Karten (2080 Ti): Qwen3 ist in
-# bfloat16 trainiert, und in float16 laufen seine Aktivierungen ueber - das
-# Modell erzeugt NaN, ein CUDA-Assert beendet den Prozess (Exit-Code -11, v1.24.3).
-# float32 braucht doppelt so viel VRAM. Kein CPU-Betrieb: die
-# CUDA-Graphen brauchen eine Nvidia-Karte.
-DTYPE = os.environ.get("QWEN3_DTYPE", "auto").strip().lower()
-ATTENTION = os.environ.get("QWEN3_ATTENTION", "sdpa").strip()
-# Codec-Schritte je Chunk: 4 ~ 0,33 s Audio (frueh, aber mehr Overhead je
-# Sekunde Audio), 8 ~ 0,67 s, 12 ~ 1 s. Kleiner = erstes Audio frueher, aber
-# die Karte muss schneller als Echtzeit bleiben, sonst ruckelt es.
+# Codec-Frames je Chunk (1 Frame = 80 ms Audio): kleiner = frueher das naechste
+# Stueck, aber die Karte muss schneller als Echtzeit bleiben, sonst ruckelt es.
 CHUNK_STEPS = int(os.environ.get("QWEN3_CHUNK_STEPS", "8"))
-# Laenge des statischen Caches (Referenz-Prompt + Text + erzeugte Schritte).
-MAX_SEQ_LEN = int(os.environ.get("QWEN3_MAX_SEQ_LEN", "2048"))
+# Frames im allerersten Chunk (1, 2, 4 oder 8): bestimmt die Zeit bis zum
+# ersten Ton (4 = 0,32 s Audio).
+FIRST_CHUNK_STEPS = int(os.environ.get("QWEN3_FIRST_CHUNK_STEPS", "4"))
+# FlashAttention von ggml (laeuft auch auf Turing). Bei Audio-Fehlern probehalber aus.
+FLASH_ATTN = os.environ.get("QWEN3_FLASH_ATTN", "true").strip().lower() not in ("0", "false", "no", "off")
+# fp16-Zwischenwerte begrenzen (nur fuer F16-Pfade relevant, bei NaN-Audio probieren).
+CLAMP_FP16 = os.environ.get("QWEN3_CLAMP_FP16", "false").strip().lower() in ("1", "true", "yes", "on")
+LOG_LEVEL = os.environ.get("QWEN3_LOG_LEVEL", "info").strip().lower()
 # Stille am Ende des Samples (ICL-Modus): sonst faerbt dessen letzter Laut den
 # Anfang der Sprache (Empfehlung von faster-qwen3-tts). 0 = aus.
 REF_SILENCE_S = float(os.environ.get("QWEN3_REF_SILENCE_S", "0.5"))
-# CUDA-Graphen sind der Grund fuer das Tempo. Stuerzt der Modell-Prozess damit
-# ab (Exit-Code -11), mit QWEN3_CUDA_GRAPHS=false pruefen, ob sie die Ursache
-# sind: dann rechnet das Modell ohne Graphen (Pfad "parity" von
-# faster-qwen3-tts) - deutlich langsamer, eher zum Eingrenzen als zum Sprechen.
-CUDA_GRAPHS = os.environ.get("QWEN3_CUDA_GRAPHS", "true").strip().lower() not in ("0", "false", "no", "off")
 
 # ISO-639-1 (Orchestrator) -> Sprachname, wie ihn Qwen3-TTS erwartet.
 LANGUAGES = {
     "de": "german", "en": "english", "zh": "chinese", "ja": "japanese", "ko": "korean",
     "fr": "french", "ru": "russian", "pt": "portuguese", "es": "spanish", "it": "italian",
 }
-_DTYPES = {"float32", "float16", "bfloat16"}
+# Dateinamen im GGUF-Repo (wie qwentts_cpp.models; test_real_library.py prueft das).
+_TALKER_STEMS = {
+    "Qwen/Qwen3-TTS-12Hz-0.6B-Base": "qwen-talker-0.6b-base",
+    "Qwen/Qwen3-TTS-12Hz-1.7B-Base": "qwen-talker-1.7b-base",
+}
+_QUANTS = {"F32": "F32", "FP32": "F32", "BF16": "BF16", "Q8": "Q8_0", "Q8_0": "Q8_0",
+           "Q4": "Q4_K_M", "Q4_K_M": "Q4_K_M"}
+# Gewichte (MB) von Talker + Codec je Stufe - Schaetzung aus der Parameterzahl, nicht gemessen.
+_WEIGHTS_MB = {
+    "0.6B": {"F32": 2800, "BF16": 1400, "Q8_0": 750, "Q4_K_M": 450},
+    "1.7B": {"F32": 8400, "BF16": 4200, "Q8_0": 2250, "Q4_K_M": 1350},
+}
+_OVERHEAD_MB = 800  # KV-Cache, Rechenpuffer, CUDA-Kontext
 
 
 def _model_size(model: str) -> str:
@@ -66,104 +80,114 @@ def _model_size(model: str) -> str:
     return ""
 
 
+def normalize_quant(name: str) -> str:
+    try:
+        return _QUANTS[name.strip().upper()]
+    except KeyError:
+        raise ValueError(f"Quantisierung {name!r}: erlaubt sind {', '.join(sorted(set(_QUANTS.values())))}") from None
+
+
+def gguf_names(model: str, quant: str, codec_quant: str = "") -> tuple[str, str]:
+    """(Talker-, Codec-Dateiname) im GGUF-Repo."""
+    if model not in _TALKER_STEMS:
+        raise ValueError(f"QWEN3_MODEL={model!r}: bekannt sind {', '.join(sorted(_TALKER_STEMS))} "
+                         "(oder QWEN3_TALKER_GGUF und QWEN3_CODEC_GGUF setzen)")
+    talker_quant = normalize_quant(quant)
+    return (f"{_TALKER_STEMS[model]}-{talker_quant}.gguf",
+            f"qwen-tokenizer-12hz-{normalize_quant(codec_quant or quant)}.gguf")
+
+
 class Qwen3StreamBackend(Backend):
     @classmethod
     def info(cls) -> EngineInfo:
         size = _model_size(MODEL)
+        try:
+            quant = normalize_quant(QUANT)
+        except ValueError:
+            quant = QUANT
+        weights = _WEIGHTS_MB.get(size, {}).get(quant)
         return EngineInfo(
-            name=" ".join(part for part in ("Qwen3-TTS", size, "Streaming") if part),
+            name=" ".join(part for part in ("Qwen3-TTS", size, quant, "Streaming") if part),
             languages=tuple(LANGUAGES),
             sample_rate=24000,
             needs_sample=True,
             uses_transcript=True,
             instructions=False,
             streaming="chunk",
-            # Modell + Audio-Tokenizer + CUDA-Graphen und statischer Cache
-            vram_mb=3500 if size == "0.6B" else 6500,
+            vram_mb=weights + _OVERHEAD_MB if weights else None,
             description=("Klont die Stimme aus dem Voice-Sample (mit Transkript am aehnlichsten), "
-                         "10 Sprachen inkl. Deutsch, streamt das Audio waehrend der Erzeugung. "
-                         "VRAM-Richtwert fuer bfloat16 (Ampere+); float32 auf aelteren Karten ~doppelt."),
-            license="Apache-2.0 (Modell), MIT (faster-qwen3-tts)",
+                         "10 Sprachen inkl. Deutsch, streamt das Audio waehrend der Erzeugung "
+                         "(GGUF, quantisiert). VRAM geschaetzt."),
+            license="Apache-2.0 (Modell), MIT (qwentts.cpp)",
         )
 
     @classmethod
     def prepare(cls) -> dict:
-        """Gewichte einmalig ins Volume laden (Hauptprozess, beim Start)."""
-        if DTYPE != "auto" and DTYPE not in _DTYPES:
-            raise ValueError(f"QWEN3_DTYPE={DTYPE!r}: erlaubt sind auto, {', '.join(sorted(_DTYPES))}")
+        """GGUF-Dateien einmalig ins Volume laden (Hauptprozess, beim Start)."""
         if CHUNK_STEPS < 1:
             raise ValueError(f"QWEN3_CHUNK_STEPS={CHUNK_STEPS}: mindestens 1")
-        if Path(MODEL).is_dir():
-            return {"model_dir": MODEL}
-        from huggingface_hub import snapshot_download
+        if FIRST_CHUNK_STEPS not in (1, 2, 4, 8):
+            raise ValueError(f"QWEN3_FIRST_CHUNK_STEPS={FIRST_CHUNK_STEPS}: erlaubt sind 1, 2, 4, 8")
+        if TALKER_GGUF or CODEC_GGUF:
+            if not (TALKER_GGUF and CODEC_GGUF):
+                raise ValueError("QWEN3_TALKER_GGUF und QWEN3_CODEC_GGUF immer zusammen setzen")
+            for path in (TALKER_GGUF, CODEC_GGUF):
+                if not Path(path).is_file():
+                    raise ValueError(f"GGUF-Datei nicht gefunden: {path}")
+            return {"talker_path": TALKER_GGUF, "codec_path": CODEC_GGUF}
+        talker_name, codec_name = gguf_names(MODEL, QUANT, CODEC_QUANT)
+        from huggingface_hub import hf_hub_download
 
-        target = MODELS_DIR / MODEL.replace("/", "--")
-        marker = target / ".download-complete"
-        if not marker.exists():
-            target.mkdir(parents=True, exist_ok=True)
-            logger.info("Lade %s nach %s (einmalig, mehrere GB) ...", MODEL, target)
-            # Setzt abgebrochene Downloads beim naechsten Start fort.
-            snapshot_download(repo_id=MODEL, local_dir=str(target),
-                              token=os.environ.get("HF_TOKEN") or None)
-            marker.touch()
-        return {"model_dir": str(target)}
+        logger.info("Hole %s und %s aus %s (einmalig, setzt nach Abbruch fort) ...",
+                    talker_name, codec_name, GGUF_REPO)
+        common = dict(repo_id=GGUF_REPO, cache_dir=str(MODELS_DIR / "gguf"),
+                      token=os.environ.get("HF_TOKEN") or None)
+        return {"talker_path": str(hf_hub_download(filename=talker_name, **common)),
+                "codec_path": str(hf_hub_download(filename=codec_name, **common))}
 
-    def __init__(self, model_dir: str) -> None:
-        self.model_dir = model_dir
-        self._model = None
+    def __init__(self, talker_path: str, codec_path: str) -> None:
+        self.talker_path = talker_path
+        self.codec_path = codec_path
+        self._tts = None
         self._languages: set[str] = set()
 
     def load(self, device: str) -> str:
-        import torch
-        from faster_qwen3_tts import FasterQwen3TTS
+        # ggml waehlt die Karte nicht per Argument, sondern nimmt, was CUDA
+        # sichtbar macht. Der Modell-Prozess ist frisch gestartet, CUDA noch
+        # nicht initialisiert - die Zuweisung aus dem Panel ("cuda:1") wird so
+        # zur einzigen sichtbaren Karte (Reihenfolge PCI_BUS_ID aus der Compose).
+        # "cpu": keine Karte sichtbar, ggml rechnet auf der CPU (langsam).
+        os.environ["CUDA_VISIBLE_DEVICES"] = "" if device == "cpu" else (device.partition(":")[2] or "0")
+        from qwentts_cpp import QwenTTS
 
-        if not device.startswith("cuda"):
-            raise RuntimeError("Qwen3-TTS Streaming braucht eine Nvidia-Karte (CUDA-Graphen) - "
-                               "fuer die CPU Qwen3-TTS ueber audio.cpp nehmen")
-        dtype = self._dtype(torch, device)
-        logger.info("Lade %s auf %s (%s, Attention %s)", self.model_dir, device, dtype, ATTENTION)
-        self._model = FasterQwen3TTS.from_pretrained(
-            self.model_dir, device=device, dtype=dtype,
-            attn_implementation=ATTENTION, max_seq_len=MAX_SEQ_LEN)
-        supported = self._model.model.model.get_supported_languages() or []
-        self._languages = {str(language).lower() for language in supported}
-        logger.info("Gewichte geladen")
-        if CUDA_GRAPHS:
-            # CUDA-Graphen jetzt aufnehmen (dauert einige Sekunden) statt beim
-            # ersten Satz: Der Live-Turn wartet nie auf das Laden.
-            logger.info("Nehme CUDA-Graphen auf ...")
-            self._model.warmup()
-            logger.info("CUDA-Graphen bereit")
-        else:
-            # "Schon aufgenommen" vortaeuschen, sonst holt das Paket es beim
-            # ersten Satz nach.
-            self._model._warmed_up = True
-            logger.warning("QWEN3_CUDA_GRAPHS=false: ohne CUDA-Graphen, deutlich langsamer")
+        logger.info("Lade %s + %s auf %s (Flash-Attention %s)", Path(self.talker_path).name,
+                    Path(self.codec_path).name, device, "an" if FLASH_ATTN else "aus")
+        self._tts = QwenTTS(talker_path=self.talker_path, codec_path=self.codec_path,
+                            use_fa=FLASH_ATTN, clamp_fp16=CLAMP_FP16, log_level=LOG_LEVEL)
+        kind = self._tts.model_type()
+        if kind != "base":
+            raise RuntimeError(f"Qwen3-TTS-Base-Modell erwartet, geladen ist '{kind}'")
+        self._languages = {str(name).lower() for name in self._tts.language_names()}
         return device
-
-    @staticmethod
-    def _dtype(torch, device: str):
-        if DTYPE != "auto":
-            return getattr(torch, DTYPE)
-        index = int(device.partition(":")[2] or 0)
-        major, _ = torch.cuda.get_device_capability(index)
-        # bfloat16 rechnen erst Ampere-Karten (8.x) nativ; float16 laeuft bei
-        # Qwen3 ueber (NaN), darum auf aelteren Karten float32.
-        return torch.bfloat16 if major >= 8 else torch.float32
 
     def prepare_voice(self, voice: Voice):
         import numpy as np
 
-        logger.info("Bereite die Referenz vor (%s)", "mit Transkript" if voice.transcript else "ohne Transkript")
-        samples, rate = wav_to_float(voice.wav)
         transcript = (voice.transcript or "").strip()
+        logger.info("Bereite die Referenz vor (%s)", "mit Transkript" if transcript else "ohne Transkript")
+        samples, rate = wav_to_float(voice.wav)
+        samples = np.asarray(samples, dtype=np.float32).reshape(-1)
+        if rate != 24000:
+            target = int(round(len(samples) * 24000 / rate))
+            samples = np.interp(np.linspace(0, len(samples) - 1, target), np.arange(len(samples)),
+                                samples).astype(np.float32)
         if transcript and REF_SILENCE_S > 0:
-            samples = np.concatenate([samples, np.zeros(int(REF_SILENCE_S * rate), dtype=samples.dtype)])
-        return self._model.model.create_voice_clone_prompt(
-            ref_audio=(samples, rate),
-            ref_text=transcript or None,
-            x_vector_only_mode=not transcript,
-        )
+            samples = np.concatenate([samples, np.zeros(int(REF_SILENCE_S * 24000), dtype=np.float32)])
+        ref = self._tts.extract_voice_ref(samples)
+        # Mit Transkript: ICL (Stimme + Sprachcodes des Samples), sonst nur der
+        # Stimm-Fingerabdruck.
+        return {"spk": ref.ref_spk_emb, "codes": ref.ref_codes if transcript else None,
+                "text": transcript or None}
 
     def _language(self, language: str | None) -> str:
         name = LANGUAGES.get((language or "").lower())
@@ -178,14 +202,15 @@ class Qwen3StreamBackend(Backend):
 
         language_name = self._language(language)
         for sentence in split_sentences(text):
-            stream = self._model.generate_voice_clone_streaming(
-                text=sentence, language=language_name, voice_clone_prompt=voice,
-                chunk_size=CHUNK_STEPS, parity_mode=not CUDA_GRAPHS)
-            for audio, rate, _timing in stream:
+            stream = self._tts.stream(
+                text=sentence, lang=language_name, ref_spk_emb=voice["spk"], ref_codes=voice["codes"],
+                ref_text=voice["text"], codec_chunk_sec=CHUNK_STEPS / 12.5,
+                first_chunk_frames=FIRST_CHUNK_STEPS)
+            for audio, rate in stream:
                 audio = np.asarray(audio, dtype=np.float32).reshape(-1)
                 if not audio.size:
                     continue
                 if not np.isfinite(audio).all():
-                    raise RuntimeError("Qwen3 hat ungueltiges Audio (NaN) erzeugt - auf dieser Karte "
-                                       "QWEN3_DTYPE=float32 setzen")
+                    raise RuntimeError("Qwen3 hat ungueltiges Audio (NaN) erzeugt - QWEN3_QUANT=BF16 oder "
+                                       "QWEN3_FLASH_ATTN=false probieren")
                 yield int(rate), float_to_pcm16(audio)

@@ -1,7 +1,8 @@
-"""Streaming-Backend gegen den faster_qwen3_tts-Nachbau: Download, dtype,
-Klon, Chunks."""
+"""Streaming-Backend gegen den qwentts_cpp-Nachbau: Download, Quantisierung,
+Karte, Klon, Chunks."""
 
 import json
+import os
 import time
 
 import numpy as np
@@ -15,15 +16,19 @@ from tts_qwen3_stream import backend
 
 
 def _calls(kind: str) -> list[dict]:
-    import faster_qwen3_tts
+    import qwentts_cpp
 
-    return [call for call in faster_qwen3_tts.CALLS if call["call"] == kind]
+    return [call for call in qwentts_cpp.CALLS if call["call"] == kind]
 
 
 def _loaded(device: str = "cuda:0") -> backend.Qwen3StreamBackend:
-    engine = backend.Qwen3StreamBackend(model_dir="/models/qwen3")
+    engine = backend.Qwen3StreamBackend(talker_path="/models/talker.gguf", codec_path="/models/codec.gguf")
     engine.load(device)
     return engine
+
+
+def _voice(engine, transcript="Mein Sample.", **wav):
+    return engine.prepare_voice(Voice(key="a", wav=wav_bytes(**wav), transcript=transcript))
 
 
 # ---- Steckbrief und Gewichte ------------------------------------------------------------
@@ -33,39 +38,74 @@ def test_info_describes_a_streaming_german_capable_clone_engine(monkeypatch):
     info = backend.Qwen3StreamBackend.info()
     assert "de" in info.languages and info.sample_rate == 24000
     assert info.needs_sample and info.uses_transcript and info.streaming == "chunk"
-    assert info.name == "Qwen3-TTS 0.6B Streaming" and info.vram_mb == 3500
+    assert info.name == "Qwen3-TTS 0.6B Q8_0 Streaming" and info.vram_mb == 750 + 800
+    monkeypatch.setattr(backend, "QUANT", "q4")
+    assert backend.Qwen3StreamBackend.info().name == "Qwen3-TTS 0.6B Q4_K_M Streaming"
     monkeypatch.setattr(backend, "MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
-    assert backend.Qwen3StreamBackend.info().vram_mb == 6500
+    assert backend.Qwen3StreamBackend.info().vram_mb == 1350 + 800
 
 
-def test_weights_are_downloaded_once_into_the_volume(monkeypatch, tmp_path):
+@pytest.mark.parametrize(("quant", "codec_quant", "talker", "codec"), [
+    ("Q8_0", "", "qwen-talker-0.6b-base-Q8_0.gguf", "qwen-tokenizer-12hz-Q8_0.gguf"),
+    ("q4", "", "qwen-talker-0.6b-base-Q4_K_M.gguf", "qwen-tokenizer-12hz-Q4_K_M.gguf"),
+    ("Q4_K_M", "Q8", "qwen-talker-0.6b-base-Q4_K_M.gguf", "qwen-tokenizer-12hz-Q8_0.gguf"),
+    ("fp32", "", "qwen-talker-0.6b-base-F32.gguf", "qwen-tokenizer-12hz-F32.gguf"),
+    ("BF16", "", "qwen-talker-0.6b-base-BF16.gguf", "qwen-tokenizer-12hz-BF16.gguf"),
+])
+def test_quantisation_selects_the_gguf_files(quant, codec_quant, talker, codec):
+    assert backend.gguf_names("Qwen/Qwen3-TTS-12Hz-0.6B-Base", quant, codec_quant) == (talker, codec)
+
+
+def test_unknown_quantisation_or_model_is_rejected():
+    with pytest.raises(ValueError, match="Q8_0"):
+        backend.normalize_quant("Q2")
+    with pytest.raises(ValueError, match="QWEN3_MODEL"):
+        backend.gguf_names("irgendein/Modell", "Q8_0")
+
+
+def test_gguf_files_are_downloaded_once_into_the_volume(monkeypatch, tmp_path):
     import huggingface_hub
 
     downloads = []
 
-    def fake_download(repo_id, local_dir, token=None):
-        downloads.append((repo_id, local_dir, token))
+    def fake_download(repo_id, filename, cache_dir=None, token=None):
+        downloads.append((repo_id, filename, cache_dir, token))
+        return str(tmp_path / filename)
 
-    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_download)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_download)
     monkeypatch.setattr(backend, "MODELS_DIR", tmp_path)
     monkeypatch.setenv("HF_TOKEN", "hf_test")
 
-    first = backend.Qwen3StreamBackend.prepare()
-    second = backend.Qwen3StreamBackend.prepare()
+    paths = backend.Qwen3StreamBackend.prepare()
 
-    target = str(tmp_path / "Qwen--Qwen3-TTS-12Hz-0.6B-Base")
-    assert first == second == {"model_dir": target}
-    assert downloads == [("Qwen/Qwen3-TTS-12Hz-0.6B-Base", target, "hf_test")]
+    assert paths == {"talker_path": str(tmp_path / "qwen-talker-0.6b-base-Q8_0.gguf"),
+                     "codec_path": str(tmp_path / "qwen-tokenizer-12hz-Q8_0.gguf")}
+    cache = str(tmp_path / "gguf")
+    assert downloads == [
+        ("Serveurperso/Qwen3-TTS-GGUF", "qwen-talker-0.6b-base-Q8_0.gguf", cache, "hf_test"),
+        ("Serveurperso/Qwen3-TTS-GGUF", "qwen-tokenizer-12hz-Q8_0.gguf", cache, "hf_test")]
 
 
-def test_own_weights_in_the_volume_are_used_as_they_are(monkeypatch, tmp_path):
-    monkeypatch.setattr(backend, "MODEL", str(tmp_path))
-    assert backend.Qwen3StreamBackend.prepare() == {"model_dir": str(tmp_path)}
+def test_own_gguf_files_in_the_volume_are_used_as_they_are(monkeypatch, tmp_path):
+    talker, codec = tmp_path / "t.gguf", tmp_path / "c.gguf"
+    talker.touch()
+    codec.touch()
+    monkeypatch.setattr(backend, "TALKER_GGUF", str(talker))
+    monkeypatch.setattr(backend, "CODEC_GGUF", str(codec))
+    assert backend.Qwen3StreamBackend.prepare() == {"talker_path": str(talker), "codec_path": str(codec)}
+
+    monkeypatch.setattr(backend, "CODEC_GGUF", "")
+    with pytest.raises(ValueError, match="zusammen"):
+        backend.Qwen3StreamBackend.prepare()
+    monkeypatch.setattr(backend, "CODEC_GGUF", str(tmp_path / "fehlt.gguf"))
+    with pytest.raises(ValueError, match="nicht gefunden"):
+        backend.Qwen3StreamBackend.prepare()
 
 
 @pytest.mark.parametrize(("name", "value", "message"), [
-    ("DTYPE", "int4", "QWEN3_DTYPE"),
     ("CHUNK_STEPS", 0, "QWEN3_CHUNK_STEPS"),
+    ("FIRST_CHUNK_STEPS", 3, "QWEN3_FIRST_CHUNK_STEPS"),
+    ("QUANT", "Q2", "Q8_0"),
 ])
 def test_invalid_settings_are_rejected_before_anything_loads(monkeypatch, name, value, message):
     monkeypatch.setattr(backend, name, value)
@@ -76,47 +116,25 @@ def test_invalid_settings_are_rejected_before_anything_loads(monkeypatch, name, 
 # ---- Laden ----------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(("device", "capability", "expected"), [
-    ("cuda:1", "7.5", "torch.float32"),   # 2080 Ti: kein natives bfloat16, float16 laeuft ueber (NaN)
-    ("cuda", "8.6", "torch.bfloat16"),
-])
-def test_dtype_follows_the_card_and_graphs_are_captured_on_load(monkeypatch, device, capability, expected):
-    monkeypatch.setenv("FAKE_CUDA_CAPABILITY", capability)
+@pytest.mark.parametrize(("device", "visible"), [("cuda:1", "1"), ("cuda", "0"), ("cuda:0", "0"), ("cpu", "")])
+def test_the_assigned_card_becomes_the_only_visible_one(device, visible):
     _loaded(device)
-    assert _calls("from_pretrained")[-1] == {
-        "call": "from_pretrained", "path": "/models/qwen3", "device": device, "dtype": expected,
-        "attn": "sdpa", "max_seq_len": 2048}
-    # Warmup gehoert zum Laden - nicht in den ersten Live-Satz
-    assert len(_calls("warmup")) == 1
+    assert _calls("init")[-1]["cuda_visible"] == visible
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == visible
 
 
-def test_without_cuda_graphs_nothing_is_captured_and_the_slow_path_is_used(monkeypatch):
-    monkeypatch.setattr(backend, "CUDA_GRAPHS", False)
-    engine = _loaded()
-    voice = engine.prepare_voice(Voice(key="a", wav=wav_bytes(), transcript=None))
-    list(engine.synthesize("Ein ganz normaler Satz hier.", "de", voice, None))
-    assert _calls("warmup") == []
-    assert engine._model._warmed_up is True  # sonst holt das Paket die Aufnahme beim ersten Satz nach
-    assert _calls("generate")[0]["parity"] is True
+def test_loads_the_gguf_files_with_flash_attention():
+    _loaded()
+    call = _calls("init")[-1]
+    assert call["talker"] == "/models/talker.gguf" and call["codec"] == "/models/codec.gguf"
+    assert call["use_fa"] is True and call["clamp_fp16"] is False and call["log_level"] == "info"
 
 
-def test_graphs_are_on_by_default():
-    engine = _loaded()
-    voice = engine.prepare_voice(Voice(key="a", wav=wav_bytes(), transcript=None))
-    list(engine.synthesize("Ein ganz normaler Satz hier.", "de", voice, None))
-    assert _calls("generate")[0]["parity"] is False
-
-
-def test_dtype_can_be_forced(monkeypatch):
-    monkeypatch.setattr(backend, "DTYPE", "float32")
-    _loaded("cuda:0")
-    assert _calls("from_pretrained")[-1]["dtype"] == "torch.float32"
-
-
-def test_cpu_is_refused_with_a_hint_to_audiocpp():
-    engine = backend.Qwen3StreamBackend(model_dir="/models/qwen3")
-    with pytest.raises(RuntimeError, match="Nvidia-Karte.*audio.cpp"):
-        engine.load("cpu")
+def test_a_model_that_is_not_the_base_model_is_refused(monkeypatch):
+    monkeypatch.setenv("FAKE_QWEN_MODEL_TYPE", "custom_voice")
+    engine = backend.Qwen3StreamBackend(talker_path="t", codec_path="c")
+    with pytest.raises(RuntimeError, match="Base.*custom_voice"):
+        engine.load("cuda:0")
 
 
 # ---- Klonen und Sprechen ------------------------------------------------------------------
@@ -124,74 +142,85 @@ def test_cpu_is_refused_with_a_hint_to_audiocpp():
 
 def test_transcript_selects_the_closer_icl_clone_and_ends_with_silence():
     engine = _loaded()
-    engine.prepare_voice(Voice(key="a", wav=wav_bytes(width=3, channels=2), transcript=" Mein Sample. "))
-    engine.prepare_voice(Voice(key="b", wav=wav_bytes(), transcript=None))
+    icl = _voice(engine, " Mein Sample. ", width=3, channels=2)
+    xvec = _voice(engine, None)
 
-    icl, xvec = _calls("prompt")
-    assert icl["ref_text"] == "Mein Sample." and icl["x_vector_only_mode"] is False
+    first, second = _calls("extract")
     # 0,5 s Sample + 0,5 s Stille; die Stille verhindert, dass der letzte Laut des Samples
     # in den Anfang der Sprache blutet
-    assert icl["rate"] == 24000 and icl["samples"] == 12000 + 12000
-    assert icl["peak"] == pytest.approx(0.5, abs=0.01) and icl["tail_peak"] == 0.0
+    assert first["samples"] == 12000 + 12000 and first["dtype"] == "float32"
+    assert first["peak"] == pytest.approx(0.5, abs=0.01) and first["tail_peak"] == 0.0
     # ohne Transkript nur der Stimm-Fingerabdruck - dort bleibt das Sample, wie es ist
-    assert xvec["ref_text"] is None and xvec["x_vector_only_mode"] is True and xvec["samples"] == 12000
+    assert second["samples"] == 12000
+    assert icl["text"] == "Mein Sample." and icl["codes"] is not None
+    assert xvec["text"] is None and xvec["codes"] is None
+
+
+def test_other_sample_rates_are_resampled_to_24khz():
+    _voice(_loaded(), None, rate=16000, seconds=0.5)
+    assert _calls("extract")[0]["samples"] == 12000
 
 
 def test_silence_can_be_switched_off(monkeypatch):
     monkeypatch.setattr(backend, "REF_SILENCE_S", 0)
-    _loaded().prepare_voice(Voice(key="a", wav=wav_bytes(), transcript="Mein Sample."))
-    assert _calls("prompt")[0]["samples"] == 12000
+    _voice(_loaded())
+    assert _calls("extract")[0]["samples"] == 12000
 
 
 def test_streams_chunks_sentence_by_sentence_in_the_requested_language():
     engine = _loaded()
-    voice = engine.prepare_voice(Voice(key="a", wav=wav_bytes(), transcript="Mein Sample."))
+    voice = _voice(engine)
 
     chunks = list(engine.synthesize("Guten Morgen, wie geht es dir? Heute scheint die Sonne.",
                                     "de", voice, None))
 
     assert [rate for rate, _ in chunks] == [24000] * 4  # 2 Saetze x 2 Chunks
     assert all(len(pcm) == 2400 * 2 for _, pcm in chunks)
-    calls = _calls("generate")
+    calls = _calls("stream")
     assert [call["text"] for call in calls] == ["Guten Morgen, wie geht es dir?",
                                                 "Heute scheint die Sonne."]
-    assert {call["language"] for call in calls} == {"german"}
-    assert {call["chunk_size"] for call in calls} == {8}
-    assert calls[0]["prompt"] == [{"prompt": "Mein Sample."}]
+    assert {call["lang"] for call in calls} == {"german"}
+    assert {call["ref_text"] for call in calls} == {"Mein Sample."} and all(call["icl"] for call in calls)
+    # 8 Frames a 80 ms = 0,64 s; der erste Chunk 4 Frames
+    assert {call["codec_chunk_sec"] for call in calls} == {0.64}
+    assert {call["first_chunk_frames"] for call in calls} == {4}
+
+
+def test_without_transcript_only_the_voice_fingerprint_is_sent():
+    engine = _loaded()
+    list(engine.synthesize("Ein ganz normaler Satz hier.", "de", _voice(engine, None), None))
+    call = _calls("stream")[0]
+    assert call["has_spk"] is True and call["icl"] is False and call["ref_text"] is None
 
 
 def test_audio_arrives_while_the_model_is_still_generating():
     """Der erste Chunk liegt vor, bevor der zweite berechnet wird (kein
     Sammeln pro Satz)."""
-    import faster_qwen3_tts
-
     engine = _loaded()
-    voice = engine.prepare_voice(Voice(key="a", wav=wav_bytes(), transcript=None))
-    stream = engine.synthesize("Ein ganz normaler Satz hier.", "de", voice, None)
-
+    stream = engine.synthesize("Ein ganz normaler Satz hier.", "de", _voice(engine), None)
     next(stream)
-    assert len(_calls("generate")) == 1
     stream.close()  # Barge-in: der Rest wird nie erzeugt
-    assert faster_qwen3_tts.CALLS[-1]["call"] == "generate"
+    assert len(_calls("stream")) == 1
 
 
-def test_chunk_size_follows_the_setting(monkeypatch):
-    monkeypatch.setattr(backend, "CHUNK_STEPS", 4)
+def test_chunk_sizes_follow_the_settings(monkeypatch):
+    monkeypatch.setattr(backend, "CHUNK_STEPS", 5)
+    monkeypatch.setattr(backend, "FIRST_CHUNK_STEPS", 2)
     engine = _loaded()
-    voice = engine.prepare_voice(Voice(key="a", wav=wav_bytes(), transcript=None))
-    list(engine.synthesize("Ein ganz normaler Satz hier.", "de", voice, None))
-    assert _calls("generate")[0]["chunk_size"] == 4
+    list(engine.synthesize("Ein ganz normaler Satz hier.", "de", _voice(engine), None))
+    call = _calls("stream")[0]
+    assert call["codec_chunk_sec"] == pytest.approx(0.4) and call["first_chunk_frames"] == 2
 
 
 def test_unknown_or_unsupported_language_lets_qwen_detect_it(monkeypatch):
     engine = _loaded()
-    voice = engine.prepare_voice(Voice(key="a", wav=wav_bytes(), transcript=None))
+    voice = _voice(engine)
     list(engine.synthesize("Ein ganz normaler Satz hier.", "nl", voice, None))
     list(engine.synthesize("Ein ganz normaler Satz hier.", None, voice, None))
-    monkeypatch.setenv("FAKE_QWEN_LANGUAGES", "auto,english")
+    monkeypatch.setenv("FAKE_QWEN_LANGUAGES", "english")
     engine = _loaded()
     list(engine.synthesize("Ein ganz normaler Satz hier.", "de", voice, None))
-    assert [call["language"] for call in _calls("generate")] == ["auto", "auto", "auto"]
+    assert [call["lang"] for call in _calls("stream")] == ["auto", "auto", "auto"]
 
 
 def test_without_sample_there_is_no_voice():
@@ -199,12 +228,11 @@ def test_without_sample_there_is_no_voice():
         list(_loaded().synthesize("Hallo.", "de", None, None))
 
 
-def test_nan_audio_points_to_float32_after_the_good_chunk():
+def test_nan_audio_is_refused_after_the_good_chunk():
     engine = _loaded()
-    voice = engine.prepare_voice(Voice(key="a", wav=wav_bytes(), transcript=None))
-    stream = engine.synthesize("NaN kommt heraus.", "de", voice, None)
+    stream = engine.synthesize("NaN kommt heraus.", "de", _voice(engine), None)
     next(stream)  # der erste Chunk war in Ordnung
-    with pytest.raises(RuntimeError, match="QWEN3_DTYPE=float32"):
+    with pytest.raises(RuntimeError, match="NaN"):
         next(stream)
 
 
@@ -213,11 +241,14 @@ def test_nan_audio_points_to_float32_after_the_good_chunk():
 
 def test_engine_app_clones_and_streams_through_the_kit(monkeypatch, tmp_path):
     """Wie im Container: create_app, Modell im Unterprozess (mit dem
-    faster_qwen3_tts-Nachbau), Referenz per Multipart, Sprache als ISO-Code."""
+    qwentts_cpp-Nachbau), Referenz per Multipart, Sprache als ISO-Code."""
     log = tmp_path / "calls.jsonl"
     monkeypatch.setenv("FAKE_QWEN_LOG", str(log))
-    monkeypatch.setenv("FAKE_CUDA_CAPABILITY", "7.5")
-    monkeypatch.setattr(backend, "MODEL", str(tmp_path))  # eigener Pfad: kein Download
+    talker, codec = tmp_path / "t.gguf", tmp_path / "c.gguf"
+    talker.touch()
+    codec.touch()
+    monkeypatch.setattr(backend, "TALKER_GGUF", str(talker))  # eigene Dateien: kein Download
+    monkeypatch.setattr(backend, "CODEC_GGUF", str(codec))
     app = create_app("tts_qwen3_stream.backend:Qwen3StreamBackend", WorkerSettings(device="cuda:1"))
 
     with TestClient(app) as client:
@@ -226,7 +257,7 @@ def test_engine_app_clones_and_streams_through_the_kit(monkeypatch, tmp_path):
                 break
             time.sleep(0.05)
         info = client.get("/v1/info").json()
-        assert info["name"] == "Qwen3-TTS Streaming" and info["streaming"] == "chunk"
+        assert info["name"] == "Qwen3-TTS 0.6B Q8_0 Streaming" and info["streaming"] == "chunk"
         status = client.post("/v1/device", json={"device": "cuda:1"}).json()
         assert status["state"] == "ready" and status["effective"] == "cuda:1"
         response = client.post(
@@ -240,6 +271,6 @@ def test_engine_app_clones_and_streams_through_the_kit(monkeypatch, tmp_path):
     pcm = np.frombuffer(response.content, dtype="<i2")
     assert len(pcm) == 4 * 2400 and np.abs(pcm).max() > 7000
     calls = [json.loads(line) for line in log.read_text().splitlines()]
-    assert [call["call"] for call in calls] == ["from_pretrained", "warmup", "prompt", "generate", "generate"]
-    assert calls[0]["dtype"] == "torch.float32" and calls[0]["device"] == "cuda:1"
-    assert calls[2]["ref_text"] == "Mein Sample." and calls[3]["language"] == "german"
+    assert [call["call"] for call in calls] == ["init", "extract", "stream", "stream"]
+    assert calls[0]["cuda_visible"] == "1"  # "cuda:1" aus dem Panel
+    assert calls[2]["ref_text"] == "Mein Sample." and calls[2]["lang"] == "german"

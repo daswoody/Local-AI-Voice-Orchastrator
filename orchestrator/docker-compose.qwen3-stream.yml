@@ -1,7 +1,7 @@
-# Qwen3-TTS mit echtem Streaming (v1.24) - Engine nach dem Engine-Vertrag
-# (tts-engine-kit) auf Basis von faster-qwen3-tts, als EIGENER Coolify-Deploy.
-# Gebraucht, weil audio.cpp Qwen3-TTS nur offline (Satz fuer Satz) kann.
-# Base Directory `/`, Docker Compose Location
+# Qwen3-TTS mit echtem Streaming und GGUF-Quantisierung (v1.25) - Engine nach
+# dem Engine-Vertrag (tts-engine-kit) auf Basis von qwentts.cpp (ggml), als
+# EIGENER Coolify-Deploy. Gebraucht, weil audio.cpp Qwen3-TTS nur offline
+# (Satz fuer Satz) kann. Base Directory `/`, Docker Compose Location
 # `/orchestrator/docker-compose.qwen3-stream.yml` (Coolify nimmt das Base
 # Directory als --project-directory, der Build-Context ist das Repo-Root).
 # Im Panel (Sprachausgabe -> Engines nach dem Engine-Vertrag) eintragen:
@@ -20,25 +20,30 @@ services:
     restart: unless-stopped
     environment:
       # Karte beim Start; zur Laufzeit weist das Admin-Panel (GPUs) eine
-      # andere zu oder schaltet aus. Nur Nvidia-Karten (kein "cpu").
+      # andere zu oder schaltet aus. "cpu" geht, ist aber langsam.
       ENGINE_DEVICE: ${QWEN3_STREAM_DEVICE:-cuda:0}
       CUDA_DEVICE_ORDER: PCI_BUS_ID
+      # Das qwentts.cpp-Wheel hat fuer Turing (2080 Ti, sm_75) nur PTX: Der
+      # Treiber uebersetzt die Kernel beim ersten Mal (dauert, dann im Cache).
+      # Der Cache liegt im Volume und darf gross werden (Default 256 MB reicht
+      # nicht, dann wuerde bei jedem Laden neu uebersetzt).
+      CUDA_CACHE_PATH: /models/cuda-cache
+      CUDA_CACHE_MAXSIZE: "4294967296"
       # Modell schon beim Start laden? Default nein: laedt beim Aktivieren im
       # Panel bzw. beim ersten Probehoeren.
       ENGINE_PRELOAD: ${QWEN3_STREAM_PRELOAD:-false}
-      # 0.6B (~3,5 GB VRAM) ist der Streaming-Default; 1.7B klingt besser
-      # (~6,5 GB): Qwen/Qwen3-TTS-12Hz-1.7B-Base. Download beim ersten Start.
+      # Base-Modell: 0.6B (Default) oder Qwen/Qwen3-TTS-12Hz-1.7B-Base.
       QWEN3_MODEL: ${QWEN3_STREAM_MODEL:-Qwen/Qwen3-TTS-12Hz-0.6B-Base}
-      # auto = bfloat16 ab Ampere, float32 auf Turing (2080 Ti; float16 laeuft
-      # bei Qwen3 ueber und stuerzt den Modell-Prozess ab, v1.24.3). Erzwingen:
-      # bfloat16 / float16 / float32 (float32 = doppeltes VRAM).
-      QWEN3_DTYPE: ${QWEN3_STREAM_DTYPE:-auto}
-      # Codec-Schritte je Chunk (1 Schritt = 1/12 s Audio): 4 = frueher, aber
-      # die Karte muss deutlich schneller als Echtzeit sein; 12 = ruhiger.
+      # Quantisierung der GGUF-Gewichte: Q8_0 (Default), Q4_K_M (kleiner),
+      # BF16, F32. Download beim ersten Start ins Volume.
+      QWEN3_QUANT: ${QWEN3_STREAM_QUANT:-Q8_0}
+      # Optional andere Stufe nur fuer den Codec (leer = wie QWEN3_QUANT).
+      QWEN3_CODEC_QUANT: ${QWEN3_STREAM_CODEC_QUANT:-}
+      # Codec-Frames je Chunk (1 Frame = 80 ms Audio) und im ersten Chunk
+      # (1, 2, 4, 8): kleiner = frueher Audio, aber die Karte muss deutlich
+      # schneller als Echtzeit sein.
       QWEN3_CHUNK_STEPS: ${QWEN3_STREAM_CHUNK_STEPS:-8}
-      # false = ohne CUDA-Graphen (langsam): nur zum Eingrenzen, falls der
-      # Modell-Prozess mit Exit-Code -11 abstuerzt.
-      QWEN3_CUDA_GRAPHS: ${QWEN3_STREAM_CUDA_GRAPHS:-true}
+      QWEN3_FIRST_CHUNK_STEPS: ${QWEN3_STREAM_FIRST_CHUNK_STEPS:-4}
       HF_TOKEN: ${HF_TOKEN:-}
     volumes:
       - qwen3-stream-models:/models

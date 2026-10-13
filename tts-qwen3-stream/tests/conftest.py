@@ -10,23 +10,25 @@ FAKES = str(Path(__file__).parent / "fakes")
 
 
 def pytest_configure(config):
-    config.addinivalue_line("markers", "real_faster: gegen das echte faster-qwen3-tts-Paket (nur mit --extra engine)")
+    config.addinivalue_line("markers", "real_qwentts: gegen das echte qwentts-cpp-python-Paket (nur mit --extra engine)")
 
 
 @pytest.fixture(autouse=True)
 def fake_libraries(request, monkeypatch):
-    """torch und faster_qwen3_tts durch die Nachbauten ersetzen - auch im
-    Modell-Unterprozess, der sys.path beim Start erbt. Ausnahme: Tests mit
-    Marker real_faster pruefen gegen das echte Paket."""
-    if request.node.get_closest_marker("real_faster"):
+    """qwentts_cpp durch den Nachbau ersetzen - auch im Modell-Unterprozess,
+    der sys.path beim Start erbt. Ausnahme: Tests mit Marker real_qwentts
+    pruefen gegen das echte Paket."""
+    if request.node.get_closest_marker("real_qwentts"):
         yield
         return
     monkeypatch.syspath_prepend(FAKES)
-    for name in ("torch", "faster_qwen3_tts"):
-        monkeypatch.delitem(sys.modules, name, raising=False)
-    import faster_qwen3_tts
+    monkeypatch.delitem(sys.modules, "qwentts_cpp", raising=False)
+    # load() setzt CUDA_VISIBLE_DEVICES - nach dem Test wieder zuruecknehmen
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES")
+    import qwentts_cpp
 
-    faster_qwen3_tts.CALLS.clear()
+    qwentts_cpp.CALLS.clear()
     yield
 
 

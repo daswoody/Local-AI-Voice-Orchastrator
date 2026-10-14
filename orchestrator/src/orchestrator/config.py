@@ -60,6 +60,12 @@ class Settings(BaseSettings):
     voice_summary_enabled: bool = True
     voice_summary_max_chars: int = 280
 
+    # LLM-Streaming (v1.26): Antwort Token fuer Token holen, im Chat
+    # mitschreiben und Satz fuer Satz sprechen, waehrend das LLM noch
+    # schreibt. Alle drei Werte hier sind nur Defaults - im Admin-Panel
+    # (Charakter > Sprachausgabe) ueberschreibbar.
+    llm_streaming_enabled: bool = True
+
     # Gespraechsgedaechtnis (v1.13): so viele letzte Nachrichten der
     # Konversation (inkl. Karten-Daten) bekommt das LLM als Kontext -
     # damit "die Karte von eben" in der naechsten Frage bekannt ist.

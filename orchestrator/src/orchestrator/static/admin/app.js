@@ -515,6 +515,15 @@ views.character = async () => {
           <textarea name="voice_summary_prompt" rows="6" placeholder="Leer = eingebauter Standard">${esc(data.voice_summary_prompt)}</textarea>
         </label>
         <p class="hint full">Die Audio-Zusammenfassung wird gesprochen, wenn eine Antwort laenger als das Limit ist (Details bleiben im Chat). Wichtig: XTTS liest den Text WOERTLICH vor - der Prompt sollte Emojis, Formatierung und Emotions-Tags wie [froehlich] ausdruecklich verbieten (der Standard tut das).</p>
+        <h2 class="full">Ablauf der Sprachausgabe</h2>
+        <label class="full check"><input type="checkbox" name="llm_streaming" ${data.llm_streaming ? "checked" : ""}>
+          LLM-Streaming: Antwort Satz fuer Satz sprechen, waehrend das LLM noch schreibt</label>
+        <label class="full check"><input type="checkbox" name="voice_summary_enabled" ${data.voice_summary_enabled ? "checked" : ""}>
+          Audio-Zusammenfassung fuer lange Antworten</label>
+        <label>Limit in Zeichen
+          <input type="number" name="voice_summary_max_chars" min="50" max="5000" value="${esc(String(data.voice_summary_max_chars))}">
+        </label>
+        <p class="hint full">Ohne Streaming wartet die Sprachausgabe auf die fertige Antwort; ist sie laenger als das Limit, wird die Zusammenfassung gesprochen. Mit Streaming spricht die Assistenz schon waehrend das LLM schreibt, live bis zum Limit - ist die Antwort laenger, folgt danach die Zusammenfassung des Rests. Ohne Zusammenfassung wird die ganze Antwort gesprochen. Der Chat zeigt mit Streaming den Text, waehrend er entsteht.</p>
         <div><button type="submit">Speichern</button></div>
       </form>
     </section>`;
@@ -999,6 +1008,9 @@ const formActions = {
   saveCharacter: (form) => api.put("/v1/admin/character", {
     prompt: form.prompt.value,
     voice_summary_prompt: form.voice_summary_prompt.value,
+    llm_streaming: form.llm_streaming.checked,
+    voice_summary_enabled: form.voice_summary_enabled.checked,
+    voice_summary_max_chars: parseInt(form.voice_summary_max_chars.value, 10) || null,
   }),
 
   async saveUser(form) {

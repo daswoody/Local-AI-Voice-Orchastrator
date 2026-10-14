@@ -526,6 +526,9 @@ uv run python scripts/manual_audio_ws_test.py
 
 Erwartete Frame-Reihenfolge: `transcript` -> `audio_chunk` (Filler, VOR dem
 Text!) -> `assistant_text` -> `audio_chunk`(s) -> `audio_end` -> `done`.
+Mit LLM-Streaming (Default) kommen dazwischen `assistant_text`-Deltas
+(`final: false`), und das Audio des ersten Satzes laeuft schon, bevor der
+finale `assistant_text` kommt.
 
 ## 2. Mit Docker lokal bauen (Vorab-Check vor Coolify)
 
@@ -706,6 +709,15 @@ Tool-Frames `call_id`/`ok`/`result`, Manifest im hello-Feld `tools`,
   gekuerzt (`VOICE_SUMMARY_MAX_CHARS`, Default 280; abschaltbar per
   `VOICE_SUMMARY_ENABLED`), waehrend der volle Text als assistant_text im
   Chat steht.
+- **LLM-Streaming (v1.26, `LLM_STREAMING_ENABLED`, Default an):** Die
+  Antwort kommt Token fuer Token als `assistant_text` mit `final: false`
+  in den Chat; bei Sprach-Turns spricht die Assistenz Satz fuer Satz,
+  waehrend das LLM noch schreibt (erstes Stueck schon am ersten Komma).
+  Mit Kurzfassung wird live bis zum Limit gesprochen, danach die
+  Kurzfassung des Rests; ohne Kurzfassung die ganze Antwort.
+- Streaming, Kurzfassung und Limit sind im Admin-Panel unter
+  **Charakter > Ablauf der Sprachausgabe** schaltbar (ueberschreiben die
+  `.env`) - zum direkten Vergleich mit und ohne Streaming.
 
 ## Bekannte Einschraenkungen dieses Stands
 

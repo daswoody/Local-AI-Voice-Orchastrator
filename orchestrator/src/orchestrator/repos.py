@@ -9,6 +9,7 @@ import sqlite3
 import uuid
 from typing import Any
 
+from .config import settings
 from .db import db_session
 
 
@@ -182,6 +183,42 @@ def voice_summary_prompt() -> str:
     from .db import DEFAULT_VOICE_SUMMARY_PROMPT
 
     return get_setting("voice_summary_prompt") or DEFAULT_VOICE_SUMMARY_PROMPT
+
+
+# Ablauf der Sprachausgabe (v1.26): im Panel gesetzt, sonst .env-Default.
+LLM_STREAMING_SETTING = "llm_streaming"
+VOICE_SUMMARY_SETTING = "voice_summary"
+VOICE_SUMMARY_MAX_CHARS_SETTING = "voice_summary_max_chars"
+
+
+def _flag(key: str, default: bool) -> bool:
+    value = get_setting(key)
+    return default if value in (None, "") else value == "1"
+
+
+def llm_streaming_enabled() -> bool:
+    return _flag(LLM_STREAMING_SETTING, settings.llm_streaming_enabled)
+
+
+def voice_summary_enabled() -> bool:
+    return _flag(VOICE_SUMMARY_SETTING, settings.voice_summary_enabled)
+
+
+def voice_summary_max_chars() -> int:
+    value = get_setting(VOICE_SUMMARY_MAX_CHARS_SETTING)
+    return int(value) if value and value.isdigit() else settings.voice_summary_max_chars
+
+
+def set_speech_flow(
+    llm_streaming: bool | None = None, voice_summary: bool | None = None, max_chars: int | None = None
+) -> None:
+    """Nur Uebergebenes speichern - der Rest folgt weiter der .env."""
+    if llm_streaming is not None:
+        set_setting(LLM_STREAMING_SETTING, "1" if llm_streaming else "0")
+    if voice_summary is not None:
+        set_setting(VOICE_SUMMARY_SETTING, "1" if voice_summary else "0")
+    if max_chars is not None:
+        set_setting(VOICE_SUMMARY_MAX_CHARS_SETTING, str(max_chars))
 
 
 # ---- Sprachausgaben nach dem Engine-Vertrag (v1.20) ---------------------------------

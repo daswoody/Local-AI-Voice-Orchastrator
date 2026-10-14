@@ -14,6 +14,7 @@ from ..schemas import DeviceTool
 from ..security import resolve_token
 from ..services import filler_service, tts_engines
 from ..services.litellm_client import litellm_client
+from ..services.sentences import SentenceStream, split_sentences
 from ..services.stt_client import stt_client
 from ..services.tool_executor import ToolExecutor
 from ..services.tts_client import piper_client
@@ -80,6 +81,9 @@ class StreamSession:
         # tool_activity-Frame an den Client (additiv - die Android-App
         # ignoriert unbekannte Frames) und am Turn-Ende in die Historie.
         self._turn_tools: list[dict] = []
+        # Gestreamte Antwort und Filler teilen sich den audio_chunk-Stream
+        # (v1.26): immer nur einer sendet, und dann am Stueck.
+        self.audio_lock = asyncio.Lock()
 
         self.tier, self.username = tier, username
         self.system_prompt = repos.effective_system_prompt(self.username)
@@ -289,6 +293,7 @@ class StreamSession:
             await self.ws.send_json({"type": "done"})
 
     async def _respond(self, text: str, want_audio: bool, image_data_url: str = "") -> None:
+        streamer: TurnStreamer | None = None
         try:
             self._filler_played = False
             self._turn_cards = []
@@ -299,6 +304,10 @@ class StreamSession:
             history = self._conversation_history()
             await self._persist_user_message(text, has_image=bool(image_data_url))
             executor = self._make_executor(want_audio)
+            # LLM-Streaming (v1.26, Schalter im Panel): Text-Deltas sofort in
+            # den Chat, bei Sprach-Turns Satz fuer Satz in die Sprachausgabe.
+            if repos.llm_streaming_enabled():
+                streamer = TurnStreamer(self, want_audio)
             llm_task = asyncio.create_task(
                 orchestrator_graph.ainvoke(
                     initial_state(
@@ -307,6 +316,7 @@ class StreamSession:
                         # antwortet direkt kurz, Umfangreiches als Karte.
                         voice_mode=want_audio,
                         history=history,
+                        streamer=streamer,
                     )
                 )
             )
@@ -314,8 +324,20 @@ class StreamSession:
             if want_audio and settings.filler_enabled:
                 # Filler ZUERST waehlen - sein delay_ms bestimmt, wie lange
                 # die Antwort Zeit hat, bevor er spielen darf. Schnelle
-                # Antworten blockiert so kein Filler mehr.
-                await self._race_filler(llm_task, kind="thinking")
+                # Antworten blockiert so kein Filler mehr. Beim Streaming
+                # zaehlt schon der erste fertige Satz als Antwort.
+                if streamer is None:
+                    await self._race_filler(llm_task, kind="thinking")
+                else:
+                    first = asyncio.create_task(streamer.first_answer(llm_task))
+                    try:
+                        await self._race_filler(first, kind="thinking")
+                    finally:
+                        first.cancel()
+            if streamer is not None and want_audio:
+                # Erst nach dem Filler-Rennen: Filler und Antwort duerfen
+                # sich im audio_chunk-Stream nicht abwechseln.
+                streamer.start_speaking()
 
             result = await llm_task
             response_text = result["response"]
@@ -323,10 +345,13 @@ class StreamSession:
             await self.ws.send_json({"type": "assistant_text", "text": response_text, "final": True})
             await self._persist_assistant_message(response_text)
 
-            if want_audio:
+            if want_audio and streamer is not None:
+                await streamer.finish(response_text)
+            elif want_audio:
                 # Kurze Sprachantwort, Details im Chat: lange Antworten
-                # werden fuer die Sprachausgabe zusammengefasst, der volle
-                # Text steht bereits als assistant_text im Chat.
+                # werden fuer die Sprachausgabe zusammengefasst (Schalter im
+                # Panel), der volle Text steht bereits als assistant_text im
+                # Chat.
                 await self._stream_main_tts(await self._speech_text(response_text))
 
             await self.ws.send_json({"type": "done"})
@@ -347,6 +372,10 @@ class StreamSession:
                     }
                 )
                 await self.ws.send_json({"type": "done"})
+        finally:
+            if streamer is not None:
+                # Barge-in oder Fehler: die Sprachausgabe endet mit dem Turn.
+                streamer.cancel()
 
     def _make_executor(self, want_audio: bool) -> ToolExecutor:
         """Session-gebundener Executor (1.12): Geraete-Tools aus dem
@@ -418,23 +447,32 @@ class StreamSession:
 
     async def _speech_text(self, response_text: str) -> str:
         """Kurze Sprachfassung fuer lange Antworten (zweiter, kleiner
-        LLM-Call). Schlaegt er fehl, wird eben der volle Text gesprochen -
-        Komfort-Feature, kein Muss."""
-        if not settings.voice_summary_enabled or len(response_text) <= settings.voice_summary_max_chars:
+        LLM-Call; Schalter und Limit im Panel, v1.26). Schlaegt er fehl,
+        wird eben der volle Text gesprochen - Komfort-Feature, kein Muss."""
+        if not repos.voice_summary_enabled() or len(response_text) <= repos.voice_summary_max_chars():
             return response_text
+        return await self._summarize(response_text) or response_text
+
+    async def _summarize(self, response_text: str, already_spoken: str = "") -> str:
+        """Kurzfassung per LLM; leer bei Fehler. already_spoken (Streaming,
+        v1.26): Der Anfang lief schon live - zusammengefasst wird nur der
+        Rest, ohne das Gesagte zu wiederholen."""
+        # Prompt kommt aus Admin > Charakter (app_settings) - dort z. B.
+        # auch Tonalitaet der Kurzfassung steuerbar.
+        system_prompt = repos.voice_summary_prompt()
+        if already_spoken:
+            system_prompt += "\n\n" + _CONTINUATION_PROMPT.format(spoken=already_spoken)
         try:
             summary = await litellm_client.chat(
                 [
-                    # Prompt kommt aus Admin > Charakter (app_settings) -
-                    # dort z. B. auch Tonalitaet der Kurzfassung steuerbar.
-                    {"role": "system", "content": repos.voice_summary_prompt()},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": response_text},
                 ]
             )
-            return summary.strip() or response_text
+            return summary.strip()
         except Exception:
             logger.warning("Sprach-Kurzfassung fehlgeschlagen - spreche den vollen Text")
-            return response_text
+            return ""
 
     async def _race_filler(self, pending: asyncio.Task, kind: str, tool_name: str | None = None) -> None:
         """Filler gegen die laufende Arbeit rennen lassen: Der ausgewaehlte
@@ -483,14 +521,17 @@ class StreamSession:
             return
 
         pcm = resample_pcm16(pcm, rate, settings.target_sample_rate)
-        for chunk in chunk_pcm(pcm):
-            await self.ws.send_json(
-                {
-                    "type": "audio_chunk",
-                    "data": pcm_to_b64(chunk),
-                    "sample_rate": settings.target_sample_rate,
-                }
-            )
+        # Ein Tool-Filler kann mitten in die gestreamte Antwort fallen
+        # (v1.26) - die Sperre haelt Saetze und Filler am Stueck.
+        async with self.audio_lock:
+            for chunk in chunk_pcm(pcm):
+                await self.ws.send_json(
+                    {
+                        "type": "audio_chunk",
+                        "data": pcm_to_b64(chunk),
+                        "sample_rate": settings.target_sample_rate,
+                    }
+                )
 
     async def _stream_main_tts(self, text: str) -> None:
         try:
@@ -518,6 +559,146 @@ class StreamSession:
             # killen: Text ist schon raus, die App liest ihn laut
             # TTS-Fallback-Regel (4.13) selbst vor.
             logger.exception("Haupt-TTS fehlgeschlagen - Antwort bleibt Text-only")
+
+
+# Fortsetzung der Kurzfassung beim Streaming (v1.26): Der Anfang der Antwort
+# lief schon live, das Limit war erreicht - der Rest kommt als Kurzfassung.
+_CONTINUATION_PROMPT = (
+    "Der Anfang der Antwort wurde bereits vorgelesen: \"{spoken}\" "
+    "Fasse nur den restlichen Inhalt kurz zusammen, wiederhole nichts davon "
+    "und schliesse nahtlos an das Gesagte an."
+)
+
+
+class TurnStreamer:
+    """LLM-Streaming eines Turns (v1.26). Bekommt die Text-Deltas aus dem
+    Graphen: Jedes Delta geht als assistant_text (final=false) an den
+    Client; bei Sprach-Turns schneidet ein SentenceStream daraus Saetze,
+    und ein Worker spricht sie der Reihe nach, waehrend das LLM weiter
+    schreibt.
+
+    Kurzfassung (Schalter im Panel): Live gesprochen wird bis zum Limit;
+    wuerde ein Satz es reissen, endet die Live-Ausgabe, und nach der
+    Antwort spricht die Kurzfassung des Rests. Ohne Kurzfassung wird
+    alles gesprochen. Die Engine waehlt der erste Satz (mit Rueckfall),
+    alle weiteren bleiben bei ihr; scheitert ein spaeterer Satz, endet die
+    Sprachausgabe des Turns - der Text steht ja im Chat."""
+
+    def __init__(self, session: "StreamSession", want_audio: bool) -> None:
+        self.session = session
+        self.want_audio = want_audio
+        self.sentences = SentenceStream()
+        self.queue: asyncio.Queue[str | None] = asyncio.Queue()
+        self.first_sentence = asyncio.Event()
+        self.limit = repos.voice_summary_max_chars() if repos.voice_summary_enabled() else None
+        self.spoken: list[str] = []
+        self.skipped: list[str] = []
+        self.engine_id: str | None = None
+        self.converter: Pcm16StreamConverter | None = None
+        self.audio_sent = False
+        self.failed = False
+        self.worker: asyncio.Task | None = None
+
+    # ---- Seite des LLM (Graph) ------------------------------------------
+
+    async def delta(self, text: str) -> None:
+        await self.session.ws.send_json({"type": "assistant_text", "text": text, "final": False})
+        if self.want_audio:
+            self._enqueue(self.sentences.feed(text))
+
+    async def round_end(self) -> None:
+        # Ende einer LLM-Runde: Text vor einem Tool-Call ("Ich schaue kurz
+        # nach") hat oft kein Satzzeichen - trotzdem jetzt sprechen.
+        if self.want_audio:
+            self._enqueue(self.sentences.flush())
+
+    def _enqueue(self, pieces: list[str]) -> None:
+        for piece in pieces:
+            self.queue.put_nowait(piece)
+            self.first_sentence.set()
+
+    async def first_answer(self, llm_task: asyncio.Task) -> None:
+        """Fertig, sobald der erste Satz bereitsteht oder das LLM fertig
+        ist - das Gegenstueck zum Filler-Rennen."""
+        waiter = asyncio.create_task(self.first_sentence.wait())
+        try:
+            await asyncio.wait({waiter, llm_task}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            waiter.cancel()
+
+    # ---- Sprachausgabe ----------------------------------------------------
+
+    def start_speaking(self) -> None:
+        self.worker = asyncio.create_task(self._speak_queue())
+
+    async def finish(self, response_text: str) -> None:
+        """Nach der Antwort: Rest der Queue sprechen, bei erreichtem Limit
+        die Kurzfassung des Rests, dann audio_end."""
+        self.queue.put_nowait(None)
+        if self.worker is not None:
+            await self.worker
+        if self.skipped and not self.failed:
+            already = " ".join(self.spoken)
+            rest = await self.session._summarize(response_text, already_spoken=already)
+            for piece in split_sentences(rest) if rest else self.skipped:
+                await self._speak(piece)
+                if self.failed:
+                    break
+        if self.audio_sent:
+            await self.session.ws.send_json({"type": "audio_end"})
+
+    def cancel(self) -> None:
+        if self.worker is not None and not self.worker.done():
+            self.worker.cancel()
+
+    async def _speak_queue(self) -> None:
+        while (piece := await self.queue.get()) is not None:
+            if self.failed:
+                continue
+            used = sum(len(p) + 1 for p in self.spoken)
+            if self.skipped or (self.limit is not None and used + len(piece) > self.limit):
+                # Limit erreicht: ab hier nichts mehr live, der Rest kommt
+                # nach der Antwort als Kurzfassung.
+                self.skipped.append(piece)
+                continue
+            await self._speak(piece)
+
+    async def _speak(self, text: str) -> None:
+        def chosen(engine_id: str) -> None:
+            self.engine_id = engine_id
+
+        try:
+            async with self.session.audio_lock:
+                stream = tts_engines.stream_main(
+                    text, self.session.voice_id, engine_id=self.engine_id, on_engine=chosen
+                )
+                async for rate, chunk in stream:
+                    # Umrechnen mit Zustand ueber alle Saetze (v1.23).
+                    if self.converter is None or self.converter.src_rate != rate:
+                        self.converter = Pcm16StreamConverter(rate, settings.target_sample_rate)
+                    chunk = self.converter.convert(chunk)
+                    if not chunk:
+                        continue
+                    if not self.audio_sent:
+                        # Die Antwort spricht - ein Tool-Filler waere jetzt
+                        # nur noch Stoerung.
+                        self.audio_sent = True
+                        self.session._filler_played = True
+                    await self.session.ws.send_json(
+                        {
+                            "type": "audio_chunk",
+                            "data": pcm_to_b64(chunk),
+                            "sample_rate": settings.target_sample_rate,
+                        }
+                    )
+            self.spoken.append(text)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Wie im klassischen Pfad: TTS-Ausfall kostet nur die Stimme,
+            # der Text steht im Chat (bzw. die App liest ihn vor, 4.13).
+            logger.exception("Haupt-TTS fehlgeschlagen - Rest der Antwort bleibt Text-only")
+            self.failed = True
 
 
 def _parse_device_tools(raw: list) -> list[DeviceTool]:

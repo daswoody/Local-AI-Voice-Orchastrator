@@ -81,8 +81,8 @@ def test_character_global_and_override(client, admin_headers):
         headers=admin_headers,
     )
     body = client.get("/v1/admin/character", headers=admin_headers).json()
-    assert body == {"prompt": "Du bist Jarvis.",
-                    "voice_summary_prompt": "Fasse als Jarvis zusammen."}
+    assert body["prompt"] == "Du bist Jarvis."
+    assert body["voice_summary_prompt"] == "Fasse als Jarvis zusammen."
     # Ohne Override greift der globale Prompt
     assert repos.effective_system_prompt(None) == "Du bist Jarvis."
     assert repos.voice_summary_prompt() == "Fasse als Jarvis zusammen."

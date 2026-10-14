@@ -29,6 +29,9 @@ def temp_environment(tmp_path, monkeypatch):
     monkeypatch.setattr(tts_engines, "_revival", None)
     monkeypatch.setattr(tts_engines, "_revival_failed_at", 0.0)
     monkeypatch.setattr(settings, "audiocpp_base_url", "")
+    # Bestehende Tests pruefen den klassischen Pfad (Antwort am Stueck);
+    # die Streaming-Tests (v1.26) schalten es selbst ein.
+    monkeypatch.setattr(settings, "llm_streaming_enabled", False)
     monkeypatch.setattr(
         mcp_gateway_module.mcp_gateway, "list_openai_tools", AsyncMock(return_value=[])
     )

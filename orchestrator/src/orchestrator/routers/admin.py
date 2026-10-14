@@ -124,24 +124,35 @@ class CharacterPayload(BaseModel):
     # Prompt fuer die Sprach-Kurzfassung (Audio-Zusammenfassung); leer ->
     # eingebauter Default greift wieder.
     voice_summary_prompt: str = ""
+    # Ablauf der Sprachausgabe (v1.26); None = unveraendert lassen.
+    llm_streaming: bool | None = None
+    voice_summary_enabled: bool | None = None
+    voice_summary_max_chars: int | None = Field(default=None, ge=50, le=5000)
+
+
+def _character() -> dict:
+    return {
+        "prompt": repos.get_setting("character_prompt") or "",
+        "voice_summary_prompt": repos.get_setting("voice_summary_prompt") or "",
+        "llm_streaming": repos.llm_streaming_enabled(),
+        "voice_summary_enabled": repos.voice_summary_enabled(),
+        "voice_summary_max_chars": repos.voice_summary_max_chars(),
+    }
 
 
 @router.get("/character")
 def get_character() -> dict:
-    return {
-        "prompt": repos.get_setting("character_prompt") or "",
-        "voice_summary_prompt": repos.get_setting("voice_summary_prompt") or "",
-    }
+    return _character()
 
 
 @router.put("/character")
 def set_character(payload: CharacterPayload) -> dict:
     repos.set_setting("character_prompt", payload.prompt)
     repos.set_setting("voice_summary_prompt", payload.voice_summary_prompt)
-    return {
-        "prompt": payload.prompt,
-        "voice_summary_prompt": payload.voice_summary_prompt,
-    }
+    repos.set_speech_flow(
+        payload.llm_streaming, payload.voice_summary_enabled, payload.voice_summary_max_chars
+    )
+    return _character()
 
 
 # ---- Stimmen --------------------------------------------------------------------

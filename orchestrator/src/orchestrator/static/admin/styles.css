@@ -103,6 +103,9 @@ form.grid {
   align-items: end;
 }
 form.grid .full { grid-column: 1 / -1; }
+label.check { flex-direction: row; align-items: center; gap: .5rem; color: var(--text); }
+label.check input { width: auto; padding: 0; }
+form.grid h2 { margin: .6rem 0 0; }
 
 button {
   background: var(--accent);

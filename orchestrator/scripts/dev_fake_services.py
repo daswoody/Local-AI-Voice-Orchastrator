@@ -23,6 +23,7 @@ http://127.0.0.1:9100/engine).
 
 import asyncio
 import io
+import json
 import math
 import struct
 import wave
@@ -50,7 +51,7 @@ async def list_models() -> dict:
 
 
 @llm.post("/v1/chat/completions")
-async def chat_completions(payload: dict) -> dict:
+async def chat_completions(payload: dict):
     messages = payload.get("messages", [])
     user_text = next(
         (m["content"] for m in reversed(messages) if m.get("role") == "user"), ""
@@ -60,7 +61,7 @@ async def chat_completions(payload: dict) -> dict:
     # Tool-Demo (1.12): Enthaelt die Frage "karte", ruft das Fake-LLM das
     # show_card-Builtin auf - komplett server-seitig, kein MCP noetig.
     if "karte" in user_text.lower() and payload.get("tools") and not has_tool_result:
-        return {"choices": [{"message": {
+        message = {
             "role": "assistant",
             "content": None,
             "tool_calls": [{
@@ -72,14 +73,39 @@ async def chat_completions(payload: dict) -> dict:
                                  ' "data": {"headline": "Fake-Karte", "body": "Aus dem Tool-Loop."}}',
                 },
             }],
-        }}]}
+        }
+        if payload.get("stream"):
+            return _sse_response(_stream_tool_call(message["tool_calls"][0]))
+        return {"choices": [{"message": message}]}
 
-    await asyncio.sleep(2.0)  # LLM-Latenz simulieren -> Filler-Logik wird sichtbar
     suffix = " (nach Tool-Aufruf)" if has_tool_result else ""
-    return {"choices": [{"message": {
-        "role": "assistant",
-        "content": f"Fake-Antwort auf: {user_text}{suffix}",
-    }}]}
+    content = f"Fake-Antwort auf: {user_text}{suffix}. Und hier kommt noch ein zweiter Satz hinterher."
+    if payload.get("stream"):
+        # LLM-Streaming (v1.26): Wort fuer Wort - der erste Satz klingt,
+        # waehrend der zweite noch "geschrieben" wird.
+        return _sse_response(_stream_words(content))
+    await asyncio.sleep(2.0)  # LLM-Latenz simulieren -> Filler-Logik wird sichtbar
+    return {"choices": [{"message": {"role": "assistant", "content": content}}]}
+
+
+def _sse_response(events) -> StreamingResponse:
+    async def body():
+        async for event in events:
+            yield f"data: {json.dumps(event)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(body(), media_type="text/event-stream")
+
+
+async def _stream_words(content: str):
+    await asyncio.sleep(1.0)  # Zeit bis zum ersten Token
+    for index, word in enumerate(content.split(" ")):
+        await asyncio.sleep(0.12)
+        yield {"choices": [{"delta": {"content": word if index == 0 else f" {word}"}}]}
+
+
+async def _stream_tool_call(tool_call: dict):
+    yield {"choices": [{"delta": {"tool_calls": [{"index": 0, **tool_call}]}}]}
 
 
 # --- Fake STT ----------------------------------------------------------------

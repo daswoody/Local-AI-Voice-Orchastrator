@@ -38,6 +38,9 @@ class OrchestratorState(TypedDict):
     messages: list[dict]
     # ToolExecutor der Session (None -> Turn laeuft ohne Tools).
     executor: Any
+    # LLM-Streaming (v1.26): Empfaenger der Text-Deltas (delta(text) und
+    # round_end() je LLM-Runde) - None = klassisch, Antwort am Stueck.
+    streamer: Any
     iterations: int
     response: str
 
@@ -61,7 +64,12 @@ async def agent_node(state: OrchestratorState) -> OrchestratorState:
     if state["executor"] is not None and state["iterations"] < settings.tool_max_iterations:
         tools = await state["executor"].list_openai_tools() or None
 
-    message = await litellm_client.chat_message(messages, tools)
+    streamer = state.get("streamer")
+    if streamer is not None:
+        message = await litellm_client.stream_chat_message(messages, tools, on_delta=streamer.delta)
+        await streamer.round_end()
+    else:
+        message = await litellm_client.chat_message(messages, tools)
     messages.append(message)
 
     return {
@@ -199,6 +207,7 @@ def initial_state(
     image_data_url: str = "",
     voice_mode: bool = False,
     history: list[dict] | None = None,
+    streamer: Any = None,
 ) -> OrchestratorState:
     return {
         "text": text,
@@ -210,6 +219,7 @@ def initial_state(
         "context_chunks": [],
         "messages": [],
         "executor": executor,
+        "streamer": streamer,
         "iterations": 0,
         "response": "",
     }

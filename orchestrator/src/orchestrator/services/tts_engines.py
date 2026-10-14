@@ -21,7 +21,7 @@ import asyncio
 import logging
 import socket
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -535,7 +535,12 @@ def _same_card(device: str | None, target: str) -> bool:
     return device is not None and normalized(device) == normalized(target)
 
 
-async def stream_main(text: str, voice_id: str) -> AsyncIterator[tuple[int, bytes]]:
+async def stream_main(
+    text: str,
+    voice_id: str,
+    engine_id: str | None = None,
+    on_engine: Callable[[str], None] | None = None,
+) -> AsyncIterator[tuple[int, bytes]]:
     """Hauptantwort in der aktiven Engine. Scheitert eine andere Engine als
     XTTS, BEVOR Audio geflossen ist (Container gestoppt, Modell laedt noch,
     belegt), spricht XTTS - eine ausgefallene Test-Engine soll die
@@ -543,7 +548,16 @@ async def stream_main(text: str, voice_id: str) -> AsyncIterator[tuple[int, byte
     mehr moeglich (sonst doppeltes Audio): der Fehler geht an den Aufrufer.
     Ist XTTS im Panel ausgeschaltet, springt Piper ein (v1.19). Hatte erst
     das Aktivieren der ausgefallenen Engine XTTS entladen, wird es wieder
-    geladen (v1.21) - ab dann spricht wieder XTTS."""
+    geladen (v1.21) - ab dann spricht wieder XTTS.
+
+    Satz fuer Satz gesprochen (LLM-Streaming, v1.26) gilt der Rueckfall nur
+    fuer den ersten Satz: on_engine meldet, welche Engine wirklich spricht,
+    und die folgenden Saetze kommen mit engine_id fest von ihr - sonst
+    koennte die Stimme mitten in der Antwort wechseln."""
+    if engine_id is not None:
+        async for item in get_engine(engine_id)["client"].stream(text, voice_id):
+            yield item
+        return
     engine_id = active_engine()
     fallback = fallback_engine()
     if not engine_enabled(engine_id):
@@ -553,6 +567,8 @@ async def stream_main(text: str, voice_id: str) -> AsyncIterator[tuple[int, byte
     started = False
     try:
         async for item in get_engine(engine_id)["client"].stream(text, voice_id):
+            if not started and on_engine is not None:
+                on_engine(engine_id)
             started = True
             yield item
         return
@@ -571,6 +587,8 @@ async def stream_main(text: str, voice_id: str) -> AsyncIterator[tuple[int, byte
             )
         if gone:
             revive_fallback()
+    if on_engine is not None:
+        on_engine(fallback)
     async for item in get_engine(fallback)["client"].stream(text, voice_id):
         yield item
 

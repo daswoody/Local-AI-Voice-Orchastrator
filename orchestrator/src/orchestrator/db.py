@@ -51,7 +51,10 @@ CREATE TABLE IF NOT EXISTS voices (
     -- audio.cpp-Modelle und Vertrags-Engines am genauesten, XTTS braucht es
     -- nicht. Beim Upload per Whisper vorgeschlagen, im Panel korrigierbar.
     -- NULL = keins.
-    sample_text TEXT
+    sample_text TEXT,
+    -- Sampling-Werte fuer Engines, die sie melden (v1.28), als JSON, z. B.
+    -- {"seed": 42, "temperature": 0.7}. NULL = Defaults der Engine.
+    tts_options TEXT
 );
 
 CREATE TABLE IF NOT EXISTS filler_triggers (
@@ -221,6 +224,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     voice_columns = {row[1] for row in conn.execute("PRAGMA table_info(voices)")}
     if "sample_text" not in voice_columns:
         conn.execute("ALTER TABLE voices ADD COLUMN sample_text TEXT")
+    if "tts_options" not in voice_columns:
+        conn.execute("ALTER TABLE voices ADD COLUMN tts_options TEXT")
 
 
 def _seed_admin_user(conn: sqlite3.Connection) -> None:

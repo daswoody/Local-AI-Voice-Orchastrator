@@ -464,6 +464,19 @@ Das Modell ist das gleiche wie bei audio.cpp (`Qwen3-TTS-12Hz-*-Base`,
 Apache-2.0). Mit exaktem Transkript des Samples klont es am aehnlichsten, ohne
 nur ueber den Stimm-Fingerabdruck.
 
+**Klang pro Stimme (v1.28):** Qwen3 wuerfelt bei jedem Satz neu (Zufalls-Seed,
+Temperatur 0.9) - die Sprechweise schwankt deshalb. Unter **Sprachausgabe >
+Probehoeren** gibt es dafuer die Felder Seed, Temperatur, top_k, top_p und
+Wiederholungsstrafe: ohne Seed wird jedes Mal gewuerfelt und der benutzte Seed
+in der Vergleichsliste angezeigt; klingt ein Durchgang gut, "Fuer Stimme
+speichern". Unter **Stimmen > Bearbeiten** lassen sich die Werte auch von Hand
+setzen. Sie gelten in Antworten, Fillern und beim Probehoeren - fuer jede
+Engine, die sie im Steckbrief meldet (derzeit nur diese). Faustregeln: fester
+Seed = derselbe Satz klingt jedes Mal gleich (bei anderem Text keine Garantie);
+Temperatur 0.6-0.7 = ruhiger und gleichmaessiger; 0 = ohne Zufall, kann
+monoton klingen oder haengen bleiben. Container-Neubau noetig (der alte nimmt
+die Werte nicht an, spricht aber weiter).
+
 **Deployen** (eigene Coolify-Resource wie die anderen Container, Docker Compose,
 **Base Directory `/`**, Location `/orchestrator/docker-compose.qwen3-stream.yml`,
 Build-Argumente "Managed manually in Dockerfile"). Container

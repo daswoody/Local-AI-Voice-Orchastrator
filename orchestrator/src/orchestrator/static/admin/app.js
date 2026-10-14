@@ -182,7 +182,7 @@ const NO_RERENDER = new Set(["editUser", "resetUserForm", "pickSample", "editCar
                              "resetAgentForm", "switchCardFormat", "playFiller",
                              "filterFillers", "editVoice", "resetVoiceForm",
                              "previewTts", "editContractEngine", "setAudioCppVoice",
-                             "ragSearch"]);
+                             "ragSearch", "previewEngineChanged", "previewVoiceChanged"]);
 
 /* Audio-Blob abspielen und die Blob-URL danach wieder freigeben, sonst
  * sammeln sich die Objekte im Tab an. */
@@ -318,6 +318,117 @@ views.rag = async () => {
 
 // ---- View: Sprachausgabe ------------------------------------------------------------------
 
+// Klang einer Stimme (v1.28): Sampling-Werte fuer Engines, die sie melden
+// (derzeit Qwen3-TTS Streaming). Platzhalter = Defaults von Qwen3.
+const SAMPLING = [
+  { name: "seed", label: "Seed", placeholder: "leer = zufaellig", step: "1", min: "0", int: true },
+  { name: "temperature", label: "Temperatur", placeholder: "Standard 0.9", step: "0.05", min: "0", max: "2" },
+  { name: "top_k", label: "top_k", placeholder: "Standard 50", step: "1", min: "1", max: "1000", int: true },
+  { name: "top_p", label: "top_p", placeholder: "Standard 1.0", step: "0.05", min: "0.05", max: "1" },
+  { name: "repetition_penalty", label: "Wiederholungsstrafe", placeholder: "Standard 1.05", step: "0.01", min: "1", max: "2" },
+];
+const NO_SAMPLING_HINT = "Diese Engine kennt keine Klang-Werte - sie spricht mit ihren eigenen Einstellungen.";
+
+function samplingFields(options, supported, id, preview) {
+  const values = options || {};
+  const fields = SAMPLING.map((f) => {
+    const off = supported && !supported.includes(f.name);
+    return `<label>${esc(f.label)}
+      <input type="number" name="${f.name}" step="${f.step}" min="${f.min}" ${f.max ? `max="${f.max}"` : ""}
+        placeholder="${esc(f.placeholder)}" value="${esc(values[f.name] ?? "")}" ${off ? "disabled" : ""}>
+    </label>`;
+  }).join("");
+  const usage = preview
+    ? "Startwerte = die gespeicherten der Stimme. Ohne Seed wird jedes Mal neu gewuerfelt; der benutzte Seed steht unten in der Liste - klingt ein Durchgang gut, dort fuer die Stimme speichern. Niedrigere Temperatur = ruhiger und gleichmaessiger (0 = ohne Zufall, kann monoton klingen)."
+    : "Leer = Standard der Engine. Gilt in Antworten, Fillern und beim Probehoeren.";
+  const hint = supported && !supported.length ? NO_SAMPLING_HINT : usage;
+  return `<fieldset class="full sampling" id="${id}"><legend>Klang</legend>${fields}
+    <p class="hint" data-sampling-hint data-usage="${esc(usage)}">${esc(hint)}</p></fieldset>`;
+}
+
+function readSampling(form) {
+  const options = {};
+  for (const f of SAMPLING) {
+    const input = form.elements[f.name];
+    const raw = input && !input.disabled ? input.value.trim() : "";
+    options[f.name] = raw === "" ? null : (f.int ? parseInt(raw, 10) : parseFloat(raw));
+  }
+  return options;
+}
+
+function fillSampling(form, options) {
+  for (const f of SAMPLING) {
+    const input = form.elements[f.name];
+    if (input) input.value = (options || {})[f.name] ?? "";
+  }
+}
+
+function setSamplingSupport(fieldset, supported) {
+  for (const f of SAMPLING) {
+    const input = fieldset.querySelector(`[name="${f.name}"]`);
+    if (input) input.disabled = !supported.includes(f.name);
+  }
+  const hint = fieldset.querySelector("[data-sampling-hint]");
+  hint.textContent = supported.length ? hint.dataset.usage : NO_SAMPLING_HINT;
+}
+
+function samplingSummary(options) {
+  const parts = SAMPLING
+    .filter((f) => options && options[f.name] !== null && options[f.name] !== undefined)
+    .map((f) => `${f.label} ${options[f.name]}`);
+  return parts.length ? parts.join(" · ") : "Standard";
+}
+
+// Vergleichsliste des Probehoerens (nur im Tab, max. PREVIEW_HISTORY).
+const PREVIEW_HISTORY = 8;
+const previewRuns = [];
+let previewCounter = 0;
+
+function renderPreviewHistory() {
+  if (!previewRuns.length) return "";
+  const rows = previewRuns.map((run) => `<tr>
+      <td>#${run.n}</td>
+      <td>${esc(run.engine)}<br><small title="${esc(run.text)}">${esc(run.voice)}</small></td>
+      <td><small>${esc(Object.keys(run.options).length ? samplingSummary(run.options) : "-")}</small></td>
+      <td class="nowrap"><small>${run.first} ms / RTF ${esc(run.rtf)}</small></td>
+      <td class="actions">
+        <button type="button" class="small ghost" data-preview-do="play" data-run="${run.n}">Abspielen</button>
+        ${Object.keys(run.options).length ? `<button type="button" class="small" data-preview-do="save" data-run="${run.n}">Fuer Stimme speichern</button>` : ""}
+      </td>
+    </tr>`).join("");
+  return `<h3>Vergleichen</h3>
+    <table><thead><tr><th></th><th>Engine / Stimme</th><th>Klang</th><th>Erster Ton / Echtzeitfaktor</th><th></th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
+}
+
+// Knoepfe der Vergleichsliste (sie entsteht ohne Neu-Rendern der Seite).
+document.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-preview-do]");
+  if (!button) return;
+  const run = previewRuns.find((r) => r.n === Number(button.dataset.run));
+  if (!run) return;
+  try {
+    if (button.dataset.previewDo === "play") {
+      await playBlob(run.blob);
+      return;
+    }
+    button.disabled = true;
+    const voice = await api.put(`/v1/admin/voices/${encodeURIComponent(run.voiceId)}`, { tts_options: run.options });
+    // Startwerte beim naechsten Stimmwechsel aktuell halten.
+    const store = document.getElementById("tts-voices-data");
+    if (store) {
+      const voices = JSON.parse(store.textContent);
+      const entry = voices.find((v) => v.id === run.voiceId);
+      if (entry) entry.tts_options = voice.tts_options;
+      store.textContent = JSON.stringify(voices);
+    }
+    button.textContent = `Gespeichert fuer ${run.voice}`;
+  } catch (err) {
+    button.disabled = false;
+    alert(err.message);
+  }
+});
+
 views.tts = async () => {
   const [data, voices] = await Promise.all([
     api.get("/v1/admin/tts"),
@@ -365,6 +476,7 @@ views.tts = async () => {
     const hint = v.sample_text ? "" : (v.has_sample ? " (ohne Transkript)" : " (ohne Sample)");
     return `<option value="${esc(v.id)}">${esc(v.name)}${esc(hint)}</option>`;
   }).join("");
+  const activeSampling = (data.engines.find((e) => e.id === data.active_engine) || {}).sampling || [];
 
   return `
     <h1>Sprachausgabe</h1>
@@ -379,14 +491,18 @@ views.tts = async () => {
       <h2>Probehoeren &amp; vergleichen</h2>
       <p class="hint">Spricht einen Testsatz mit genau dieser Engine und Stimme (ohne XTTS-Fallback) und misst die Zeit bis zum ersten Ton (erstes Audio-Stueck) sowie fuer die komplette Synthese. Echtzeitfaktor unter 1 = schneller als Echtzeit. audio.cpp-Modelle ohne Streaming sprechen Satz fuer Satz &ndash; dort kommt der erste Ton erst mit dem ersten fertigen Satz. Eine nicht geladene Engine wird dafuer geladen (das erste Mal zaehlt die Ladezeit mit, also zweimal messen), ohne andere zu entladen &ndash; ist die Karte voll, die Engine vorher aktivieren.</p>
       <form class="grid" data-submit="previewTts" id="tts-preview-form">
-        <label>Engine <select name="engine">${engineOptions}</select></label>
-        <label>Stimme <select name="voice_id">${voiceOptions}</select></label>
+        <label>Engine <select name="engine" data-action-change="previewEngineChanged">${engineOptions}</select></label>
+        <label>Stimme <select name="voice_id" data-action-change="previewVoiceChanged">${voiceOptions}</select></label>
         <label class="full">Text
           <input name="text" required maxlength="500" value="Hallo! Ich bin deine Heim-Assistenz. Soll ich das Licht im Wohnzimmer einschalten?">
         </label>
+        ${samplingFields(voices[0]?.tts_options, activeSampling, "tts-sampling", true)}
         <div><button type="submit">Anhoeren</button></div>
         <p class="hint full" id="tts-preview-result"></p>
       </form>
+      <div id="tts-preview-history">${renderPreviewHistory()}</div>
+      <script type="application/json" id="tts-engines-data">${JSON.stringify(data.engines.map((e) => ({ id: e.id, sampling: e.sampling || [] })))}</script>
+      <script type="application/json" id="tts-voices-data">${JSON.stringify(voices)}</script>
     </section>
     ${audiocppSection}
     <section class="block">
@@ -715,6 +831,7 @@ views.voices = async () => {
       <td>${esc(voice.language)}</td>
       <td>${voice.has_sample ? '<span class="badge ok">Sample vorhanden</span>' : '<span class="badge warn">kein Sample</span>'}</td>
       <td>${transcript}</td>
+      <td><small>${esc(samplingSummary(voice.tts_options))}</small></td>
       <td class="actions">
         <label style="display:inline-block">
           <input type="file" accept=".wav,audio/wav" class="hidden" data-upload="${esc(voice.id)}">
@@ -729,10 +846,11 @@ views.voices = async () => {
 
   return `
     <h1>Stimmen</h1>
+    <p class="hint"><strong>Klang</strong> (Seed, Temperatur ...) gilt fuer Engines, die diese Werte melden (derzeit Qwen3-TTS Streaming) &ndash; in Antworten, Fillern und beim Probehoeren. Am einfachsten unter Sprachausgabe &gt; Probehoeren ausprobieren und dort "Fuer Stimme speichern".</p>
     <p class="hint">Jede Stimme braucht ein WAV-Sample (~6-30s sauberes, deutsches Sprechmaterial) fuer das Voice-Cloning. Die meisten audio.cpp-Modelle klonen ebenfalls aus diesem Sample und brauchen bzw. nutzen zusaetzlich das <strong>exakte Transkript</strong> des Samples: Es wird beim Upload per Whisper vorgeschlagen und laesst sich unter "Bearbeiten" korrigieren (Wiederholungen und Versprecher mit aufschreiben). Nach dem Austausch eines Samples: Filler neu generieren.</p>
     <section class="block">
       <table>
-        <thead><tr><th>ID</th><th>Name</th><th>Sprache</th><th>Status</th><th>Transkript</th><th></th></tr></thead>
+        <thead><tr><th>ID</th><th>Name</th><th>Sprache</th><th>Status</th><th>Transkript</th><th>Klang</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </section>
@@ -746,6 +864,7 @@ views.voices = async () => {
         <label class="full hidden" id="voice-transcript-label">Transkript des Samples - Wort fuer Wort, was im Sample gesprochen wird (leer = keins)
           <textarea name="sample_text" rows="3"></textarea>
         </label>
+        <div class="full hidden" id="voice-sampling">${samplingFields({}, null, "voice-sampling-fields", false)}</div>
         <div><button type="submit">Speichern</button>
         <button type="button" class="ghost" data-action="resetVoiceForm">Neu</button></div>
       </form>
@@ -1130,6 +1249,7 @@ const formActions = {
         name: form.name.value,
         language: form.language.value || "de",
         sample_text: form.sample_text.value,
+        tts_options: readSampling(form),
       });
     } else {
       await api.post("/v1/admin/voices", {
@@ -1183,14 +1303,27 @@ const formActions = {
         engine: form.engine.value,
         voice_id: form.voice_id.value,
         text: form.text.value,
+        options: readSampling(form),
       });
       const first = Number(response.headers.get("X-TTS-First-Chunk-Ms"));
       const total = Number(response.headers.get("X-TTS-Total-Ms"));
       const audio = Number(response.headers.get("X-Audio-Ms"));
       const rtf = audio ? (total / audio).toFixed(2) : "-";
+      let options = {};
+      try { options = JSON.parse(response.headers.get("X-TTS-Options") || "{}"); } catch (_) { /* alt */ }
       result.textContent = `${form.engine.selectedOptions[0].textContent}: erster Ton nach ${first} ms, `
-        + `komplette Synthese ${total} ms fuer ${(audio / 1000).toFixed(1)} s Audio (Echtzeitfaktor ${rtf}).`;
-      await playBlob(await response.blob());
+        + `komplette Synthese ${total} ms fuer ${(audio / 1000).toFixed(1)} s Audio (Echtzeitfaktor ${rtf}).`
+        + (Object.keys(options).length ? ` Klang: ${samplingSummary(options)}.` : "");
+      const blob = await response.blob();
+      previewRuns.unshift({
+        n: ++previewCounter, blob, options,
+        engine: form.engine.selectedOptions[0].textContent,
+        voiceId: form.voice_id.value, voice: form.voice_id.selectedOptions[0].textContent,
+        text: form.text.value, first, rtf,
+      });
+      previewRuns.splice(PREVIEW_HISTORY);
+      document.getElementById("tts-preview-history").innerHTML = renderPreviewHistory();
+      await playBlob(blob);
     } catch (err) {
       result.textContent = "";
       throw err;
@@ -1401,6 +1534,18 @@ const buttonActions = {
     input.click();
   },
 
+  previewEngineChanged(_data, select) {
+    const engines = JSON.parse(document.getElementById("tts-engines-data").textContent);
+    const supported = (engines.find((e) => e.id === select.value) || {}).sampling || [];
+    setSamplingSupport(document.getElementById("tts-sampling"), supported);
+  },
+
+  previewVoiceChanged(_data, select) {
+    // Gespeicherte Werte der Stimme als Ausgangspunkt zum Ausprobieren.
+    const voices = JSON.parse(document.getElementById("tts-voices-data").textContent);
+    fillSampling(select.form, (voices.find((v) => v.id === select.value) || {}).tts_options);
+  },
+
   transcribeVoice: (data) =>
     api.post(`/v1/admin/voices/${encodeURIComponent(data.id)}/transcribe`, {}),
 
@@ -1414,7 +1559,9 @@ const buttonActions = {
     form.name.value = voice.name;
     form.language.value = voice.language;
     form.sample_text.value = voice.sample_text || "";
+    fillSampling(form, voice.tts_options);
     document.getElementById("voice-transcript-label").classList.remove("hidden");
+    document.getElementById("voice-sampling").classList.remove("hidden");
     document.getElementById("voice-form-title").textContent = `Stimme bearbeiten: ${voice.name}`;
     form.scrollIntoView({ behavior: "smooth" });
   },
@@ -1425,6 +1572,7 @@ const buttonActions = {
     form.editing.value = "";
     form.id.readOnly = false;
     document.getElementById("voice-transcript-label").classList.add("hidden");
+    document.getElementById("voice-sampling").classList.add("hidden");
     document.getElementById("voice-form-title").textContent = "Neue Stimme";
   },
 

@@ -91,6 +91,39 @@ def test_device_off_ends_the_model_process(client):
 # ---- Synthese -------------------------------------------------------------------------------
 
 
+def test_sampling_options_reach_the_backend_in_the_right_type(client):
+    """v1.28: Seed/Temperatur pro Stimme. Nur gemeldete Werte kommen an,
+    unbekannte Namen und null fallen weg."""
+    assert client.get("/v1/info").json()["sampling"] == ["seed", "temperature"]
+    options = json.dumps({"seed": 42.0, "temperature": 0.7, "top_k": 20, "foo": 1, "temperature_x": None})
+
+    lines = _lines(_speak(client, "Ein Satz mit festem Seed.", options=options).content)
+
+    assert lines[0]["opts"] == {"seed": 42, "temperature": 0.7}
+    # Ohne options bekommt das Backend auch keins.
+    assert _lines(_speak(client, "Ein Satz ohne Seed.").content)[0]["opts"] is None
+    assert _lines(_speak(client, "Ein Satz mit leeren options.", options="{}").content)[0]["opts"] is None
+
+
+@pytest.mark.parametrize("options", ['{"seed": 1.5}', '{"seed": true}', '{"temperature": "heiss"}',
+                                     "kein json", "[1, 2]"])
+def test_invalid_sampling_options_are_a_clean_400(client, options):
+    response = _speak(client, "Ein Satz.", options=options)
+    assert response.status_code == 400 and "options" in response.json()["detail"]
+
+
+def test_engines_without_sampling_ignore_the_options():
+    """Aeltere Backends (ohne `options`-Argument) laufen unveraendert weiter."""
+    app = create_app("fake_backend:LegacyBackend", _settings())
+    with TestClient(app) as legacy:
+        _wait_state(legacy, {"idle"})
+        assert legacy.get("/v1/info").json()["sampling"] == []
+        response = _speak(legacy, "Ein alter Satz.", options='{"seed": 7}')
+        assert response.status_code == 200
+        assert _lines(response.content)[0]["s"] == "Ein alter Satz."
+
+
+
 def test_speaks_sentence_by_sentence(client):
     response = _speak(client, "Erster Satz ist hier. Zweiter Satz folgt sogleich! Und hier kommt der dritte?",
                       instruction="ruhig")

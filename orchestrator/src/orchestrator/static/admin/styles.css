@@ -213,3 +213,16 @@ button.busy::after {
 /* Button-Zeile unter einer Tabelle (audio.cpp, v1.21) */
 .actions-row { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .8rem; }
 section.block a { color: var(--accent); }
+
+fieldset.sampling {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: .6rem .8rem .8rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: .6rem;
+  margin: 0;
+}
+fieldset.sampling legend { color: var(--muted); font-size: .88rem; padding: 0 .3rem; }
+fieldset.sampling .hint { grid-column: 1 / -1; margin: 0; }
+fieldset.sampling input:disabled { opacity: .45; }

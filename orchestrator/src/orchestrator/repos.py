@@ -260,16 +260,26 @@ def delete_contract_engine(engine_id: str) -> bool:
 # ---- Voices --------------------------------------------------------------------
 
 
+def _voice(row) -> dict:
+    voice = dict(row)
+    # Sampling-Werte (v1.28): JSON in der DB, dict nach aussen ({} = Defaults).
+    try:
+        voice["tts_options"] = json.loads(voice.get("tts_options") or "{}")
+    except ValueError:
+        voice["tts_options"] = {}
+    return voice
+
+
 def list_voices() -> list[dict]:
     with db_session() as conn:
         rows = conn.execute("SELECT * FROM voices ORDER BY id").fetchall()
-        return [dict(r) for r in rows]
+        return [_voice(r) for r in rows]
 
 
 def get_voice(voice_id: str) -> dict | None:
     with db_session() as conn:
         row = conn.execute("SELECT * FROM voices WHERE id = ?", (voice_id,)).fetchone()
-        return dict(row) if row else None
+        return _voice(row) if row else None
 
 
 def create_voice(voice_id: str, name: str, language: str) -> dict:
@@ -278,19 +288,22 @@ def create_voice(voice_id: str, name: str, language: str) -> dict:
             "INSERT INTO voices (id, name, language) VALUES (?, ?, ?)", (voice_id, name, language)
         )
         conn.commit()
-    return {"id": voice_id, "name": name, "language": language}
+    return {"id": voice_id, "name": name, "language": language, "sample_text": None, "tts_options": {}}
 
 
 def update_voice(voice_id: str, fields: dict[str, Any]) -> dict | None:
-    allowed = {"name", "language", "sample_text"}
+    allowed = {"name", "language", "sample_text", "tts_options"}
     updates = {k: v for k, v in fields.items() if k in allowed}
+    if "tts_options" in updates:
+        options = {k: v for k, v in (updates["tts_options"] or {}).items() if v is not None}
+        updates["tts_options"] = json.dumps(options) if options else None
     with db_session() as conn:
         if updates:
             assignments = ", ".join(f"{k} = ?" for k in updates)
             conn.execute(f"UPDATE voices SET {assignments} WHERE id = ?", (*updates.values(), voice_id))
             conn.commit()
         row = conn.execute("SELECT * FROM voices WHERE id = ?", (voice_id,)).fetchone()
-        return dict(row) if row else None
+        return _voice(row) if row else None
 
 
 def delete_voice(voice_id: str) -> bool:

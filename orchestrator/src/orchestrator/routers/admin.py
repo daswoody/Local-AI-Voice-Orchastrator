@@ -4,7 +4,9 @@ Alle Routen erfordern Tier 3 via require_admin (4.4). Das zugehoerige
 Web-Frontend liegt unter /admin (statisches Vanilla-JS, siehe
 static/admin/)."""
 
+import json
 import logging
+import secrets
 import sqlite3
 from pathlib import Path
 from typing import Any, Literal
@@ -160,6 +162,20 @@ def set_character(payload: CharacterPayload) -> dict:
 # ---- Stimmen --------------------------------------------------------------------
 
 
+class TtsOptions(BaseModel):
+    """Sampling-Werte pro Stimme (v1.28) fuer Engines, die sie melden
+    (derzeit Qwen3-TTS Streaming). None = Default der Engine."""
+
+    # Fester Seed: derselbe Satz klingt jedes Mal gleich.
+    seed: int | None = Field(default=None, ge=0, le=2**31 - 1)
+    # Niedriger = ruhiger und gleichmaessiger, 0 = ohne Zufall (kann monoton
+    # klingen oder haengen bleiben).
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    top_k: int | None = Field(default=None, ge=1, le=1000)
+    top_p: float | None = Field(default=None, gt=0.0, le=1.0)
+    repetition_penalty: float | None = Field(default=None, ge=1.0, le=2.0)
+
+
 class VoiceCreate(BaseModel):
     id: str
     name: str
@@ -172,6 +188,8 @@ class VoiceUpdate(BaseModel):
     # Exaktes Transkript des Samples (v1.17) - damit klonen audio.cpp-Modelle
     # und Vertrags-Engines am genauesten. Leer = keins.
     sample_text: str | None = None
+    # Sampling-Werte (v1.28); alle leer = Defaults der Engine.
+    tts_options: TtsOptions | None = None
 
 
 def _sample_path(voice_id: str) -> Path:
@@ -441,6 +459,9 @@ class TtsPreviewPayload(BaseModel):
     engine: str
     voice_id: str
     text: str = Field(min_length=1, max_length=500)
+    # Werte zum Ausprobieren (v1.28) statt der gespeicherten der Stimme;
+    # None = die der Stimme. Ohne Seed wird gewuerfelt und zurueckgemeldet.
+    options: TtsOptions | None = None
 
 
 class ContractEnginePayload(BaseModel):
@@ -545,8 +566,9 @@ async def preview_tts(payload: TtsPreviewPayload) -> Response:
     if not text:
         raise HTTPException(status_code=400, detail="Text fuer das Probehoeren fehlt")
     name = tts_engines.get_engine(payload.engine)["name"]
+    options = _preview_options(payload)
     try:
-        result = await tts_engines.synthesize(payload.engine, text, payload.voice_id)
+        result = await tts_engines.synthesize(payload.engine, text, payload.voice_id, options)
     except tts_engines.EngineOff as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     except tts_engines.STREAM_ABORTED:
@@ -565,8 +587,28 @@ async def preview_tts(payload: TtsPreviewPayload) -> Response:
             "X-TTS-First-Chunk-Ms": str(round(result.first_chunk_ms)),
             "X-TTS-Total-Ms": str(round(result.total_ms)),
             "X-Audio-Ms": str(round(result.audio_ms)),
+            # Tatsaechlich gesendete Sampling-Werte inkl. gewuerfeltem Seed -
+            # so laesst sich ein gelungener Durchgang fuer die Stimme merken.
+            "X-TTS-Options": json.dumps(options or {}),
         },
     )
+
+
+def _preview_options(payload: TtsPreviewPayload) -> dict | None:
+    """Werte fuers Probehoeren: nur die, die die Engine kennt. Ohne Seed
+    einen wuerfeln, damit er im Ergebnis steht und uebernommen werden kann."""
+    supported = tts_engines.sampling(payload.engine)
+    if not supported:
+        return None
+    if payload.options is None:
+        stored = (repos.get_voice(payload.voice_id) or {}).get("tts_options") or {}
+        values = dict(stored)
+    else:
+        values = payload.options.model_dump()
+    options = {k: v for k, v in values.items() if k in supported and v is not None}
+    if "seed" in supported and "seed" not in options:
+        options["seed"] = secrets.randbelow(2**31)
+    return options
 
 
 @router.put("/tts/settings")

@@ -139,9 +139,10 @@ class ContractClient:
         self._base_url = base_url
 
     async def stream(
-        self, text: str, voice_id: str, language: str | None = None, load_timeout_s: float = 0.0
+        self, text: str, voice_id: str, language: str | None = None, load_timeout_s: float = 0.0,
+        options: dict | None = None,
     ) -> AsyncIterator[tuple[int, bytes]]:
-        data, files = self._form(text, voice_id, language, load_timeout_s)
+        data, files = self._form(text, voice_id, language, load_timeout_s, options)
         timeout = httpx.Timeout(30.0, read=max(300.0, load_timeout_s + 60.0))
         async with httpx.AsyncClient(base_url=self._base_url(), timeout=timeout) as client:
             for attempt in range(self.busy_retries + 1):
@@ -158,7 +159,8 @@ class ContractClient:
                     return
 
     @staticmethod
-    def _form(text: str, voice_id: str, language: str | None, load_timeout_s: float) -> tuple[dict, dict | None]:
+    def _form(text: str, voice_id: str, language: str | None, load_timeout_s: float,
+              options: dict | None = None) -> tuple[dict, dict | None]:
         voice = repos.get_voice(voice_id) or {}
         data = {
             "text": text,
@@ -166,6 +168,13 @@ class ContractClient:
             "language": language or voice.get("language") or "de",
             "load_timeout_s": str(load_timeout_s),
         }
+        # Sampling-Werte (v1.28): die der Stimme, beim Probehoeren die aus
+        # dem Panel. Die Engine nimmt nur, was sie im Steckbrief meldet -
+        # aeltere Engines ignorieren das Feld.
+        options = voice.get("tts_options") if options is None else options
+        options = {k: v for k, v in (options or {}).items() if v is not None}
+        if options:
+            data["options"] = json.dumps(options)
         files = None
         sample = Path(settings.voices_dir) / f"{voice_id}.wav"
         if sample.exists():

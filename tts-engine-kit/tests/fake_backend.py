@@ -13,7 +13,7 @@ class FakeBackend(Backend):
     @classmethod
     def info(cls) -> EngineInfo:
         return EngineInfo(name="Fake-TTS", languages=("de", "en"), sample_rate=16000,
-                          needs_sample=False, uses_transcript=True)
+                          needs_sample=False, uses_transcript=True, sampling=("seed", "temperature"))
 
     @classmethod
     def prepare(cls) -> dict:
@@ -36,7 +36,7 @@ class FakeBackend(Backend):
         self.prepare_calls += 1
         return {"transcript": voice.transcript, "bytes": len(voice.wav)}
 
-    def synthesize(self, text, language, voice, instruction):
+    def synthesize(self, text, language, voice, instruction, options=None):
         if text.startswith("boom"):
             raise RuntimeError("Modell kaputt")
         if text.startswith("crash"):
@@ -47,7 +47,18 @@ class FakeBackend(Backend):
             time.sleep(float(os.environ.get("FAKE_SENTENCE_S", "0")))
             line = json.dumps({"i": index, "s": sentence, "lang": language, "voice": voice,
                                "prep": self.prepare_calls, "pid": os.getpid(),
-                               "instr": instruction, "tag": self.tag}).encode() + b"\n"
+                               "instr": instruction, "tag": self.tag, "opts": options}).encode() + b"\n"
             if len(line) % 2:  # PCM16 hat gerade Laengen
                 line = b" " + line
             yield 16000, line
+
+
+class LegacyBackend(FakeBackend):
+    """Engine von vor v1.28: kennt kein Sampling und kein `options`-Argument."""
+
+    @classmethod
+    def info(cls) -> EngineInfo:
+        return EngineInfo(name="Alt-TTS", languages=("de",), sample_rate=16000, needs_sample=False)
+
+    def synthesize(self, text, language, voice, instruction):
+        yield from super().synthesize(text, language, voice, instruction)

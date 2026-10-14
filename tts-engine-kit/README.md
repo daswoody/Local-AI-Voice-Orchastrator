@@ -21,10 +21,10 @@ Beispiele unten.
 | Endpunkt | Zweck |
 |---|---|
 | `GET /v1/health` | Container lebt: `{"status": "ok", "state": ...}` |
-| `GET /v1/info` | Steckbrief: `name`, `languages` (ISO-Codes), `sample_rate`, `needs_sample`, `uses_transcript`, `instructions`, `streaming` (`sentence`/`chunk`), `vram_mb`, `description`, `license`, `contract` |
+| `GET /v1/info` | Steckbrief: `name`, `languages` (ISO-Codes), `sample_rate`, `needs_sample`, `uses_transcript`, `instructions`, `streaming` (`sentence`/`chunk`), `vram_mb`, `description`, `license`, `sampling` (seit Heim-AI v1.28: welche Sampling-Werte `synthesize` annimmt, z. B. `["seed", "temperature"]`), `contract` |
 | `GET /v1/device` | `{assigned, effective, loaded, state, detail, model}` |
 | `POST /v1/device` | `{"device": "off" \| "cpu" \| "cuda" \| "cuda:N"}` - laden bzw. entladen |
-| `POST /v1/synthesize` | Multipart: `text`, `language`, `voice_id`, `ref_audio` (WAV), `ref_text`, `instruction`, `load_timeout_s` -> PCM16 mono als Stream, Header `X-Sample-Rate` |
+| `POST /v1/synthesize` | Multipart: `text`, `language`, `voice_id`, `ref_audio` (WAV), `ref_text`, `instruction`, `load_timeout_s`, `options` (JSON, optional, v1.28: Sampling-Werte pro Stimme wie `{"seed": 42, "temperature": 0.7}`; ankommen nur die in `sampling` gemeldeten, unbekannte Namen und `null` fallen weg, falscher Typ = 400) -> PCM16 mono als Stream, Header `X-Sample-Rate` |
 
 Zustaende (`state`): `preparing` (Gewichte werden geladen, `Backend.prepare`),
 `idle` (bereit, Modell nicht geladen), `loading`, `ready`, `off`, `error`
@@ -84,6 +84,13 @@ beim Probehoeren und Filler-Erzeugen wartet er.
    Streamt das Modell selbst, einfach jeden Chunk `yield`en und in `info()`
    `streaming="chunk"` melden - das Kit reicht jeden Chunk sofort an den
    Client weiter (Beispiel: `tts-qwen3-stream/`).
+
+   Sampling pro Stimme (v1.28): In `info()` `sampling=("seed", "temperature", ...)`
+   melden (Namen aus `SAMPLING_OPTIONS`: `seed`, `temperature`, `top_k`,
+   `top_p`, `repetition_penalty`) und `synthesize(..., options=None)`
+   annehmen - `options` kommt nur, wenn der Request Werte enthielt, schon im
+   richtigen Typ. Wer nichts meldet, bekommt nie `options` (aeltere Backends
+   laufen unveraendert). Im Admin-Panel stellt man die Werte pro Stimme ein.
 
    `info()` und `prepare()` laufen im Hauptprozess (dort keine schweren
    Imports), alles andere im Modell-Unterprozess. `ValueError` in

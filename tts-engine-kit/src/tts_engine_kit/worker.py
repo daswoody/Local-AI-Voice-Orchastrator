@@ -137,7 +137,11 @@ def _child_main(conn, backend_path: str, kwargs: dict, device: str, cache_size: 
         _, request_id, job = message
         try:
             voice = _prepared_voice(backend, prepared, job.get("voice"), cache_size)
-            chunks = backend.synthesize(job["text"], job.get("language"), voice, job.get("instruction"))
+            args = (job["text"], job.get("language"), voice, job.get("instruction"))
+            # options nur, wenn welche da sind - aeltere Backends kennen das
+            # Argument nicht (das Kit filtert ohnehin auf info.sampling).
+            options = job.get("options")
+            chunks = backend.synthesize(*args, options=options) if options else backend.synthesize(*args)
             for rate, pcm in chunks:
                 # Zwischen zwei Chunks: Client weg (cancel) oder Stopp?
                 cancelled = False

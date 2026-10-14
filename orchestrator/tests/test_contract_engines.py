@@ -303,3 +303,106 @@ async def test_fillers_can_be_spoken_by_a_contract_engine(client, monkeypatch):
 
     assert results and all(result["ok"] for result in results)
     assert filler_service.has_audio(filler["id"], "default-de-male")
+
+
+# ---- Klang pro Stimme: Seed, Temperatur ... (v1.28) ----------------------------------------
+
+QWEN_SAMPLING = ["seed", "temperature", "top_k", "top_p", "repetition_penalty"]
+
+
+async def test_voice_sampling_values_go_to_the_engine(monkeypatch):
+    requests: list[httpx.Request] = []
+    _mock_http(monkeypatch, lambda request: requests.append(request) or _pcm_answer(request))
+    repos.update_voice("default-de-female", {"tts_options": {"seed": 42, "temperature": 0.7, "top_k": None}})
+
+    [_ async for _ in demo.stream("Hallo.", "default-de-female")]
+    # Probehoeren: Werte aus dem Panel statt der gespeicherten.
+    [_ async for _ in demo.stream("Hallo.", "default-de-female", options={"seed": 7})]
+    repos.update_voice("default-de-female", {"tts_options": None})
+    [_ async for _ in demo.stream("Hallo.", "default-de-female")]
+
+    import json as _json
+
+    assert _json.loads(_form(requests[0])["options"]) == {"seed": 42, "temperature": 0.7}
+    assert _json.loads(_form(requests[1])["options"]) == {"seed": 7}
+    assert "options" not in _form(requests[2])  # Standard der Engine
+
+
+def test_voice_sampling_values_are_saved_validated_and_cleared(client, admin_headers):
+    url = "/v1/admin/voices/default-de-female"
+    saved = client.put(url, headers=admin_headers,
+                       json={"tts_options": {"seed": 42, "temperature": 0.7, "top_p": None}})
+    assert saved.status_code == 200 and saved.json()["tts_options"] == {"seed": 42, "temperature": 0.7}
+    listed = {v["id"]: v for v in client.get("/v1/admin/voices", headers=admin_headers).json()}
+    assert listed["default-de-female"]["tts_options"] == {"seed": 42, "temperature": 0.7}
+
+    # Andere Felder aendern laesst den Klang stehen.
+    client.put(url, headers=admin_headers, json={"name": "Anna"})
+    assert repos.get_voice("default-de-female")["tts_options"] == {"seed": 42, "temperature": 0.7}
+
+    for bad in ({"temperature": 3}, {"seed": -1}, {"top_p": 0}, {"repetition_penalty": 0.5}):
+        assert client.put(url, headers=admin_headers, json={"tts_options": bad}).status_code == 422
+
+    cleared = client.put(url, headers=admin_headers, json={"tts_options": {"seed": None}})
+    assert cleared.json()["tts_options"] == {}
+    # Die oeffentliche Stimmenliste der Apps bleibt wie sie ist.
+    public = client.get("/v1/voices", headers=admin_headers).json()["voices"]
+    assert all(set(v) == {"id", "name", "language"} for v in public)
+
+
+def test_preview_rolls_a_seed_and_reports_the_values(client, admin_headers, monkeypatch):
+    """Ohne Seed wird gewuerfelt und im Header gemeldet - so laesst sich ein
+    gelungener Durchgang fuer die Stimme speichern."""
+    import json as _json
+
+    tts_engines._INFO["demo"] = {"name": "Demo-TTS", "sampling": QWEN_SAMPLING}
+    requests: list[httpx.Request] = []
+    _mock_http(monkeypatch, lambda request: requests.append(request) or _pcm_answer(request))
+
+    def preview(options):
+        payload = {"engine": "demo", "voice_id": "default-de-female", "text": "Hallo", "options": options}
+        response = client.post("/v1/admin/tts/preview", headers=admin_headers, json=payload)
+        assert response.status_code == 200
+        return _json.loads(response.headers["x-tts-options"])
+
+    rolled = preview({"seed": None, "temperature": 0.6})
+    assert set(rolled) == {"seed", "temperature"} and rolled["temperature"] == 0.6
+    assert 0 <= rolled["seed"] < 2**31
+    assert _json.loads(_form(requests[-1])["options"]) == rolled
+
+    assert preview({"seed": 123, "temperature": None}) == {"seed": 123}
+
+    # options weggelassen = die gespeicherten Werte der Stimme.
+    repos.update_voice("default-de-female", {"tts_options": {"seed": 5, "top_k": 30}})
+    assert preview(None) == {"seed": 5, "top_k": 30}
+
+
+def test_engines_without_sampling_get_no_values(client, admin_headers, monkeypatch):
+    tts_engines._INFO["demo"] = {"name": "Demo-TTS"}  # Engine von vor v1.28
+    requests: list[httpx.Request] = []
+    _mock_http(monkeypatch, lambda request: requests.append(request) or _pcm_answer(request))
+
+    response = client.post("/v1/admin/tts/preview", headers=admin_headers,
+                           json={"engine": "demo", "voice_id": "default-de-female", "text": "Hallo",
+                                 "options": {"seed": 3}})
+
+    assert response.status_code == 200 and response.headers["x-tts-options"] == "{}"
+    # Nichts aus dem Panel; nur die gespeicherten Werte der Stimme gingen mit (hier keine).
+    assert "options" not in _form(requests[0])
+    assert tts_engines.sampling("demo") == [] and tts_engines.sampling("xtts") == []
+
+
+async def test_overview_lists_the_sampling_values_of_an_engine(monkeypatch):
+    def handler(request):
+        if request.url.path == "/v1/info":
+            return httpx.Response(200, json={"name": "Qwen3", "sampling": QWEN_SAMPLING})
+        if request.url.path == "/v1/device":
+            return httpx.Response(200, json={"state": "ready"})
+        raise httpx.ConnectError("nicht erreichbar")
+
+    _mock_http(monkeypatch, handler)
+
+    engines = {e["id"]: e for e in await tts_engines.overview()}
+
+    assert engines["demo"]["sampling"] == QWEN_SAMPLING
+    assert engines["xtts"]["sampling"] == []

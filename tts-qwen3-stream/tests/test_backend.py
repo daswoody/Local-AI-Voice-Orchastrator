@@ -186,6 +186,27 @@ def test_streams_chunks_sentence_by_sentence_in_the_requested_language():
     assert {call["first_chunk_frames"] for call in calls} == {4}
 
 
+def test_sampling_options_go_to_every_sentence_and_defaults_stay_otherwise():
+    """v1.28: Seed/Temperatur pro Stimme - jeder Satz bekommt dieselben
+    Werte; ohne Angabe bleiben die Defaults der Bibliothek."""
+    engine = _loaded()
+    voice = _voice(engine)
+    options = {"seed": 42, "temperature": 0.7, "top_k": 30, "top_p": 0.9, "repetition_penalty": 1.1}
+
+    list(engine.synthesize("Erster Satz ist hier. Zweiter Satz folgt sogleich.", "de", voice, None, options))
+    list(engine.synthesize("Ein Satz ohne Vorgaben hier.", "de", voice, None))
+
+    first, second, plain = _calls("stream")
+    for call in (first, second):
+        assert {key: call[key] for key in options} == options
+    assert (plain["seed"], plain["temperature"], plain["top_k"]) == (-1, 0.9, 50)
+
+
+def test_info_announces_the_sampling_options():
+    assert backend.Qwen3StreamBackend.info().sampling == (
+        "seed", "temperature", "top_k", "top_p", "repetition_penalty")
+
+
 def test_without_transcript_only_the_voice_fingerprint_is_sent():
     engine = _loaded()
     list(engine.synthesize("Ein ganz normaler Satz hier.", "de", _voice(engine, None), None))

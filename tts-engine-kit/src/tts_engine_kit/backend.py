@@ -11,6 +11,17 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
+# Sampling-Werte, die der Orchestrator pro Stimme mitschicken kann (additiv,
+# Heim-AI v1.28): Name -> Typ. Eine Engine meldet in EngineInfo.sampling,
+# welche davon sie versteht; nur die kommen bei ihr an.
+SAMPLING_OPTIONS: dict[str, type] = {
+    "seed": int,
+    "temperature": float,
+    "top_k": int,
+    "top_p": float,
+    "repetition_penalty": float,
+}
+
 
 @dataclass(frozen=True)
 class EngineInfo:
@@ -31,6 +42,9 @@ class EngineInfo:
     vram_mb: int | None = None
     description: str = ""
     license: str = ""
+    # Sampling-Werte aus SAMPLING_OPTIONS, die synthesize() als `options`
+    # annimmt (z. B. ("seed", "temperature")). Leer = keine.
+    sampling: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -77,4 +91,8 @@ class Backend(ABC):
     ) -> Iterator[tuple[int, bytes]]:
         """Text -> (Samplerate, PCM16 mono)-Chunks. `voice` ist das Ergebnis
         von prepare_voice (oder None ohne Sample). ValueError = ungueltige
-        Anfrage (HTTP 400), jede andere Ausnahme = Fehler der Engine (500)."""
+        Anfrage (HTTP 400), jede andere Ausnahme = Fehler der Engine (500).
+
+        Meldet die Engine `sampling` im Steckbrief, kommt zusaetzlich das
+        Keyword-Argument `options` (dict, nur gemeldete Namen, schon im
+        richtigen Typ) - aber nur, wenn der Request welche enthielt."""

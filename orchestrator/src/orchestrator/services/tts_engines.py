@@ -346,9 +346,20 @@ def public_engines(engines: dict[str, dict] | None = None) -> list[dict]:
             "per_voice": spec["per_voice"],
             "contract": spec.get("contract", False),
             "audiocpp": spec.get("audiocpp", False),
+            # Sampling-Werte, die die Engine pro Stimme annimmt (v1.28).
+            "sampling": sampling(engine_id, spec),
         }
         for engine_id, spec in engines.items()
     ]
+
+
+def sampling(engine_id: str, spec: dict | None = None) -> list[str]:
+    """Welche Sampling-Werte (Seed, Temperatur ...) die Engine versteht -
+    laut Steckbrief einer Vertrags-Engine; die anderen kennen keine."""
+    spec = spec if spec is not None else registry().get(engine_id, {})
+    if not spec.get("contract"):
+        return []
+    return [name for name in _INFO.get(engine_id, {}).get("sampling") or [] if isinstance(name, str)]
 
 
 def active_engine() -> str:
@@ -646,7 +657,8 @@ class Synthesis:
         return len(self.pcm) / 2 / self.rate * 1000 if self.rate else 0.0
 
 
-async def synthesize(engine_id: str, text: str, voice_id: str | None) -> Synthesis:
+async def synthesize(engine_id: str, text: str, voice_id: str | None,
+                     options: dict | None = None) -> Synthesis:
     """Komplette Synthese mit GENAU dieser Engine - ohne Fallback, denn
     Filler-Generierung und Probehoeren sollen die gewaehlte Engine hoeren
     lassen, nicht die Rueckfallebene."""
@@ -659,7 +671,11 @@ async def synthesize(engine_id: str, text: str, voice_id: str | None) -> Synthes
     rate = settings.target_sample_rate
     # Vertrags-Engines und audio.cpp: aufs Laden des Modells warten statt
     # sofort aufzugeben.
-    stream = spec["client"].stream(text, voice_id, **spec.get("preview_kwargs", {}))
+    kwargs = dict(spec.get("preview_kwargs", {}))
+    if options is not None and spec.get("contract"):
+        # Probehoeren mit Werten aus dem Panel statt denen der Stimme (v1.28).
+        kwargs["options"] = options
+    stream = spec["client"].stream(text, voice_id, **kwargs)
     try:
         async for chunk_rate, chunk in stream:
             if not pcm:

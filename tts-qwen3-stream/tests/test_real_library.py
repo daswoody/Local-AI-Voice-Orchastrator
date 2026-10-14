@@ -21,6 +21,8 @@ def test_backend_calls_use_real_parameter_names():
     assert {"talker_path", "codec_path", "use_fa", "clamp_fp16", "log_level"} <= set(init)
     assert {"text", "lang", "ref_spk_emb", "ref_codes", "ref_text", "codec_chunk_sec",
             "first_chunk_frames"} <= set(stream)
+    # Sampling-Werte aus dem Steckbrief (v1.28) gehen 1:1 als Keywords durch.
+    assert set(backend.Qwen3StreamBackend.info().sampling) <= set(stream)
     for method in ("extract_voice_ref", "language_names", "model_type"):
         assert callable(getattr(qwentts_cpp.QwenTTS, method))
 

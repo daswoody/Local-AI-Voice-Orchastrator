@@ -56,7 +56,9 @@ class QwenTTS:
                subtalker_top_p=None, codec_chunk_sec=0.64, first_chunk_frames=4, dump_dir=None):
         _log({"call": "stream", "text": text, "lang": lang, "ref_text": ref_text,
               "icl": ref_codes is not None, "has_spk": ref_spk_emb is not None,
-              "codec_chunk_sec": codec_chunk_sec, "first_chunk_frames": first_chunk_frames})
+              "codec_chunk_sec": codec_chunk_sec, "first_chunk_frames": first_chunk_frames,
+              "seed": seed, "temperature": temperature, "top_k": top_k, "top_p": top_p,
+              "repetition_penalty": repetition_penalty})
         # Zwei Chunks je Satz (bei "NaN" der zweite kaputt) - 0,1 s bei 24 kHz.
         for index in range(2):
             if "NaN" in text and index == 1:

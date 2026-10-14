@@ -119,6 +119,10 @@ class Qwen3StreamBackend(Backend):
                          "10 Sprachen inkl. Deutsch, streamt das Audio waehrend der Erzeugung "
                          "(GGUF, quantisiert). VRAM geschaetzt."),
             license="Apache-2.0 (Modell), MIT (qwentts.cpp)",
+            # Pro Stimme im Admin-Panel (v1.28): fester Seed und ruhigeres
+            # Sampling gegen schwankende Sprechweise. Ohne Angabe gelten die
+            # Defaults von qwentts.cpp (Zufalls-Seed, Temperatur 0.9, top_k 50).
+            sampling=("seed", "temperature", "top_k", "top_p", "repetition_penalty"),
         )
 
     @classmethod
@@ -195,7 +199,7 @@ class Qwen3StreamBackend(Backend):
             return name
         return "auto"  # Qwen3 erkennt die Sprache dann selbst
 
-    def synthesize(self, text, language, voice, instruction):
+    def synthesize(self, text, language, voice, instruction, options=None):
         if voice is None:
             raise ValueError("Qwen3-TTS braucht ein Voice-Sample - unter 'Stimmen' hochladen")
         import numpy as np
@@ -205,7 +209,7 @@ class Qwen3StreamBackend(Backend):
             stream = self._tts.stream(
                 text=sentence, lang=language_name, ref_spk_emb=voice["spk"], ref_codes=voice["codes"],
                 ref_text=voice["text"], codec_chunk_sec=CHUNK_STEPS / 12.5,
-                first_chunk_frames=FIRST_CHUNK_STEPS)
+                first_chunk_frames=FIRST_CHUNK_STEPS, **(options or {}))
             for audio, rate in stream:
                 audio = np.asarray(audio, dtype=np.float32).reshape(-1)
                 if not audio.size:

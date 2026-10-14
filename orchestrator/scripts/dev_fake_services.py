@@ -219,6 +219,7 @@ async def engine_info() -> dict:
     return {"name": "Demo-TTS (Fake)", "languages": ["de", "en"], "sample_rate": 24000,
             "needs_sample": True, "uses_transcript": True, "instructions": False,
             "streaming": "sentence", "vram_mb": 5000, "contract": 1,
+            "sampling": ["seed", "temperature", "top_k", "top_p", "repetition_penalty"],
             "description": "Fake-Engine nach dem Engine-Vertrag."}
 
 
@@ -251,6 +252,7 @@ async def engine_synthesize(
     ref_audio: UploadFile | None = File(None),
     ref_text: str | None = Form(None),
     load_timeout_s: float = Form(0.0),
+    options: str | None = Form(None),
 ) -> StreamingResponse:
     if _engine["state"] == "off":
         raise HTTPException(503, "Engine ist im Admin-Panel ausgeschaltet (GPUs)")
@@ -265,6 +267,10 @@ async def engine_synthesize(
     # Satz fuer Satz, Ton je nach Klon-Modus (mit Transkript tiefer).
     sentences = [part for part in text.replace("!", ".").replace("?", ".").split(".") if part.strip()]
     base = 200 if ref_text else 260
+    # Klang pro Stimme (v1.28) hoerbar machen: der Seed verschiebt die Tonhoehe.
+    seed = json.loads(options or "{}").get("seed")
+    if seed is not None:
+        base += seed % 7 * 25
 
     async def generate():
         for index, sentence in enumerate(sentences or [text]):

@@ -5,14 +5,19 @@
     GET  /v1/device      {assigned, effective, loaded, state, detail, model}
     POST /v1/device      {"device": "off" | "cpu" | "cuda" | "cuda:N"} - laden/entladen
     POST /v1/synthesize  Multipart: text, language, ref_audio (WAV), ref_text,
-                         instruction, voice_id, load_timeout_s
+                         instruction, voice_id, load_timeout_s, options (JSON)
                          -> PCM16-Stream (mono) mit Header X-Sample-Rate
+
+`options` (additiv, Heim-AI v1.28): Sampling-Werte wie {"seed": 42,
+"temperature": 0.7}. Ankommen nur die, die die Engine in `sampling` meldet;
+unbekannte Namen und null werden ignoriert, falsche Typen sind 400.
 
 Fehler vor dem ersten Audio kommen als saubere HTTP-Codes (400 Anfrage, 409
 belegt, 503 aus/laedt, 500 Engine) statt als abgerissener Stream: Der erste
 Chunk wird erzeugt, bevor die Antwort-Header rausgehen."""
 
 import hashlib
+import json
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -22,6 +27,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from .backend import SAMPLING_OPTIONS
 from .worker import (
     DEVICE_PATTERN,
     EngineBadRequest,
@@ -95,11 +101,13 @@ def create_app(backend_path: str, settings: WorkerSettings | None = None) -> Fas
         ref_text: str | None = Form(None),
         instruction: str | None = Form(None),
         load_timeout_s: float = Form(0.0),
+        options: str | None = Form(None),
         ref_audio: UploadFile | None = File(None),
     ) -> StreamingResponse:
         text = text.strip()
         if not text:
             raise HTTPException(status_code=400, detail="Text fehlt")
+        sampling = _sampling(options, info.sampling)
         voice = None
         if ref_audio is not None:
             wav = await ref_audio.read()
@@ -113,6 +121,7 @@ def create_app(backend_path: str, settings: WorkerSettings | None = None) -> Fas
             "voice": voice,
             "voice_id": voice_id,
             "instruction": (instruction or "").strip() or None,
+            "options": sampling,
         }
         stream = worker.synthesize(job, min(max(load_timeout_s, 0.0), _MAX_LOAD_TIMEOUT_S))
         try:
@@ -150,3 +159,26 @@ def create_app(backend_path: str, settings: WorkerSettings | None = None) -> Fas
         )
 
     return app
+
+
+def _sampling(raw: str | None, supported: tuple[str, ...]) -> dict:
+    """options-Feld -> {Name: Wert} mit nur den Werten, die die Engine kennt."""
+    if not raw or not raw.strip():
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="options: kein gueltiges JSON")
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="options: JSON-Objekt erwartet")
+    result: dict = {}
+    for name, value in data.items():
+        if name not in supported or name not in SAMPLING_OPTIONS or value is None:
+            continue
+        kind = SAMPLING_OPTIONS[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or (
+            kind is int and not float(value).is_integer()
+        ):
+            raise HTTPException(status_code=400, detail=f"options.{name}: Zahl erwartet ({kind.__name__})")
+        result[name] = kind(value)
+    return result

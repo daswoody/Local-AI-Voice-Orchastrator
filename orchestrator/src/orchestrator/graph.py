@@ -32,6 +32,10 @@ class OrchestratorState(TypedDict):
     # multimodaler content-Teil an LiteLLM (OpenAI-Format), das Modell
     # dahinter muss Vision koennen (Gemma 4 E4B: ja).
     image_data_url: str
+    # Denk-Router (v1.27): False = dieser Turn antwortet ohne Nachdenken
+    # (schnell), True/None = Modell-Default (Gemma 4: denkt). Gilt fuer
+    # alle Agent-Runden des Turns, auch nach Tool-Ergebnissen.
+    think: bool | None
     context_chunks: list[str]
     # Vollstaendiger Nachrichtenverlauf des Turns inkl. assistant-Messages
     # mit tool_calls und deren tool-Ergebnissen (OpenAI-Format).
@@ -65,11 +69,14 @@ async def agent_node(state: OrchestratorState) -> OrchestratorState:
         tools = await state["executor"].list_openai_tools() or None
 
     streamer = state.get("streamer")
+    think = state.get("think")
     if streamer is not None:
-        message = await litellm_client.stream_chat_message(messages, tools, on_delta=streamer.delta)
+        message = await litellm_client.stream_chat_message(
+            messages, tools, on_delta=streamer.delta, think=think
+        )
         await streamer.round_end()
     else:
-        message = await litellm_client.chat_message(messages, tools)
+        message = await litellm_client.chat_message(messages, tools, think=think)
     messages.append(message)
 
     return {
@@ -215,6 +222,7 @@ def initial_state(
     voice_mode: bool = False,
     history: list[dict] | None = None,
     streamer: Any = None,
+    think: bool | None = None,
 ) -> OrchestratorState:
     return {
         "text": text,
@@ -223,6 +231,7 @@ def initial_state(
         "voice_mode": voice_mode,
         "history": history or [],
         "image_data_url": image_data_url,
+        "think": think,
         "context_chunks": [],
         "messages": [],
         "executor": executor,

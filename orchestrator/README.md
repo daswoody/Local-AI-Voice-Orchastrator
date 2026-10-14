@@ -27,7 +27,7 @@ also sofort die neue Version statt einer alten aus dem Cache.
 
 | Bereich | Funktion |
 |---|---|
-| Modelle | In LiteLLM registrierte Modelle anzeigen und das aktive Modell setzen (LM Studio laedt per JIT beim ersten Request, Entladen per Idle-TTL) |
+| Modelle | In LiteLLM registrierte Modelle anzeigen und das aktive Modell setzen (LM Studio laedt per JIT beim ersten Request, Entladen per Idle-TTL); "Nachdenken": Automatisch / Immer / Nie (Denk-Router, siehe unten) |
 | Wissen (RAG) | Pruefen, ob und warum die KI Weaviate (nicht) nutzt: Erreichbarkeit, je Collection Vectorizer/Properties/Anzahl Eintraege, Problemliste; Testsuche wie im Chat-Turn (Treffer mit Certainty, was als Kontext ans LLM geht, als Gast/Tier 1-3); Eintrag anlegen (mit `passage:`-Praefix) |
 | Sprachausgabe | TTS-Engine der gesprochenen Antworten waehlen (XTTS / Piper, jedes Sprachmodell eines audio.cpp-Servers und jede Engine nach dem Engine-Vertrag) mit Live-Status; Aktivieren laedt die Engine und entlaedt andere Sprachausgaben auf derselben Karte; Probehoeren pro Engine + Stimme mit Latenzmessung (Vergleich auf der echten Hardware); audio.cpp-Adresse, -Karte und eingebaute Stimme je Modell; Vertrags-Engines per ID + Adresse eintragen |
 | GPUs | Karten mit Name, Compute-Capability und live belegtem VRAM; pro Dienst die Karte waehlen (CPU / GPU 0 / GPU 1), XTTS und Vertrags-Engines auch ganz ausschalten ("Aus"); audio.cpp als Info-Zeile. STT, XTTS und Vertrags-Engines laden ihr Modell dabei zur Laufzeit neu - kein Container-Neustart. Piper ist CPU-only, LM Studio laeuft auf dem Host und wird dort eingestellt (4.2) |
@@ -131,6 +131,52 @@ XTTS verfaelscht sich bei parallelen Synthesen gegenseitig - das war die
 Ursache fuer Fetzen und Zeitlupe bis v1.15. **Nach dem Update auf v1.16
 alle Filler einmal neu generieren**, aeltere Aufnahmen koennen noch
 betroffen sein.
+
+## Nachdenken nur bei Bedarf: Denk-Router (v1.27)
+
+Gemma 4 denkt in LM Studio vor jeder Antwort - das kostet schon bei
+"Was ist 17*23?" ~10 s statt ~0,5 s. Der Orchestrator entscheidet deshalb
+pro Frage, ob das Modell nachdenken darf (`services/thinking_router.py`,
+Regeln in Spezifikation 4.2): bei "warum/erklaere/vergleiche/plane",
+Rechenaufgaben, Bildern, langen Anfragen oder "denk genau nach" ja,
+sonst nein. Denkt ein Sprach-Turn, spielt der Nachdenken-Filler sofort.
+
+Einrichtung:
+
+1. In LM Studio "Enable Thinking" des Modells **an** lassen - der
+   Orchestrator schaltet es pro Anfrage ab, nicht umgekehrt.
+2. Nichts in LiteLLM noetig: Der Orchestrator schickt
+   `{"extra_body": {"reasoning_effort": "none"}}`, das LiteLLM unveraendert
+   an LM Studio weiterreicht (ein direktes `reasoning_effort` verwirft
+   LiteLLM fuer LM-Studio-Modelle).
+3. Admin-Panel -> Modelle -> Nachdenken: "Automatisch" (Default).
+
+Pro Turn steht die Entscheidung im Log, z. B.
+`Denk-Router: denkt (Stichwort 'warum') - 'Warum ist der Himmel blau?'`
+bzw. `Denk-Router: schnell (kurze/alltaegliche Anfrage) - 'Mach das Licht an'`.
+Liegt der Router oft daneben, die Faelle sammeln - daraus lassen sich die
+Regeln nachschaerfen.
+
+Pruefen, ob das Abschalten bei dir greift (aus dem Orchestrator-Container,
+LiteLLM ist nur im Docker-Netz erreichbar):
+
+```bash
+docker exec -i heimai-orchestrator python - <<'PY'
+import asyncio, time
+from orchestrator.services.litellm_client import litellm_client
+async def main():
+    for think in (False, True):
+        t = time.time()
+        msg = await litellm_client.chat_message(
+            [{"role": "user", "content": f"Was ist 17*23? ({think})"}], think=think)
+        print(f"think={think}: {time.time() - t:.1f}s, denkt: {bool(msg.get('reasoning_content'))}")
+asyncio.run(main())
+PY
+```
+
+Erwartet: `think=False` unter ~1 s ohne Denken, `think=True` mehrere
+Sekunden mit Denken. (Der Zusatz in der Frage umgeht LiteLLMs
+Response-Cache - identische Anfragen kommen sonst in ~0,04 s aus dem Cache.)
 
 ## Sprachausgabe: TTS-Engine wechseln (v1.17)
 

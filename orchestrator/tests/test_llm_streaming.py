@@ -187,7 +187,7 @@ def _patch_streaming(monkeypatch, rounds: list[list], summary: str | None = None
     record: dict = {"spoken": [], "summary_calls": []}
     calls = {"n": 0}
 
-    async def fake_stream(messages, tools=None, on_delta=None, model=None):
+    async def fake_stream(messages, tools=None, on_delta=None, model=None, think=None):
         parts = rounds[min(calls["n"], len(rounds) - 1)]
         calls["n"] += 1
         content, tool_calls = [], None
@@ -204,7 +204,7 @@ def _patch_streaming(monkeypatch, rounds: list[list], summary: str | None = None
             message["tool_calls"] = tool_calls
         return message
 
-    async def fake_chat(messages, tools=None, model=None):
+    async def fake_chat(messages, tools=None, model=None, think=None):
         record["summary_calls"].append(messages)
         return {"role": "assistant", "content": summary or ""}
 
@@ -412,7 +412,7 @@ def test_interrupt_before_the_first_sentence_stops_the_llm(client, monkeypatch):
     _patch_streaming(monkeypatch, [[]])
     state = {"emitted": 0, "cancelled": False}
 
-    async def endless_stream(messages, tools=None, on_delta=None, model=None):
+    async def endless_stream(messages, tools=None, on_delta=None, model=None, think=None):
         try:
             for index in range(100):
                 await on_delta(f"wort{index} ")
@@ -517,7 +517,7 @@ def test_summary_switch_also_applies_without_streaming(client, monkeypatch):
     long_text = "Sehr ausfuehrliche Antwort. " * 30
     spoken: list[str] = []
 
-    async def fake_chat(messages, tools=None):
+    async def fake_chat(messages, tools=None, think=None):
         return {"role": "assistant", "content": long_text}
 
     async def capture_xtts(text, voice_id, language=None):

@@ -45,7 +45,7 @@ def _scripted_llm(monkeypatch, script: list[dict], transcript: list | None = Non
     """Fake-LLM, das eine feste Antwortfolge abspielt (Agent-Loop-Runden)."""
     responses = list(script)
 
-    async def fake_chat(messages, tools=None):
+    async def fake_chat(messages, tools=None, think=None):
         if transcript is not None:
             transcript.append({"messages": [dict(m) for m in messages], "tools": tools})
         return responses.pop(0)
@@ -227,7 +227,7 @@ def test_tool_loop_terminates_at_iteration_limit(client, monkeypatch):
 
     calls = {"count": 0}
 
-    async def stubborn_llm(messages, tools=None):
+    async def stubborn_llm(messages, tools=None, think=None):
         calls["count"] += 1
         if tools:
             return _tool_call("Time-current_time", {}, call_id=f"call_{calls['count']}")
@@ -580,7 +580,7 @@ def _card_agent_llm(monkeypatch, main_script: list[dict], agent_reply: str,
     code-card-Agent (eigenes Modell) antwortet mit agent_reply."""
     responses = list(main_script)
 
-    async def fake_chat(messages, tools=None, model=None):
+    async def fake_chat(messages, tools=None, model=None, think=None):
         if model == "cloud/card":
             if agent_calls is not None:
                 agent_calls.append({"messages": [dict(m) for m in messages]})
@@ -678,7 +678,7 @@ def test_card_agent_failure_is_correctable_tool_error(client, monkeypatch):
                        "", "cloud/card")
     transcript = []
 
-    async def fake_chat(messages, tools=None, model=None):
+    async def fake_chat(messages, tools=None, model=None, think=None):
         if model == "cloud/card":
             return {"role": "assistant", "content": "Ich kann gerade nicht."}
         transcript.append([dict(m) for m in messages])
@@ -933,7 +933,7 @@ def test_card_capability_is_anchored_in_system_prompt(client, monkeypatch):
 
     captured = {}
 
-    async def capture_chat(messages, tools=None, model=None):
+    async def capture_chat(messages, tools=None, model=None, think=None):
         captured["system"] = messages[0]["content"]
         return {"role": "assistant", "content": "Ok."}
 

@@ -12,7 +12,7 @@ from ..config import settings
 from ..graph import initial_state, orchestrator_graph
 from ..schemas import DeviceTool
 from ..security import resolve_token
-from ..services import filler_service, tts_engines
+from ..services import filler_service, thinking_router, tts_engines
 from ..services.litellm_client import litellm_client
 from ..services.sentences import SentenceStream, split_sentences
 from ..services.stt_client import stt_client
@@ -309,6 +309,12 @@ class StreamSession:
             # den Chat, bei Sprach-Turns Satz fuer Satz in die Sprachausgabe.
             if repos.llm_streaming_enabled():
                 streamer = TurnStreamer(self, want_audio)
+            # Denk-Router (v1.27): Nachdenken kostet bei Gemma 4 ~10 s -
+            # nur bei Fragen, die danach aussehen; alles andere antwortet
+            # in unter einer Sekunde.
+            thinking = thinking_router.decide(text, has_image=bool(image_data_url))
+            logger.info("Denk-Router: %s (%s) - %r", "denkt" if thinking.think else "schnell",
+                        thinking.reason, text[:80])
             llm_task = asyncio.create_task(
                 orchestrator_graph.ainvoke(
                     initial_state(
@@ -318,6 +324,7 @@ class StreamSession:
                         voice_mode=want_audio,
                         history=history,
                         streamer=streamer,
+                        think=thinking.think,
                     )
                 )
             )
@@ -326,13 +333,15 @@ class StreamSession:
                 # Filler ZUERST waehlen - sein delay_ms bestimmt, wie lange
                 # die Antwort Zeit hat, bevor er spielen darf. Schnelle
                 # Antworten blockiert so kein Filler mehr. Beim Streaming
-                # zaehlt schon der erste fertige Satz als Antwort.
+                # zaehlt schon der erste fertige Satz als Antwort. Hat der
+                # Denk-Router Nachdenken gewaehlt, ist schon klar, dass es
+                # dauert - dann spielt der Filler sofort.
                 if streamer is None:
-                    await self._race_filler(llm_task, kind="thinking")
+                    await self._race_filler(llm_task, kind="thinking", immediate=thinking.think)
                 else:
                     first = asyncio.create_task(streamer.first_answer(llm_task))
                     try:
-                        await self._race_filler(first, kind="thinking")
+                        await self._race_filler(first, kind="thinking", immediate=thinking.think)
                     finally:
                         first.cancel()
             if streamer is not None and want_audio:
@@ -478,19 +487,24 @@ class StreamSession:
                 [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": response_text},
-                ]
+                ],
+                # Kuerzen braucht kein Nachdenken (v1.27) - sonst kaemen
+                # zur Antwort noch einmal ~10 s Denkzeit hinzu.
+                think=False,
             )
             return summary.strip()
         except Exception:
             logger.warning("Sprach-Kurzfassung fehlgeschlagen - spreche den vollen Text")
             return ""
 
-    async def _race_filler(self, pending: asyncio.Task, kind: str, tool_name: str | None = None) -> None:
+    async def _race_filler(self, pending: asyncio.Task, kind: str, tool_name: str | None = None,
+                           immediate: bool = False) -> None:
         """Filler gegen die laufende Arbeit rennen lassen: Der ausgewaehlte
         Filler bestimmt per delay_ms selbst, wie lange gewartet wird, bevor
         er spielen darf. Ist die Arbeit (LLM-Antwort bzw. Tool) vorher
         fertig, entfaellt er - schnelle Antworten werden nicht blockiert.
-        delay_ms = 0 heisst: sofort spielen."""
+        delay_ms = 0 oder immediate (Arbeit dauert sicher) heisst: sofort
+        spielen."""
         if self._filler_played:
             return
         try:
@@ -501,7 +515,7 @@ class StreamSession:
             delay_ms = filler.get("delay_ms")
             if delay_ms is None:
                 delay_ms = settings.filler_delay_ms
-            if delay_ms > 0:
+            if delay_ms > 0 and not immediate:
                 done, _ = await asyncio.wait({pending}, timeout=delay_ms / 1000)
                 if done or self._filler_played:
                     return

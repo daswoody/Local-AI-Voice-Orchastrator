@@ -60,7 +60,7 @@ def _set_thinking_delays(ms: int) -> None:
     for f in repos.fillers_for_kind("thinking"):
         repos.update_filler(f["id"], f["title"], f["text"], f["trigger_id"], True, delay_ms=ms)
 
-async def _slow_chat(messages, tools=None):
+async def _slow_chat(messages, tools=None, think=None):
     await asyncio.sleep(0.3)
     return {"role": "assistant", "content": "Antwort"}
 
@@ -111,7 +111,7 @@ def test_piper_fallback_when_no_cached_audio(client, monkeypatch):
 def test_user_specific_voice_and_prompt_from_token(client, monkeypatch):
     captured = {}
 
-    async def capture_chat(messages, tools=None):
+    async def capture_chat(messages, tools=None, think=None):
         captured["system"] = messages[0]["content"]
         return {"role": "assistant", "content": "Ok"}
 

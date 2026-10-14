@@ -91,7 +91,7 @@ def test_enabled_agents_appear_as_tools(client, monkeypatch):
 
     offered = {}
 
-    async def capture_chat(messages, tools=None, model=None):
+    async def capture_chat(messages, tools=None, model=None, think=None):
         offered["tools"] = tools or []
         return {"role": "assistant", "content": "Ok."}
 
@@ -121,7 +121,7 @@ def test_agent_dispatch_runs_own_llm_with_own_model_and_prompt(client, monkeypat
 
     calls = []
 
-    async def fake_chat(messages, tools=None, model=None):
+    async def fake_chat(messages, tools=None, model=None, think=None):
         calls.append({"messages": [dict(m) for m in messages], "tools": tools, "model": model})
         if model == "cloud/search":
             return {"role": "assistant", "content": "Ergebnis: Es regnet morgen."}
@@ -170,7 +170,7 @@ def test_agent_can_use_server_tools(client, monkeypatch):
 
     agent_rounds = {"count": 0}
 
-    async def fake_chat(messages, tools=None, model=None):
+    async def fake_chat(messages, tools=None, model=None, think=None):
         if model == "cloud/search":
             agent_rounds["count"] += 1
             # Agent-Schleife: Schemas muessen auch hier normalisiert sein
@@ -204,7 +204,7 @@ def test_agent_failure_becomes_tool_error_not_turn_abort(client, monkeypatch):
 
     transcript = []
 
-    async def fake_chat(messages, tools=None, model=None):
+    async def fake_chat(messages, tools=None, model=None, think=None):
         if model == "cloud/search":
             raise RuntimeError("LLM-Fehler 401 (Modell cloud/search): kein API-Key")
         transcript.append([dict(m) for m in messages])

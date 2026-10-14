@@ -7,6 +7,9 @@ class Settings(BaseSettings):
     litellm_base_url: str = "http://litellm:4000"
     litellm_api_key: str = "sk-changeme"
     litellm_model: str = "gemma-4-e4b"
+    # Denk-Router (v1.27), solange im Admin-Panel nichts gewaehlt wurde:
+    # auto = pro Frage entscheiden, on = immer denken, off = nie denken.
+    thinking_mode: str = "auto"
 
     # MCP-Gateway von LiteLLM (4.6): aggregiert alle registrierten
     # MCP-Server (z. B. mcp-time) unter einem Endpoint.

@@ -18,7 +18,7 @@ from ..audio import pcm16_to_wav, wav_to_pcm16
 from ..config import settings
 from ..schemas import CardLayout
 from ..security import hash_password, require_admin
-from ..services import audiocpp, filler_service, gpu_manager, tts_engines
+from ..services import audiocpp, filler_service, gpu_manager, thinking_router, tts_engines
 from ..services.litellm_client import litellm_client
 from ..services.stt_client import stt_client
 from ..services.tts_client import normalize_base_url
@@ -790,6 +790,27 @@ async def activate_model(payload: ModelActivatePayload) -> dict:
         raise HTTPException(status_code=404, detail=f"Modell '{payload.model}' ist in LiteLLM nicht registriert")
     repos.set_setting("active_model", payload.model)
     return {"active_model": payload.model}
+
+
+# ---- Denk-Router (v1.27) -------------------------------------------------------------
+#
+# Server-weit wie das aktive Modell: auto = der Router entscheidet pro Frage,
+# on = immer nachdenken (Modell-Default), off = nie.
+
+
+class ThinkingModePayload(BaseModel):
+    mode: Literal["auto", "on", "off"]
+
+
+@router.get("/thinking")
+def get_thinking_mode() -> dict:
+    return {"mode": thinking_router.current_mode()}
+
+
+@router.post("/thinking")
+def set_thinking_mode(payload: ThinkingModePayload) -> dict:
+    repos.set_setting(thinking_router.MODE_SETTING, payload.mode)
+    return {"mode": payload.mode}
 
 
 # ---- Wissen / RAG (Weaviate, 4.8/4.9) -------------------------------------------------

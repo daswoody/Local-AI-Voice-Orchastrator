@@ -154,7 +154,7 @@ def test_voice_turn_gets_voice_mode_prompt_text_turn_does_not(client, monkeypatc
 
     captured = []
 
-    async def capture_chat(messages, tools=None, model=None):
+    async def capture_chat(messages, tools=None, model=None, think=None):
         captured.append(messages[0]["content"])
         return {"role": "assistant", "content": "Kurz und knapp."}
 
@@ -201,7 +201,7 @@ def test_history_with_card_data_reaches_the_llm(client, monkeypatch):
 
     captured = {}
 
-    async def capture_chat(messages, tools=None, model=None):
+    async def capture_chat(messages, tools=None, model=None, think=None):
         captured["messages"] = [dict(m) for m in messages]
         return {"role": "assistant", "content": "Klar, Goeteborg geht auch."}
 

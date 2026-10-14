@@ -199,6 +199,7 @@ async function playBlob(blob) {
 views.models = async () => {
   let rows = "";
   let notice = "";
+  const thinking = await api.get("/v1/admin/thinking");
   try {
     const data = await api.get("/v1/admin/models");
     rows = data.models.map((model) => {
@@ -224,6 +225,17 @@ views.models = async () => {
         <thead><tr><th>Modell</th><th>Status</th><th></th></tr></thead>
         <tbody>${rows || "<tr><td colspan='3'>Keine Modelle gefunden.</td></tr>"}</tbody>
       </table>
+    </section>
+    <section class="block">
+      <h2>Nachdenken</h2>
+      <p class="hint">Denkende Modelle wie Gemma 4 antworten mit Nachdenken deutlich besser, brauchen dafuer aber oft 10 Sekunden statt unter einer. <strong>Automatisch</strong> laesst das Modell nur bei Fragen nachdenken, die danach aussehen (warum/erklaere/vergleiche/plane, Rechenaufgaben, Bilder, lange Anfragen oder "denk genau nach") &ndash; dann spielt der Nachdenken-Filler sofort. Die Entscheidung pro Frage steht im Orchestrator-Log ("Denk-Router"). Voraussetzung: "Enable Thinking" des Modells in LM Studio bleibt an; abgeschaltet wird pro Anfrage.</p>
+      <label>Modus
+        <select data-action-change="setThinkingMode">
+          ${[["auto", "Automatisch (empfohlen)"], ["on", "Immer nachdenken"], ["off", "Nie nachdenken"]]
+            .map(([value, label]) => `<option value="${value}" ${thinking.mode === value ? "selected" : ""}>${label}</option>`)
+            .join("")}
+        </select>
+      </label>
     </section>`;
 };
 
@@ -1256,6 +1268,7 @@ const formActions = {
 
 const buttonActions = {
   activateModel: (data) => api.post("/v1/admin/models/activate", { model: data.id }),
+  setThinkingMode: (data, element) => api.post("/v1/admin/thinking", { mode: element.value }),
 
   /* Eine gerade nicht erreichbare Engine erst nach Rueckfrage aktivieren -
    * vorab waehlen bleibt moeglich, aber nicht aus Versehen. */

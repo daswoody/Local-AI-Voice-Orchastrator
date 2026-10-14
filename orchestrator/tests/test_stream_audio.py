@@ -37,7 +37,7 @@ async def _fake_xtts_stream(text, voice_id, language=None):
 
 
 def _patch_pipeline(monkeypatch, llm_response="Antwort", llm_delay=0.0):
-    async def fake_chat(messages, tools=None):
+    async def fake_chat(messages, tools=None, think=None):
         if llm_delay:
             await asyncio.sleep(llm_delay)
         return {"role": "assistant", "content": llm_response}
@@ -224,7 +224,7 @@ def test_long_answer_is_summarized_for_speech(client, monkeypatch):
 
     call_count = {"n": 0}
 
-    async def fake_chat(messages, tools=None):
+    async def fake_chat(messages, tools=None, think=None):
         call_count["n"] += 1
         if call_count["n"] == 1:
             return {"role": "assistant", "content": long_text}

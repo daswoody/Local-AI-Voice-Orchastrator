@@ -717,7 +717,12 @@ Tool-Frames `call_id`/`ok`/`result`, Manifest im hello-Feld `tools`,
   Kurzfassung des Rests; ohne Kurzfassung die ganze Antwort.
 - Streaming, Kurzfassung und Limit sind im Admin-Panel unter
   **Charakter > Ablauf der Sprachausgabe** schaltbar (ueberschreiben die
-  `.env`) - zum direkten Vergleich mit und ohne Streaming.
+  `.env`) - zum direkten Vergleich mit und ohne Streaming. Limit 0 =
+  unbegrenzt (ganze Antwort sprechen), nach oben offen.
+- **Barge-in mit Streaming:** Nach `interrupt` kann der Client noch Frames
+  des alten Turns bekommen (Audio und Text kommen laufend). Die Web-UI
+  verwirft deshalb alle Turn-Frames bis zum `done`, das der Server auf
+  jedes `interrupt` schickt - andere Clients sollten es genauso machen.
 
 ## Bekannte Einschraenkungen dieses Stands
 

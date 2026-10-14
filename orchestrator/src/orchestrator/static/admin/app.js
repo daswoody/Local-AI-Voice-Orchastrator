@@ -520,10 +520,10 @@ views.character = async () => {
           LLM-Streaming: Antwort Satz fuer Satz sprechen, waehrend das LLM noch schreibt</label>
         <label class="full check"><input type="checkbox" name="voice_summary_enabled" ${data.voice_summary_enabled ? "checked" : ""}>
           Audio-Zusammenfassung fuer lange Antworten</label>
-        <label>Limit in Zeichen
-          <input type="number" name="voice_summary_max_chars" min="50" max="5000" value="${esc(String(data.voice_summary_max_chars))}">
+        <label>Limit in Zeichen (0 = unbegrenzt)
+          <input type="number" name="voice_summary_max_chars" min="0" step="1" value="${esc(String(data.voice_summary_max_chars))}">
         </label>
-        <p class="hint full">Ohne Streaming wartet die Sprachausgabe auf die fertige Antwort; ist sie laenger als das Limit, wird die Zusammenfassung gesprochen. Mit Streaming spricht die Assistenz schon waehrend das LLM schreibt, live bis zum Limit - ist die Antwort laenger, folgt danach die Zusammenfassung des Rests. Ohne Zusammenfassung wird die ganze Antwort gesprochen. Der Chat zeigt mit Streaming den Text, waehrend er entsteht.</p>
+        <p class="hint full">Ohne Streaming wartet die Sprachausgabe auf die fertige Antwort; ist sie laenger als das Limit, wird die Zusammenfassung gesprochen. Mit Streaming spricht die Assistenz schon waehrend das LLM schreibt, live bis zum Limit - ist die Antwort laenger, folgt danach die Zusammenfassung des Rests. Ohne Zusammenfassung oder mit Limit 0 (unbegrenzt) wird die ganze Antwort gesprochen. Der Chat zeigt mit Streaming den Text, waehrend er entsteht.</p>
         <div><button type="submit">Speichern</button></div>
       </form>
     </section>`;
@@ -1010,7 +1010,8 @@ const formActions = {
     voice_summary_prompt: form.voice_summary_prompt.value,
     llm_streaming: form.llm_streaming.checked,
     voice_summary_enabled: form.voice_summary_enabled.checked,
-    voice_summary_max_chars: parseInt(form.voice_summary_max_chars.value, 10) || null,
+    voice_summary_max_chars: Number.isNaN(parseInt(form.voice_summary_max_chars.value, 10))
+      ? null : parseInt(form.voice_summary_max_chars.value, 10),
   }),
 
   async saveUser(form) {

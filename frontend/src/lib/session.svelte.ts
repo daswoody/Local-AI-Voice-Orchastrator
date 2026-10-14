@@ -227,8 +227,16 @@ export async function ensureSession(): Promise<void> {
     onConversation: (conversationId) => {
       app.conversationId = conversationId;
     },
-    onDone: () => {
+    onDone: (interrupted) => {
       app.thinking = false;
+      // Abgebrochene Antwort (Barge-in, v1.26.1): der bis dahin gestreamte
+      // Text bleibt stehen, der naechste Turn bekommt eine neue Nachricht.
+      if (assistantMsgId !== null) {
+        const msg = app.messages.find((m) => m.id === assistantMsgId);
+        if (msg) msg.final = true;
+        assistantMsgId = null;
+        currentAssistantText = "";
+      }
       // Turn zu Ende: Chips-Zeile abschliessen (noch laufende Eintraege
       // gelten als erledigt - z. B. nach einem Barge-in).
       if (toolsMsgId !== null) {
@@ -241,7 +249,8 @@ export async function ensureSession(): Promise<void> {
         }
         toolsMsgId = null;
       }
-      ttsFallback();
+      // Nach einem Barge-in nichts nachtraeglich vorlesen.
+      if (!interrupted) ttsFallback();
       audioThisTurn = false;
       serverAudioThisTurn = false;
       updateIndicator();

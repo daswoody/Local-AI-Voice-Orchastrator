@@ -205,8 +205,17 @@ def voice_summary_enabled() -> bool:
 
 
 def voice_summary_max_chars() -> int:
+    """0 = unbegrenzt (v1.26.1)."""
     value = get_setting(VOICE_SUMMARY_MAX_CHARS_SETTING)
     return int(value) if value and value.isdigit() else settings.voice_summary_max_chars
+
+
+def voice_summary_limit() -> int | None:
+    """Ab wie vielen Zeichen die Sprachausgabe zur Kurzfassung wechselt;
+    None = nie (Kurzfassung aus oder Limit 0 = unbegrenzt)."""
+    if not voice_summary_enabled():
+        return None
+    return voice_summary_max_chars() or None
 
 
 def set_speech_flow(

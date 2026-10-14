@@ -294,6 +294,7 @@ class StreamSession:
 
     async def _respond(self, text: str, want_audio: bool, image_data_url: str = "") -> None:
         streamer: TurnStreamer | None = None
+        llm_task: asyncio.Task | None = None
         try:
             self._filler_played = False
             self._turn_cards = []
@@ -376,6 +377,15 @@ class StreamSession:
             if streamer is not None:
                 # Barge-in oder Fehler: die Sprachausgabe endet mit dem Turn.
                 streamer.cancel()
+            if llm_task is not None and not llm_task.done():
+                # Abbruch waehrend des Filler-Rennens (v1.26.1): Dort wartet
+                # _respond nicht auf llm_task, die Absage erreichte das LLM
+                # also nicht - es schrieb weiter, schickte Deltas und haette
+                # sogar noch Tools aufgerufen. Erst wenn es steht, darf
+                # cancel_active das done schicken.
+                llm_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await asyncio.wait({llm_task}, timeout=2.0)
 
     def _make_executor(self, want_audio: bool) -> ToolExecutor:
         """Session-gebundener Executor (1.12): Geraete-Tools aus dem
@@ -449,7 +459,8 @@ class StreamSession:
         """Kurze Sprachfassung fuer lange Antworten (zweiter, kleiner
         LLM-Call; Schalter und Limit im Panel, v1.26). Schlaegt er fehl,
         wird eben der volle Text gesprochen - Komfort-Feature, kein Muss."""
-        if not repos.voice_summary_enabled() or len(response_text) <= repos.voice_summary_max_chars():
+        limit = repos.voice_summary_limit()
+        if limit is None or len(response_text) <= limit:
             return response_text
         return await self._summarize(response_text) or response_text
 
@@ -570,6 +581,10 @@ _CONTINUATION_PROMPT = (
 )
 
 
+class TurnCancelled(Exception):
+    """Delta nach dem Abbruch des Turns (Barge-in) - beendet den LLM-Stream."""
+
+
 class TurnStreamer:
     """LLM-Streaming eines Turns (v1.26). Bekommt die Text-Deltas aus dem
     Graphen: Jedes Delta geht als assistant_text (final=false) an den
@@ -590,7 +605,7 @@ class TurnStreamer:
         self.sentences = SentenceStream()
         self.queue: asyncio.Queue[str | None] = asyncio.Queue()
         self.first_sentence = asyncio.Event()
-        self.limit = repos.voice_summary_max_chars() if repos.voice_summary_enabled() else None
+        self.limit = repos.voice_summary_limit()
         self.spoken: list[str] = []
         self.skipped: list[str] = []
         self.engine_id: str | None = None
@@ -598,10 +613,15 @@ class TurnStreamer:
         self.audio_sent = False
         self.failed = False
         self.worker: asyncio.Task | None = None
+        self.closed = False
 
     # ---- Seite des LLM (Graph) ------------------------------------------
 
     async def delta(self, text: str) -> None:
+        if self.closed:
+            # Turn abgebrochen: kein Delta mehr an den Client, und der
+            # LLM-Stream endet hier spaetestens beim naechsten Token.
+            raise TurnCancelled()
         await self.session.ws.send_json({"type": "assistant_text", "text": text, "final": False})
         if self.want_audio:
             self._enqueue(self.sentences.feed(text))
@@ -648,6 +668,7 @@ class TurnStreamer:
             await self.session.ws.send_json({"type": "audio_end"})
 
     def cancel(self) -> None:
+        self.closed = True
         if self.worker is not None and not self.worker.done():
             self.worker.cancel()
 

@@ -18,7 +18,8 @@ export interface SessionCallbacks {
    *  gerade laeuft bzw. fertig ist. */
   onToolActivity?: (tool: string, status: "running" | "done" | "error") => void;
   onConversation?: (conversationId: string) => void;
-  onDone?: () => void;
+  /** interrupted: done eines per interrupt abgebrochenen Turns. */
+  onDone?: (interrupted: boolean) => void;
   onError?: (message: string) => void;
   onClose?: () => void;
 }
@@ -47,9 +48,18 @@ export function int16ToB64(pcm: Int16Array): string {
   return btoa(binary);
 }
 
+// Frames eines Turns, die nach einem interrupt noch unterwegs sein koennen
+// (v1.26.1): Mit LLM-Streaming schickt der Server Text und Audio, waehrend
+// er schreibt - was nach dem Barge-in noch eintrifft, gehoert zum
+// abgebrochenen Turn und wird bis zu dessen done verworfen.
+const TURN_FRAMES = new Set([
+  "assistant_text", "audio_chunk", "audio_end", "card", "tool_call", "tool_activity",
+]);
+
 export class AssistantSession {
   private ws: WebSocket | null = null;
   private callbacks: SessionCallbacks;
+  private discarding = false;
 
   constructor(callbacks: SessionCallbacks) {
     this.callbacks = callbacks;
@@ -123,6 +133,9 @@ export class AssistantSession {
   }
 
   interrupt(): void {
+    // Der Server antwortet auf jedes interrupt mit einem done - bis dahin
+    // ist alles Turn-Bezogene Rest des abgebrochenen Turns.
+    if (this.connected) this.discarding = true;
     this.send({ type: "interrupt" });
   }
 
@@ -131,7 +144,9 @@ export class AssistantSession {
   }
 
   private dispatch(frame: Record<string, never>): void {
-    switch (frame["type"] as string) {
+    const type = frame["type"] as string;
+    if (this.discarding && TURN_FRAMES.has(type)) return;
+    switch (type) {
       case "transcript":
         this.callbacks.onTranscript?.(frame["text"] ?? "", frame["final"] ?? false);
         break;
@@ -163,9 +178,12 @@ export class AssistantSession {
       case "conversation":
         this.callbacks.onConversation?.(frame["conversation_id"]);
         break;
-      case "done":
-        this.callbacks.onDone?.();
+      case "done": {
+        const interrupted = this.discarding;
+        this.discarding = false;
+        this.callbacks.onDone?.(interrupted);
         break;
+      }
       case "error":
         this.callbacks.onError?.(frame["message"] ?? "Unbekannter Fehler");
         break;

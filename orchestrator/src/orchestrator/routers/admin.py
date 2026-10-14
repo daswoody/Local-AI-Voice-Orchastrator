@@ -127,7 +127,8 @@ class CharacterPayload(BaseModel):
     # Ablauf der Sprachausgabe (v1.26); None = unveraendert lassen.
     llm_streaming: bool | None = None
     voice_summary_enabled: bool | None = None
-    voice_summary_max_chars: int | None = Field(default=None, ge=50, le=5000)
+    # 0 = unbegrenzt, nach oben offen (v1.26.1).
+    voice_summary_max_chars: int | None = Field(default=None, ge=0)
 
 
 def _character() -> dict:

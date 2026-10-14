@@ -3,6 +3,7 @@ mitschreiben und Satz fuer Satz sprechen, waehrend das LLM noch schreibt."""
 
 import asyncio
 import json
+import time
 from unittest.mock import AsyncMock
 
 import httpx
@@ -404,6 +405,45 @@ def test_interrupt_stops_the_streamed_speech(client, monkeypatch):
     assert not any(f["type"] == "assistant_text" and f.get("final") for f in frames)
 
 
+def test_interrupt_before_the_first_sentence_stops_the_llm(client, monkeypatch):
+    """Barge-in, solange das Filler-Rennen noch laeuft (noch kein Satz
+    fertig): Vorher lief das LLM weiter und schickte Deltas nach dem done
+    (v1.26.1). Jetzt endet der LLM-Stream mit dem Turn."""
+    _patch_streaming(monkeypatch, [[]])
+    state = {"emitted": 0, "cancelled": False}
+
+    async def endless_stream(messages, tools=None, on_delta=None, model=None):
+        try:
+            for index in range(100):
+                await on_delta(f"wort{index} ")
+                state["emitted"] += 1
+                await asyncio.sleep(0.02)
+        except asyncio.CancelledError:
+            state["cancelled"] = True
+            raise
+        return {"role": "assistant", "content": "nie"}
+
+    monkeypatch.setattr(graph_module.litellm_client, "stream_chat_message", endless_stream)
+    monkeypatch.setattr(settings, "filler_enabled", True)
+    monkeypatch.setattr(stream_module.filler_service, "select_filler",
+                        lambda kind, voice_id, tool_name=None: {"delay_ms": 10000, "path": None, "text": "Moment."})
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "talk"})
+        _send_audio_input(ws)
+        while ws.receive_json()["type"] != "assistant_text":
+            pass
+        ws.send_json({"type": "interrupt"})
+        _collect_until_done(ws)
+        emitted_at_done = state["emitted"]
+        # Nach dem done schreibt das LLM nicht weiter.
+        time.sleep(0.3)
+
+    assert state["cancelled"] is True
+    assert state["emitted"] == emitted_at_done
+
+
 # ---- Schalter im Panel ---------------------------------------------------------------
 
 
@@ -438,9 +478,38 @@ def test_saving_the_prompt_alone_does_not_pin_the_env_defaults(client, admin_hea
     assert repos.llm_streaming_enabled() is True
     assert repos.voice_summary_max_chars() == 123
 
-    too_small = client.put("/v1/admin/character", headers=admin_headers,
-                           json={"prompt": "x", "voice_summary_max_chars": 5})
-    assert too_small.status_code == 422
+    negative = client.put("/v1/admin/character", headers=admin_headers,
+                          json={"prompt": "x", "voice_summary_max_chars": -1})
+    assert negative.status_code == 422
+
+
+def test_limit_zero_means_unlimited_and_has_no_upper_bound(client, admin_headers):
+    """v1.26.1: 0 = unbegrenzt, jede Zahl darueber ist ein Limit ohne
+    Obergrenze (vorher 50 bis 5000)."""
+    for value in (0, 20000):
+        response = client.put("/v1/admin/character", headers=admin_headers,
+                              json={"prompt": "x", "voice_summary_max_chars": value})
+        assert response.status_code == 200
+        assert response.json()["voice_summary_max_chars"] == value
+    assert repos.voice_summary_limit() == 20000
+    repos.set_speech_flow(max_chars=0)
+    assert repos.voice_summary_enabled() is True
+    assert repos.voice_summary_limit() is None
+
+
+def test_limit_zero_speaks_everything_while_streaming(client, monkeypatch):
+    sentences = ["Morgen wird es sonnig. ", "Am Abend zieht Regen auf. ", "Am Wochenende wird es kalt. "]
+    record = _patch_streaming(monkeypatch, [sentences * 5], summary="Darf nicht kommen.")
+    repos.set_speech_flow(llm_streaming=True, voice_summary=True, max_chars=0)
+
+    with client.websocket_connect("/v1/assistant/stream") as ws:
+        _open(ws)
+        ws.send_json({"type": "hello", "mode": "talk"})
+        _send_audio_input(ws)
+        _collect_until_done(ws)
+
+    assert " ".join(record["spoken"]) == "".join(sentences * 5).strip()
+    assert record["summary_calls"] == []
 
 
 def test_summary_switch_also_applies_without_streaming(client, monkeypatch):
@@ -460,13 +529,16 @@ def test_summary_switch_also_applies_without_streaming(client, monkeypatch):
     monkeypatch.setattr(stream_module.stt_client, "transcribe", AsyncMock(return_value="Erzaehl"))
     monkeypatch.setattr(xtts_client, "stream", capture_xtts)
     monkeypatch.setattr(settings, "filler_enabled", False)
-    repos.set_speech_flow(llm_streaming=False, voice_summary=False, max_chars=280)
+    # Kurzfassung aus - oder an mit Limit 0 (unbegrenzt): beides woertlich.
+    for summary, limit in ((False, 280), (True, 0)):
+        spoken.clear()
+        repos.set_speech_flow(llm_streaming=False, voice_summary=summary, max_chars=limit)
 
-    with client.websocket_connect("/v1/assistant/stream") as ws:
-        _open(ws)
-        ws.send_json({"type": "hello", "mode": "talk"})
-        _send_audio_input(ws)
-        frames = _collect_until_done(ws)
+        with client.websocket_connect("/v1/assistant/stream") as ws:
+            _open(ws)
+            ws.send_json({"type": "hello", "mode": "talk"})
+            _send_audio_input(ws)
+            frames = _collect_until_done(ws)
 
-    assert spoken == [long_text]
-    assert [f["final"] for f in frames if f["type"] == "assistant_text"] == [True]
+        assert spoken == [long_text]
+        assert [f["final"] for f in frames if f["type"] == "assistant_text"] == [True]

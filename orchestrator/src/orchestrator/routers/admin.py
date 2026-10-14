@@ -22,6 +22,7 @@ from ..services import audiocpp, filler_service, gpu_manager, tts_engines
 from ..services.litellm_client import litellm_client
 from ..services.stt_client import stt_client
 from ..services.tts_client import normalize_base_url
+from ..services.weaviate_client import WeaviateError, weaviate_client
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/admin", dependencies=[Depends(require_admin)])
@@ -789,3 +790,39 @@ async def activate_model(payload: ModelActivatePayload) -> dict:
         raise HTTPException(status_code=404, detail=f"Modell '{payload.model}' ist in LiteLLM nicht registriert")
     repos.set_setting("active_model", payload.model)
     return {"active_model": payload.model}
+
+
+# ---- Wissen / RAG (Weaviate, 4.8/4.9) -------------------------------------------------
+#
+# Diagnose, warum die KI die Wissensdatenbank (nicht) nutzt, plus Testsuche
+# mit genau dem Pfad eines Chat-Turns und ein schlichtes "Eintrag anlegen"
+# (RAG-Schreiben ist Tier 3, 4.4).
+
+
+class RagSearchPayload(BaseModel):
+    text: str = Field(min_length=1, max_length=1000)
+    tier: int = Field(default=3, ge=1, le=3)
+
+
+class RagEntryPayload(BaseModel):
+    collection: Literal["GeneralKnowledge", "WebKnowledge", "PrivateKnowledge"]
+    content: str = Field(min_length=1, max_length=4000)
+
+
+@router.get("/rag")
+async def rag_status() -> dict:
+    return await weaviate_client.status()
+
+
+@router.post("/rag/search")
+async def rag_search(payload: RagSearchPayload) -> dict:
+    return await weaviate_client.debug_search(payload.text, payload.tier)
+
+
+@router.post("/rag/entries", status_code=201)
+async def rag_add_entry(payload: RagEntryPayload) -> dict:
+    try:
+        entry_id = await weaviate_client.add_entry(payload.collection, payload.content)
+    except WeaviateError as exc:
+        raise HTTPException(status_code=502, detail=f"Weaviate: {exc}")
+    return {"id": entry_id}

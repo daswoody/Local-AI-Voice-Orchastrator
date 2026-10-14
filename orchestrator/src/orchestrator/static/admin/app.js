@@ -181,7 +181,8 @@ const NO_RERENDER = new Set(["editUser", "resetUserForm", "pickSample", "editCar
                              "editFiller", "resetFillerForm", "editAgent",
                              "resetAgentForm", "switchCardFormat", "playFiller",
                              "filterFillers", "editVoice", "resetVoiceForm",
-                             "previewTts", "editContractEngine", "setAudioCppVoice"]);
+                             "previewTts", "editContractEngine", "setAudioCppVoice",
+                             "ragSearch"]);
 
 /* Audio-Blob abspielen und die Blob-URL danach wieder freigeben, sonst
  * sammeln sich die Objekte im Tab an. */
@@ -223,6 +224,83 @@ views.models = async () => {
         <thead><tr><th>Modell</th><th>Status</th><th></th></tr></thead>
         <tbody>${rows || "<tr><td colspan='3'>Keine Modelle gefunden.</td></tr>"}</tbody>
       </table>
+    </section>`;
+};
+
+// ---- View: Wissen (RAG) ------------------------------------------------------------
+
+views.rag = async () => {
+  const data = await api.get("/v1/admin/rag");
+  const problems = data.problems.length
+    ? `<div class="notice warn"><strong>Darum findet die KI gerade nichts (oder weniger als erwartet):</strong><ul>${
+      data.problems.map((p) => `<li>${esc(p)}</li>`).join("")}</ul></div>`
+    : '<div class="notice ok">Weaviate ist erreichbar und alle Collections sind abfragbar. Jede Frage wird vor der Antwort dort nachgeschlagen.</div>';
+
+  const rows = data.collections.map((c) => {
+    const state = !c.exists ? '<span class="badge warn">fehlt</span>'
+      : c.error ? `<span class="badge warn">Fehler</span><br><small>${esc(c.error)}</small>`
+      : !c.has_content_property ? '<span class="badge warn">Property fehlt</span>'
+      : '<span class="badge ok">ok</span>';
+    return `<tr>
+      <td><code>${esc(c.name)}</code></td>
+      <td>${c.min_tier === 1 ? "alle (auch Gaeste)" : "ab Tier 2"}</td>
+      <td>${state}</td>
+      <td>${c.count ?? "-"}</td>
+      <td>${esc(c.vectorizer || "-")}</td>
+      <td>${esc(c.text_properties.join(", ") || "-")}</td>
+    </tr>`;
+  }).join("");
+
+  const collectionOptions = data.collections.map((c) =>
+    `<option value="${esc(c.name)}">${esc(c.name)}</option>`).join("");
+
+  return `
+    <h1>Wissen (RAG)</h1>
+    <p class="hint">Vor jeder Antwort sucht der Orchestrator in Weaviate nach passendem Wissen und gibt die besten Treffer dem LLM mit. Gaeste und Tier-1-Nutzer durchsuchen nur <code>GeneralKnowledge</code> und <code>WebKnowledge</code>, ab Tier 2 auch <code>PrivateKnowledge</code> (4.4). Die Zugangsdaten kommen aus der .env bzw. Coolify (<code>WEAVIATE_URL</code>, <code>WEAVIATE_API_KEY</code>, <code>WEAVIATE_CONTENT_PROPERTY</code>) und wirken erst nach einem Neustart des Orchestrators.</p>
+    ${problems}
+    <section class="block">
+      <h2>Verbindung</h2>
+      <table>
+        <tr><th>Adresse</th><td><code>${esc(data.url)}</code> ${data.reachable ? '<span class="badge ok">erreichbar</span>' : '<span class="badge warn">nicht erreichbar</span>'}${data.error ? `<br><small>${esc(data.error)}</small>` : ""}</td></tr>
+        <tr><th>API-Key</th><td>${data.api_key_set ? "gesetzt" : "keiner"}</td></tr>
+        <tr><th>Weaviate-Version</th><td>${esc(data.version || "-")}</td></tr>
+        <tr><th>Module</th><td>${esc(data.modules.join(", ") || "-")}</td></tr>
+        <tr><th>Inhalts-Property</th><td><code>${esc(data.content_property)}</code></td></tr>
+        <tr><th>Suche</th><td>Top ${data.top_k}, Relativ-Filter +${Math.round(data.relative_margin * 100)} % ueber dem Durchschnitt (4.9)</td></tr>
+        ${data.other_collections.length ? `<tr><th>Weitere Collections</th><td>${esc(data.other_collections.join(", "))} (werden nicht durchsucht)</td></tr>` : ""}
+      </table>
+    </section>
+    <section class="block">
+      <h2>Collections</h2>
+      <table>
+        <thead><tr><th>Collection</th><th>Durchsucht fuer</th><th>Status</th><th>Eintraege</th><th>Vectorizer</th><th>Text-Properties</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="6" class="hint">Weaviate nicht erreichbar.</td></tr>'}</tbody>
+      </table>
+    </section>
+    <section class="block">
+      <h2>Testsuche</h2>
+      <p class="hint">Genau die Suche eines Chat-Turns: alle Treffer je Collection mit Certainty, und was davon nach dem Relativ-Filter als Kontext beim LLM landet.</p>
+      <form class="grid" data-submit="ragSearch">
+        <label class="full">Frage <input name="text" required maxlength="1000" placeholder="Wie lautet das WLAN-Passwort?"></label>
+        <label>Als
+          <select name="tier">
+            <option value="1">Gast / Tier 1</option>
+            <option value="2">Tier 2</option>
+            <option value="3" selected>Tier 3 (Admin)</option>
+          </select>
+        </label>
+        <div><button type="submit">Suchen</button></div>
+        <div class="full" id="rag-search-result"></div>
+      </form>
+    </section>
+    <section class="block">
+      <h2>Eintrag anlegen</h2>
+      <p class="hint">Legt einen Wissens-Eintrag an (mit dem e5-Praefix <code>passage:</code>, 4.9) - den Vektor berechnet Weaviate selbst. Ein Fakt pro Eintrag findet sich am besten.</p>
+      <form class="grid" data-submit="ragAddEntry">
+        <label>Collection <select name="collection">${collectionOptions}</select></label>
+        <label class="full">Inhalt <textarea name="content" rows="3" required maxlength="4000" placeholder="Der Muell wird jeden Dienstag abgeholt."></textarea></label>
+        <div><button type="submit">Speichern</button></div>
+      </form>
     </section>`;
 };
 
@@ -1047,6 +1125,41 @@ const formActions = {
       });
     }
   },
+
+  async ragSearch(form) {
+    const result = document.getElementById("rag-search-result");
+    const button = form.querySelector("button[type=submit]");
+    button.disabled = true;
+    result.innerHTML = "<p class='hint'>Sucht…</p>";
+    try {
+      const data = await api.post("/v1/admin/rag/search", {
+        text: form.text.value,
+        tier: parseInt(form.tier.value, 10),
+      });
+      const blocks = data.collections.map((c) => {
+        const body = c.error
+          ? `<div class="notice error">${esc(c.error)}</div>`
+          : c.hits.length
+            ? `<table><tbody>${c.hits.map((h) => `<tr><td class="nowrap">${h.certainty.toFixed(3)}</td><td>${esc(h.content)}</td></tr>`).join("")}</tbody></table>`
+            : "<p class='hint'>Keine Treffer.</p>";
+        return `<h3>${esc(c.name)}</h3>${body}`;
+      }).join("");
+      const context = data.context.length
+        ? `<ul>${data.context.map((chunk) => `<li>${esc(chunk)}</li>`).join("")}</ul>`
+        : "<p class='hint'>Nichts - das LLM antwortet ohne Wissen aus der Datenbank.</p>";
+      result.innerHTML = `${blocks}<h3>Geht als Kontext ans LLM</h3>${context}`;
+    } catch (err) {
+      result.innerHTML = "";
+      throw err;
+    } finally {
+      button.disabled = false;
+    }
+  },
+
+  ragAddEntry: (form) => api.post("/v1/admin/rag/entries", {
+    collection: form.collection.value,
+    content: form.content.value,
+  }),
 
   async previewTts(form) {
     const result = document.getElementById("tts-preview-result");

@@ -177,8 +177,15 @@ def _initial_messages(state: OrchestratorState) -> list[dict]:
     if state.get("voice_mode"):
         system_prompt += f"\n\n{_VOICE_MODE_PROMPT}"
     if state["context_chunks"]:
+        # Kleine Modelle uebergehen einen nackten Kontext-Block gern - daher
+        # ausdruecklich sagen, woher er kommt und wie er zu nutzen ist.
         context = "\n".join(f"- {chunk}" for chunk in state["context_chunks"])
-        system_prompt += f"\n\nRelevanter Kontext:\n{context}"
+        system_prompt += (
+            "\n\nWissen aus der Wissensdatenbank des Haushalts (per Suche zur "
+            "aktuellen Frage gefunden). Wenn es zur Frage passt, beantworte "
+            "sie damit und bevorzuge es vor deinem Allgemeinwissen; passt "
+            f"es nicht, ignoriere es:\n{context}"
+        )
 
     if state.get("image_data_url"):
         # Multimodale user-Message (OpenAI-Format): Text + Bild.

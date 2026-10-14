@@ -28,6 +28,7 @@ also sofort die neue Version statt einer alten aus dem Cache.
 | Bereich | Funktion |
 |---|---|
 | Modelle | In LiteLLM registrierte Modelle anzeigen und das aktive Modell setzen (LM Studio laedt per JIT beim ersten Request, Entladen per Idle-TTL) |
+| Wissen (RAG) | Pruefen, ob und warum die KI Weaviate (nicht) nutzt: Erreichbarkeit, je Collection Vectorizer/Properties/Anzahl Eintraege, Problemliste; Testsuche wie im Chat-Turn (Treffer mit Certainty, was als Kontext ans LLM geht, als Gast/Tier 1-3); Eintrag anlegen (mit `passage:`-Praefix) |
 | Sprachausgabe | TTS-Engine der gesprochenen Antworten waehlen (XTTS / Piper, jedes Sprachmodell eines audio.cpp-Servers und jede Engine nach dem Engine-Vertrag) mit Live-Status; Aktivieren laedt die Engine und entlaedt andere Sprachausgaben auf derselben Karte; Probehoeren pro Engine + Stimme mit Latenzmessung (Vergleich auf der echten Hardware); audio.cpp-Adresse, -Karte und eingebaute Stimme je Modell; Vertrags-Engines per ID + Adresse eintragen |
 | GPUs | Karten mit Name, Compute-Capability und live belegtem VRAM; pro Dienst die Karte waehlen (CPU / GPU 0 / GPU 1), XTTS und Vertrags-Engines auch ganz ausschalten ("Aus"); audio.cpp als Info-Zeile. STT, XTTS und Vertrags-Engines laden ihr Modell dabei zur Laufzeit neu - kein Container-Neustart. Piper ist CPU-only, LM Studio laeuft auf dem Host und wird dort eingestellt (4.2) |
 | Charakter | Globaler System-Prompt; pro Nutzer ueberschreibbar (Nutzer-Formular) |
@@ -36,6 +37,25 @@ also sofort die neue Version statt einer alten aus dem Cache.
 | Filler & Trigger | Eigene Trigger (Nachdenken/Suche/Tool inkl. Tool-Muster wie `Calendar-*`), Filler mit Titel+Text, Engine pro Filler (XTTS = Nutzerstimme, Piper = feste Stimme/robust, audio.cpp-Modelle = je nach Modell), "Alle generieren" rendert vor, pro Stimme Play-Button zum Probehoeren und &#8635; zum Neu-Generieren nur dieser Stimme, Filter-Chips nach Trigger |
 | Agenten | Spezial-Agenten (4.16) mit eigener ID, Beschreibung, System-Prompt und eigenem LiteLLM-Modell; erscheinen der Haupt-KI als Tool `agent-<id>` - z. B. Websuche/Coding an Cloud-Modelle delegieren. Reservierte ID `code-card`: schreibt automatisch die HTML-Layouts fuer Karten ohne passendes Template |
 | Karten | Layout-Templates (4.12) anlegen/bearbeiten/loeschen, Version zaehlt automatisch hoch; Format JSON (Layout-Baum) oder HTML (Fragment mit `{{data.*}}`-Platzhaltern, sandboxed gerendert) |
+
+### Wissen (RAG) pruefen
+
+Vor jeder Antwort sucht der Orchestrator in Weaviate (`GeneralKnowledge`,
+`WebKnowledge`, ab Tier 2 auch `PrivateKnowledge`) und gibt die besten
+Treffer dem LLM mit. Nutzt die KI das Wissen nicht, zeigt die Seite
+**Wissen (RAG)** den Grund - typische Faelle:
+
+- **nicht erreichbar:** `WEAVIATE_URL` falsch oder der Orchestrator haengt
+  nicht im selben Docker-Netzwerk wie Weaviate (`ai-lab`).
+- **Collection fehlt / Property fehlt:** Die Collections muessen genau so
+  heissen, und der Text muss im Property `WEAVIATE_CONTENT_PROPERTY`
+  (Standard `content`) stehen - sonst `.env` anpassen und neu starten.
+- **leer:** Es gibt nichts zu finden - unten auf der Seite Eintraege anlegen.
+- **als Gast/Tier 1 unterwegs:** `PrivateKnowledge` wird dann bewusst nie
+  durchsucht (4.4) - in der App/Web-UI anmelden.
+
+Abfragefehler stehen ausserdem als Warnung im Orchestrator-Log
+(`Weaviate-Abfrage gegen ... fehlgeschlagen ...: <Meldung von Weaviate>`).
 
 ### GPUs verteilen (zwei Karten)
 

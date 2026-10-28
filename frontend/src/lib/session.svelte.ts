@@ -135,16 +135,29 @@ let assistantMsgId: number | null = null;
 let toolsMsgId: number | null = null;
 
 /** tool_activity-Frames des laufenden Turns in EINER Chips-Zeile sammeln:
- *  running legt einen Chip an, done/error stempelt den laufenden Chip. */
-function onToolActivity(tool: string, status: ToolActivity["status"]): void {
+ *  running legt einen Chip an, done/error stempelt den laufenden Chip.
+ *  Hintergrund-Agenten (v1.29): ihr Ende kommt irgendwann spaeter und
+ *  stempelt den Chip mit derselben job_id - egal in welchem Turn er steht. */
+function onToolActivity(tool: string, status: ToolActivity["status"], jobId?: string): void {
+  if (jobId && status !== "background") {
+    for (const message of app.messages) {
+      const entry = message.tools?.find((t) => t.job_id === jobId);
+      if (entry) {
+        entry.status = status;
+        return;
+      }
+    }
+    return;
+  }
+  const activity: ToolActivity = jobId ? { tool, status, job_id: jobId } : { tool, status };
   if (toolsMsgId === null) {
-    toolsMsgId = pushMessage({ role: "tools", text: "", tools: [{ tool, status }], final: false });
+    toolsMsgId = pushMessage({ role: "tools", text: "", tools: [activity], final: false });
     return;
   }
   const msg = app.messages.find((m) => m.id === toolsMsgId);
   if (!msg?.tools) return;
-  if (status === "running") {
-    msg.tools.push({ tool, status });
+  if (status === "running" || status === "background") {
+    msg.tools.push(activity);
   } else {
     const entry = [...msg.tools].reverse().find((t) => t.tool === tool && t.status === "running");
     if (entry) entry.status = status;
@@ -238,7 +251,8 @@ export async function ensureSession(): Promise<void> {
         currentAssistantText = "";
       }
       // Turn zu Ende: Chips-Zeile abschliessen (noch laufende Eintraege
-      // gelten als erledigt - z. B. nach einem Barge-in).
+      // gelten als erledigt - z. B. nach einem Barge-in). Hintergrund-
+      // Agenten laufen weiter und melden ihr Ende selbst.
       if (toolsMsgId !== null) {
         const msg = app.messages.find((m) => m.id === toolsMsgId);
         if (msg) {

@@ -12,7 +12,9 @@ from ..config import settings
 from ..graph import initial_state, orchestrator_graph
 from ..schemas import DeviceTool
 from ..security import resolve_token
-from ..services import filler_service, thinking_router, tts_engines
+from ..services import background_agents, filler_service, thinking_router, tts_engines
+from ..services.agent_service import run_agent
+from ..services.background_agents import AgentJob
 from ..services.litellm_client import litellm_client
 from ..services.sentences import SentenceStream, split_sentences
 from ..services.stt_client import stt_client
@@ -50,6 +52,7 @@ async def assistant_stream(websocket: WebSocket) -> None:
         logger.info("Client hat die WebSocket-Verbindung getrennt")
     finally:
         await session.cancel_active(notify=False)
+        await session.close()
 
 
 class StreamSession:
@@ -84,6 +87,18 @@ class StreamSession:
         # Gestreamte Antwort und Filler teilen sich den audio_chunk-Stream
         # (v1.26): immer nur einer sendet, und dann am Stueck.
         self.audio_lock = asyncio.Lock()
+        # Hintergrund-Agenten (v1.29): laufende Jobs, fertige Ergebnisse,
+        # die noch in keine Antwort eingeflossen sind, und der Zeitgeber,
+        # nach dem sich die Assistenz damit von selbst meldet. Sie leben so
+        # lange wie die Verbindung - Barge-in und neue Eingaben lassen sie
+        # weiterlaufen.
+        self.agent_jobs: dict[str, AgentJob] = {}
+        self.agent_inbox: list[AgentJob] = []
+        self._idle_timer: asyncio.Task | None = None
+        self._turn_jobs: list[AgentJob] = []
+        # Modalitaet der letzten Nutzereingabe: eine proaktive Meldung
+        # spricht nur, wenn der Nutzer zuletzt gesprochen hat.
+        self._last_want_audio = False
 
         self.tier, self.username = tier, username
         self.system_prompt = repos.effective_system_prompt(self.username)
@@ -97,6 +112,11 @@ class StreamSession:
 
     async def handle(self, frame: dict) -> None:
         frame_type = frame.get("type")
+        if frame_type in _INPUT_FRAMES:
+            # Der Nutzer ist dran (tippt ab, spricht gerade): keine
+            # proaktive Meldung dazwischen - das Ergebnis kommt in die
+            # Antwort auf diese Eingabe.
+            self._cancel_idle_timer()
 
         if frame_type == "hello":
             self.mode = frame.get("mode", "chat")
@@ -184,6 +204,7 @@ class StreamSession:
             logger.exception("STT fehlgeschlagen")
             await self.ws.send_json({"type": "error", "message": "Spracherkennung fehlgeschlagen"})
             await self.ws.send_json({"type": "done"})
+            self._schedule_idle_delivery()
             return
 
         # Nur final: Partial-Transcripts brauchen Streaming-STT, das kommt
@@ -192,6 +213,7 @@ class StreamSession:
 
         if not text.strip():
             await self.ws.send_json({"type": "done"})
+            self._schedule_idle_delivery()
             return
 
         # Gesprochene Frage -> gesprochene Antwort (+ Details im Chat).
@@ -252,33 +274,48 @@ class StreamSession:
                     note += f" - Daten: {json.dumps(data, ensure_ascii=False)}"
                 note += "]"
                 content = f"{content}\n{note}".strip()
+            for record in message.get("agent_results") or []:
+                content = f"{content}\n{background_agents.history_note(record)}".strip()
             if not content:
                 continue
             if len(content) > settings.history_max_chars_per_message:
                 content = content[: settings.history_max_chars_per_message] + " …"
+            if history and history[-1]["role"] == message["role"]:
+                # Proaktive Meldungen (v1.29) stehen ohne Nutzerfrage
+                # davor - strenge Chat-Templates (Gemma) verlangen aber
+                # user/assistant im Wechsel.
+                history[-1]["content"] += f"\n{content}"
+                continue
             history.append({"role": message["role"], "content": content})
         return history
 
-    async def _persist_assistant_message(self, text: str) -> None:
+    async def _persist_assistant_message(self, text: str,
+                                         agent_results: list[dict] | None = None) -> None:
         if self.conversation_id is None:
             return
         try:
-            repos.append_message(
+            message = repos.append_message(
                 self.conversation_id, "assistant", text,
                 cards=self._turn_cards or None, tools=self._turn_tools or None,
+                agent_results=agent_results or None,
             )
         except Exception:
             logger.exception("Konnte Assistant-Message nicht persistieren")
+            return
+        # In diesem Turn gestartete Hintergrund-Agenten: ihr Chip steht in
+        # dieser Nachricht und bekommt beim Agenten-Ende den Endstatus.
+        for job in self._turn_jobs:
+            job.message_id = message["id"]
 
     # ---- Antwort-Pipeline --------------------------------------------------
 
     async def start_response(
-        self, text: str, want_audio: bool, image_data_url: str = ""
+        self, text: str, want_audio: bool, image_data_url: str = "", proactive: bool = False
     ) -> None:
         # Neuer Input waehrend eine Antwort laeuft = implizites Barge-in.
         await self.cancel_active(notify=False)
         self.active_task = asyncio.create_task(
-            self._respond(text, want_audio, image_data_url)
+            self._respond(text, want_audio, image_data_url, proactive)
         )
 
     async def cancel_active(self, notify: bool) -> None:
@@ -292,18 +329,31 @@ class StreamSession:
             # done schliesst den abgebrochenen Turn app-seitig sauber ab.
             await self.ws.send_json({"type": "done"})
 
-    async def _respond(self, text: str, want_audio: bool, image_data_url: str = "") -> None:
+    async def _respond(self, text: str, want_audio: bool, image_data_url: str = "",
+                       proactive: bool = False) -> None:
+        """Ein Turn. proactive (v1.29): keine Nutzereingabe - die Assistenz
+        meldet sich von selbst mit fertigen Hintergrund-Ergebnissen."""
         streamer: TurnStreamer | None = None
         llm_task: asyncio.Task | None = None
         try:
             self._filler_played = False
             self._turn_cards = []
             self._turn_tools = []
+            self._turn_jobs = []
             # Gespraechsgedaechtnis (v1.13) VOR dem Persistieren des
             # aktuellen Turns laden - sonst stuende die aktuelle Frage
             # doppelt im Kontext.
             history = self._conversation_history()
-            await self._persist_user_message(text, has_image=bool(image_data_url))
+            if not proactive:
+                self._last_want_audio = want_audio
+                await self._persist_user_message(text, has_image=bool(image_data_url))
+            # Hintergrund-Agenten (v1.29): fertige Ergebnisse fliessen in
+            # DIESE Antwort ein; aus dem Eingang fliegen sie erst, wenn die
+            # Antwort steht - ein Barge-in verliert sie also nicht.
+            delivering = list(self.agent_inbox)
+            background_context = background_agents.context_prompt(
+                list(self.agent_jobs.values()), delivering, proactive=proactive
+            )
             executor = self._make_executor(want_audio)
             # LLM-Streaming (v1.26, Schalter im Panel): Text-Deltas sofort in
             # den Chat, bei Sprach-Turns Satz fuer Satz in die Sprachausgabe.
@@ -313,6 +363,9 @@ class StreamSession:
             # nur bei Fragen, die danach aussehen; alles andere antwortet
             # in unter einer Sekunde.
             thinking = thinking_router.decide(text, has_image=bool(image_data_url))
+            if proactive:
+                # Ein fertiges Ergebnis weitergeben braucht kein Nachdenken.
+                thinking = thinking_router.ThinkingDecision(False, "Hintergrund-Ergebnis")
             logger.info("Denk-Router: %s (%s) - %r", "denkt" if thinking.think else "schnell",
                         thinking.reason, text[:80])
             llm_task = asyncio.create_task(
@@ -325,11 +378,13 @@ class StreamSession:
                         history=history,
                         streamer=streamer,
                         think=thinking.think,
+                        background_context=background_context,
+                        proactive=proactive,
                     )
                 )
             )
 
-            if want_audio and settings.filler_enabled:
+            if want_audio and settings.filler_enabled and not proactive:
                 # Filler ZUERST waehlen - sein delay_ms bestimmt, wie lange
                 # die Antwort Zeit hat, bevor er spielen darf. Schnelle
                 # Antworten blockiert so kein Filler mehr. Beim Streaming
@@ -353,7 +408,12 @@ class StreamSession:
             response_text = result["response"]
 
             await self.ws.send_json({"type": "assistant_text", "text": response_text, "final": True})
-            await self._persist_assistant_message(response_text)
+            for job in delivering:
+                if job in self.agent_inbox:
+                    self.agent_inbox.remove(job)
+            await self._persist_assistant_message(
+                response_text, [job.record() for job in delivering]
+            )
 
             if want_audio and streamer is not None:
                 await streamer.finish(response_text)
@@ -395,6 +455,109 @@ class StreamSession:
                 llm_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await asyncio.wait({llm_task}, timeout=2.0)
+            # Waehrend des Turns eingetroffene Ergebnisse: von selbst
+            # melden, falls der Nutzer danach nichts mehr sagt.
+            self._schedule_idle_delivery()
+
+    # ---- Hintergrund-Agenten (v1.29) ----------------------------------------
+
+    async def _start_background_agent(self, tool: str, agent: dict, task: str) -> str | None:
+        """Startet den Agenten neben dem Gespraech und liefert das sofortige
+        Tool-Ergebnis. None = Limit erreicht, der Agent laeuft im Turn."""
+        for job in self.agent_jobs.values():
+            if job.tool == tool and job.task == task:
+                return background_agents.duplicate_result()
+        if len(self.agent_jobs) >= settings.agent_background_max:
+            logger.info("Hintergrund-Limit (%s) erreicht - %s laeuft im Turn",
+                        settings.agent_background_max, tool)
+            return None
+        job_id = uuid.uuid4().hex
+        chip = {"tool": tool, "status": "background", "job_id": job_id}
+        self._turn_tools.append(chip)
+        job = AgentJob(job_id=job_id, tool=tool, task=task, chip=chip, chips=self._turn_tools)
+        self.agent_jobs[job_id] = job
+        self._turn_jobs.append(job)
+        job.handle = asyncio.create_task(self._run_agent_job(job, agent))
+        await self.ws.send_json(
+            {"type": "tool_activity", "tool": tool, "status": "background", "job_id": job_id}
+        )
+        logger.info("Hintergrund-Agent %s gestartet: %r", tool, task[:120])
+        return background_agents.started_result()
+
+    async def _run_agent_job(self, job: AgentJob, agent: dict) -> None:
+        try:
+            job.result = await run_agent(agent, job.task) or "(keine Antwort)"
+            job.status = "done"
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Wie im Turn: der Fehler wird ein Ergebnis, das das Haupt-LLM
+            # dem Nutzer erklaeren kann.
+            logger.exception("Hintergrund-Agent %s fehlgeschlagen", job.tool)
+            job.result = f"Tool-Fehler bei {job.tool}: {str(exc)[:200]}"
+            job.status = "error"
+        self.agent_jobs.pop(job.job_id, None)
+        self._finish_chip(job)
+        self.agent_inbox.append(job)
+        logger.info("Hintergrund-Agent %s fertig (%s)", job.tool, job.status)
+        with contextlib.suppress(Exception):
+            await self.ws.send_json({
+                "type": "tool_activity", "tool": job.tool, "status": job.status,
+                "job_id": job.job_id,
+            })
+        self._schedule_idle_delivery()
+
+    def _finish_chip(self, job: AgentJob) -> None:
+        job.chip["status"] = job.status
+        if job.message_id is None:
+            # Start-Turn noch nicht gespeichert: er speichert den Chip
+            # gleich mit dem Endstatus.
+            return
+        try:
+            repos.update_message_tools(job.message_id, job.chips)
+        except Exception:
+            logger.exception("Konnte Agenten-Status nicht in der Historie nachziehen")
+
+    def _schedule_idle_delivery(self) -> None:
+        """Zeitgeber fuer die proaktive Meldung (neu) starten - nur, wenn
+        Ergebnisse warten, gerade kein Turn laeuft und der Nutzer nicht
+        mitten in einer Aeusserung ist."""
+        if not self.agent_inbox or self._turn_running() or self.audio_buffer:
+            return
+        idle_s = repos.agent_result_idle_s()
+        if idle_s <= 0:
+            return
+        self._cancel_idle_timer()
+        self._idle_timer = asyncio.create_task(self._deliver_when_idle(idle_s))
+
+    def _turn_running(self) -> bool:
+        task = self.active_task
+        return task is not None and not task.done() and task is not asyncio.current_task()
+
+    def _cancel_idle_timer(self) -> None:
+        if self._idle_timer is not None and self._idle_timer is not asyncio.current_task():
+            self._idle_timer.cancel()
+        self._idle_timer = None
+
+    async def _deliver_when_idle(self, idle_s: float) -> None:
+        await asyncio.sleep(idle_s)
+        self._idle_timer = None
+        if not self.agent_inbox or self._turn_running() or self.audio_buffer:
+            return
+        await self.start_response("", want_audio=self._last_want_audio, proactive=True)
+
+    async def close(self) -> None:
+        """Verbindung weg: Hintergrund-Agenten abbrechen (niemand kann ihr
+        Ergebnis mehr empfangen) und ihre Chips als abgebrochen markieren."""
+        self._cancel_idle_timer()
+        for job in list(self.agent_jobs.values()):
+            if job.handle is not None:
+                job.handle.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await job.handle
+            job.status = "error"
+            self._finish_chip(job)
+        self.agent_jobs.clear()
 
     def _make_executor(self, want_audio: bool) -> ToolExecutor:
         """Session-gebundener Executor (1.12): Geraete-Tools aus dem
@@ -432,12 +595,16 @@ class StreamSession:
                 {"type": "tool_activity", "tool": tool_name, "status": status}
             )
 
+        async def background_agent(tool_name: str, agent: dict, task: str) -> str | None:
+            return await self._start_background_agent(tool_name, agent, task)
+
         return ToolExecutor(
             device_tools=self.device_tools,
             device_call=self._call_device_tool,
             card_push=card_push,
             on_tool_start=on_tool_start,
             on_activity=on_activity,
+            background_agent=background_agent,
         )
 
     async def _call_device_tool(self, name: str, arguments: dict) -> str:
@@ -584,6 +751,11 @@ class StreamSession:
             # killen: Text ist schon raus, die App liest ihn laut
             # TTS-Fallback-Regel (4.13) selbst vor.
             logger.exception("Haupt-TTS fehlgeschlagen - Antwort bleibt Text-only")
+
+
+# Eingaben des Nutzers: halten die proaktive Meldung eines
+# Hintergrund-Ergebnisses an (v1.29).
+_INPUT_FRAMES = {"text_input", "audio_chunk", "audio_end", "image_input"}
 
 
 # Fortsetzung der Kurzfassung beim Streaming (v1.26): Der Anfang der Antwort

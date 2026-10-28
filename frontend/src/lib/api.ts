@@ -18,7 +18,10 @@ export interface ConversationSummary {
 
 export interface ToolActivity {
   tool: string;
-  status: "running" | "done" | "error";
+  // background (v1.29): Agent laeuft neben dem Gespraech weiter; sein
+  // Ende kommt spaeter als done/error mit derselben job_id.
+  status: "running" | "background" | "done" | "error";
+  job_id?: string;
 }
 
 export interface HistoryMessage {

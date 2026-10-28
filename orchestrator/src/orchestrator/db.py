@@ -136,6 +136,10 @@ CREATE TABLE IF NOT EXISTS messages (
     -- Tool-/Agenten-Aufrufe des Turns (v1.12.1) als JSON-Liste
     -- [{tool, status}], damit der Verlauf zeigt, was die KI getan hat.
     tools_json TEXT,
+    -- Ergebnisse von Hintergrund-Agenten (v1.29), die in diese Antwort
+    -- eingeflossen sind, als JSON-Liste [{tool, task, status, result}] -
+    -- Kontext fuer Folgefragen, im Chat nicht sichtbar.
+    agent_results_json TEXT,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, id);
@@ -221,6 +225,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     message_columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
     if "tools_json" not in message_columns:
         conn.execute("ALTER TABLE messages ADD COLUMN tools_json TEXT")
+    if "agent_results_json" not in message_columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN agent_results_json TEXT")
     voice_columns = {row[1] for row in conn.execute("PRAGMA table_info(voices)")}
     if "sample_text" not in voice_columns:
         conn.execute("ALTER TABLE voices ADD COLUMN sample_text TEXT")

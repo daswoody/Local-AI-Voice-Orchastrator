@@ -23,6 +23,19 @@ class Settings(BaseSettings):
     # der Nutzer braucht Zeit zum Tippen.
     device_tool_timeout_s: int = 60
 
+    # Hintergrund-Agenten (v1.29): Agenten-Aufrufe laufen neben dem
+    # Gespraech weiter, das Ergebnis baut die Assistenz in eine spaetere
+    # Antwort ein. Schalter und Wartezeit sind nur Defaults - im
+    # Admin-Panel (Agenten) ueberschreibbar.
+    agent_background_enabled: bool = True
+    # Kommt bis dahin keine neue Eingabe, meldet sich die Assistenz mit dem
+    # Ergebnis von selbst; 0 = nur in der naechsten Antwort.
+    agent_result_idle_s: float = 20.0
+    # Gleichzeitige Hintergrund-Agenten pro Verbindung. llama.cpp mit vier
+    # Slots: Haupt-LLM + drei Agenten. Darueber laeuft ein Agent wie
+    # frueher im Turn (die Antwort wartet auf ihn).
+    agent_background_max: int = 3
+
     weaviate_url: str = "http://weaviate:8080"
     weaviate_api_key: str | None = None
     weaviate_content_property: str = "content"

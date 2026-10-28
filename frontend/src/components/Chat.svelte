@@ -51,7 +51,13 @@
                   ? `Agent: ${activity.tool.slice(6)}`
                   : activity.tool}
                 <span class="tool-status">
-                  {activity.status === "running" ? "…" : activity.status === "error" ? "⚠" : "✓"}
+                  {activity.status === "running"
+                    ? "…"
+                    : activity.status === "background"
+                      ? "· arbeitet im Hintergrund …"
+                      : activity.status === "error"
+                        ? "⚠"
+                        : "✓"}
                 </span>
               </span>
             {/each}
@@ -164,7 +170,8 @@
     border-radius: 999px;
     padding: 3px 10px;
   }
-  .tool-chip.running {
+  .tool-chip.running,
+  .tool-chip.background {
     animation: chip-pulse 1.2s ease-in-out infinite;
   }
   .tool-chip.error {

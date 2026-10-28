@@ -2,7 +2,7 @@
 // Browser-WebSockets koennen keine Authorization-Header setzen, deshalb
 // nutzt die Web-UI den ?token=-Fallback des Orchestrators.
 
-import type { CardEnvelope } from "./api";
+import type { CardEnvelope, ToolActivity } from "./api";
 import { token } from "./api";
 
 export type Mode = "chat" | "talk" | "assist";
@@ -15,8 +15,8 @@ export interface SessionCallbacks {
   onCard?: (card: CardEnvelope) => void;
   onToolCall?: (callId: string, name: string, args: Record<string, unknown>) => void;
   /** Additives tool_activity-Frame (v1.12.1): welches Tool/welcher Agent
-   *  gerade laeuft bzw. fertig ist. */
-  onToolActivity?: (tool: string, status: "running" | "done" | "error") => void;
+   *  gerade laeuft bzw. fertig ist. jobId (v1.29): Hintergrund-Agent. */
+  onToolActivity?: (tool: string, status: ToolActivity["status"], jobId?: string) => void;
   onConversation?: (conversationId: string) => void;
   /** interrupted: done eines per interrupt abgebrochenen Turns. */
   onDone?: (interrupted: boolean) => void;
@@ -145,7 +145,10 @@ export class AssistantSession {
 
   private dispatch(frame: Record<string, never>): void {
     const type = frame["type"] as string;
-    if (this.discarding && TURN_FRAMES.has(type)) return;
+    // Das Ende eines Hintergrund-Agenten (v1.29) gehoert zu keinem Turn -
+    // es darf auch nach einem Barge-in nicht verloren gehen.
+    const backgroundEnd = type === "tool_activity" && frame["job_id"] && frame["status"] !== "background";
+    if (this.discarding && TURN_FRAMES.has(type) && !backgroundEnd) return;
     switch (type) {
       case "transcript":
         this.callbacks.onTranscript?.(frame["text"] ?? "", frame["final"] ?? false);
@@ -173,7 +176,11 @@ export class AssistantSession {
         );
         break;
       case "tool_activity":
-        this.callbacks.onToolActivity?.(frame["tool"] ?? "", frame["status"] ?? "running");
+        this.callbacks.onToolActivity?.(
+          frame["tool"] ?? "",
+          frame["status"] ?? "running",
+          frame["job_id"] ?? undefined,
+        );
         break;
       case "conversation":
         this.callbacks.onConversation?.(frame["conversation_id"]);

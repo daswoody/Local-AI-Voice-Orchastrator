@@ -769,6 +769,18 @@ Der Antwort-Pfad ist ein Agent-Loop (LangGraph: retrieve -> agent -> tools
   (4.12) in die App pushen; verfuegbare Kartentypen werden ihm aus der DB
   in die Tool-Beschreibung gereicht.
 
+**Hintergrund-Agenten (v1.29, `AGENT_BACKGROUND_ENABLED`, Default an):**
+Ruft das LLM einen Agenten (`agent-<id>`) auf, startet die Session ihn
+neben dem Gespraech und gibt dem LLM sofort "laeuft im Hintergrund"
+zurueck - die Antwort wartet nicht ("Ich suche die passenden Infos
+raus."). Laufende Agenten stehen im System-Prompt (kein Doppelstart), ein
+fertiges Ergebnis fliesst in die naechste Antwort ein, Umfangreiches als
+Karte. Sagt der Nutzer `AGENT_RESULT_IDLE_S` Sekunden (Default 20) nichts,
+meldet sich die Assistenz von selbst; 0 = nie. Hoechstens
+`AGENT_BACKGROUND_MAX` (Default 3) Agenten pro Verbindung gleichzeitig,
+darueber laeuft ein Agent wie frueher im Turn; `code-card` immer im Turn.
+Schalter und Wartezeit: Admin-Panel > Agenten.
+
 Die Admin-definierten **Tool-Trigger** (1.7d) feuern jetzt: Vor einem
 Tool-Call spielt der Orchestrator den passenden Filler (spezifisches
 Muster wie `Calendar-*` schlaegt den generischen), hoechstens ein Filler

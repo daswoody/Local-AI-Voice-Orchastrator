@@ -113,17 +113,25 @@ def _show_card_schema() -> dict:
     }
 
 
-def _agent_tool_schema(agent: dict) -> dict:
+def _agent_tool_schema(agent: dict, background: bool = False) -> dict:
     """Agenten (4.16) erscheinen dem Haupt-LLM als normale Tools - die
     Auswahl laeuft rein ueber die Admin-Beschreibung, ohne Sonder-Routing."""
+    description = (
+        f"Delegiert eine Aufgabe an den Spezial-Agenten '{agent['name']}': "
+        f"{agent['description']}"
+    )
+    if background:
+        # Hintergrund-Agenten (v1.29): Das Modell soll nicht auf ein
+        # Ergebnis im Tool-Resultat warten, sondern weiterreden.
+        description += (
+            " Der Agent arbeitet im Hintergrund: Du bekommst sofort eine "
+            "Bestaetigung, sein Ergebnis kommt spaeter automatisch zu dir."
+        )
     return {
         "type": "function",
         "function": {
             "name": f"{_AGENT_PREFIX}{agent['slug']}",
-            "description": (
-                f"Delegiert eine Aufgabe an den Spezial-Agenten '{agent['name']}': "
-                f"{agent['description']}"
-            ),
+            "description": description,
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -152,12 +160,18 @@ class ToolExecutor:
         # Tool-/Agenten-Aufrufs (status: running/done/error), damit der
         # Client anzeigen kann, was die KI gerade tut.
         on_activity: Callable[[str, str], Awaitable[None]] | None = None,
+        # Hintergrund-Agenten (v1.29): bekommt Tool-Name, Agent und Aufgabe
+        # und startet den Lauf neben dem Gespraech. Liefert das sofortige
+        # Tool-Ergebnis fuer das Haupt-LLM - oder None, dann laeuft der
+        # Agent wie bisher im Turn (abgeschaltet, Limit erreicht).
+        background_agent: Callable[[str, dict, str], Awaitable[str | None]] | None = None,
     ) -> None:
         self._device_tools = {tool.name: tool for tool in (device_tools or [])}
         self._device_call = device_call
         self._card_push = card_push
         self._on_tool_start = on_tool_start
         self._on_activity = on_activity
+        self._background_agent = background_agent
         # Ein Executor lebt genau einen Turn: bereits gesehene show_card-
         # Anfragen merken, damit Modell-Wiederholungen (dasselbe show_card
         # 2-4x) weder den Chat mit Karten fluten noch den code-card-Agenten
@@ -200,8 +214,11 @@ class ToolExecutor:
         tools: list[dict] = []
         if self._card_push is not None:
             tools.append(_show_card_schema())
+        background = self._background_agent is not None and repos.agent_background_enabled()
         for agent in repos.list_agents(enabled_only=True):
-            tools.append(_agent_tool_schema(agent))
+            tools.append(_agent_tool_schema(
+                agent, background=background and agent["slug"] != _CARD_AGENT_SLUG
+            ))
         for tool in self._device_tools.values():
             tools.append(
                 {
@@ -229,6 +246,11 @@ class ToolExecutor:
         """Fuehrt ein Tool aus und liefert IMMER einen String (auch bei
         Fehlern) - der Agent-Loop haengt das als tool-Message an, und das
         LLM kann dem Nutzer erklaeren, was schiefging."""
+        background = await self._start_in_background(name, arguments)
+        if background is not None:
+            # Laeuft neben dem Gespraech weiter: kein Filler, die Session
+            # meldet Start und Ende selbst (tool_activity mit job_id).
+            return background
         # show_card ist rein visuell und quasi-instant: weder Filler noch
         # Aktivitaets-Anzeige - die Karte selbst IST die Anzeige.
         visible = name != _SHOW_CARD_NAME
@@ -243,6 +265,24 @@ class ToolExecutor:
             visible, name, "error" if result.startswith("Tool-Fehler") else "done"
         )
         return result
+
+    async def _start_in_background(self, name: str, arguments: dict) -> str | None:
+        """Agenten-Aufruf an die Session abgeben (v1.29). code-card bleibt
+        im Turn: sein HTML braucht das Haupt-LLM sofort fuer show_card."""
+        if self._background_agent is None or not name.startswith(_AGENT_PREFIX):
+            return None
+        slug = name[len(_AGENT_PREFIX):]
+        if slug == _CARD_AGENT_SLUG or not repos.agent_background_enabled():
+            return None
+        agent = repos.get_agent(slug)
+        if agent is None or not agent["enabled"]:
+            return None
+        try:
+            return await self._background_agent(name, agent, str(arguments.get("task") or ""))
+        except Exception:
+            # Lieber wie frueher warten als den Aufruf verlieren.
+            logger.exception("Hintergrund-Start von %s fehlgeschlagen - laeuft im Turn", name)
+            return None
 
     async def _notify_activity(self, visible: bool, name: str, status: str) -> None:
         # Anzeige ist Komfort: ein kaputter Hook darf kein Tool-Ergebnis kosten.

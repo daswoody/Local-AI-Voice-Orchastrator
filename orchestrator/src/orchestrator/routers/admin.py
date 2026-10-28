@@ -721,6 +721,36 @@ class AgentPayload(BaseModel):
     enabled: bool = True
 
 
+class AgentBackgroundPayload(BaseModel):
+    """Hintergrund-Agenten (v1.29); None = unveraendert lassen."""
+
+    enabled: bool | None = None
+    # Sekunden ohne Eingabe bis zur proaktiven Meldung; 0 = nie, das
+    # Ergebnis kommt erst mit der naechsten Antwort.
+    idle_s: float | None = Field(default=None, ge=0, le=3600)
+
+
+def _agent_background() -> dict:
+    return {
+        "enabled": repos.agent_background_enabled(),
+        "idle_s": repos.agent_result_idle_s(),
+        # Nur informativ - das Limit steht in der .env (AGENT_BACKGROUND_MAX).
+        "max_parallel": settings.agent_background_max,
+    }
+
+
+# Eigener Pfad statt /agents/...: dort sind die Slugs der Agenten.
+@router.get("/agent-background")
+def get_agent_background() -> dict:
+    return _agent_background()
+
+
+@router.put("/agent-background")
+def set_agent_background(payload: AgentBackgroundPayload) -> dict:
+    repos.set_agent_background(payload.enabled, payload.idle_s)
+    return _agent_background()
+
+
 @router.get("/agents")
 def list_agents() -> list[dict]:
     return repos.list_agents()

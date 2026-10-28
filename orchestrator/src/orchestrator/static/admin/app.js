@@ -1107,7 +1107,10 @@ function describeGeneration(filler, results) {
 // ---- View: Agenten -----------------------------------------------------------------------
 
 views.agents = async () => {
-  const agents = await api.get("/v1/admin/agents");
+  const [agents, background] = await Promise.all([
+    api.get("/v1/admin/agents"),
+    api.get("/v1/admin/agent-background"),
+  ]);
   let modelOptions = "";
   let modelNotice = "";
   try {
@@ -1139,6 +1142,18 @@ views.agents = async () => {
         <thead><tr><th>Agent</th><th>Beschreibung</th><th>Modell</th><th>Status</th><th></th></tr></thead>
         <tbody>${rows || "<tr><td colspan='5'>Noch keine Agenten.</td></tr>"}</tbody>
       </table>
+    </section>
+    <section class="block">
+      <h2>Im Hintergrund arbeiten</h2>
+      <form class="grid" data-submit="saveAgentBackground">
+        <label class="full check"><input type="checkbox" name="enabled" ${background.enabled ? "checked" : ""}>
+          Agenten laufen im Hintergrund - die Assistenz redet weiter, statt auf das Ergebnis zu warten</label>
+        <label>Von selbst melden nach (Sekunden ohne Eingabe, 0 = nie)
+          <input type="number" name="idle_s" min="0" max="3600" step="1" value="${esc(String(background.idle_s))}">
+        </label>
+        <p class="hint full">Ruft die Haupt-KI einen Agenten auf, bekommt sie sofort eine Bestaetigung ("ich kuemmere mich darum") und das Gespraech geht weiter. Ist der Agent fertig, baut sie das Ergebnis in ihre naechste Antwort ein - Umfangreiches als Karte. Sagt der Nutzer bis zur eingestellten Zeit nichts, meldet sie sich von selbst; bei 0 wartet das Ergebnis immer auf die naechste Eingabe. Gleichzeitig laufen hoechstens ${esc(String(background.max_parallel))} Agenten pro Verbindung (<code>AGENT_BACKGROUND_MAX</code> in der .env, passend zu den parallelen Slots von llama.cpp) - darueber wartet die Antwort wie frueher. Der Karten-Agent <code>code-card</code> laeuft immer direkt. Ohne Haken wartet jede Antwort auf ihren Agenten.</p>
+        <div><button type="submit">Speichern</button></div>
+      </form>
     </section>
     <section class="block">
       <h2 id="agent-form-title">Neuen Agenten anlegen</h2>
@@ -1381,6 +1396,11 @@ const formActions = {
     }
     await api.post("/v1/admin/cards", payload);
   },
+
+  saveAgentBackground: (form) => api.put("/v1/admin/agent-background", {
+    enabled: form.enabled.checked,
+    idle_s: Number.isNaN(parseFloat(form.idle_s.value)) ? null : parseFloat(form.idle_s.value),
+  }),
 
   async saveAgent(form) {
     const payload = {

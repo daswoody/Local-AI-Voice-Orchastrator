@@ -230,6 +230,32 @@ def set_speech_flow(
         set_setting(VOICE_SUMMARY_MAX_CHARS_SETTING, str(max_chars))
 
 
+# Hintergrund-Agenten (v1.29): im Panel gesetzt, sonst .env-Default.
+AGENT_BACKGROUND_SETTING = "agent_background"
+AGENT_RESULT_IDLE_SETTING = "agent_result_idle_s"
+
+
+def agent_background_enabled() -> bool:
+    return _flag(AGENT_BACKGROUND_SETTING, settings.agent_background_enabled)
+
+
+def agent_result_idle_s() -> float:
+    """Sekunden ohne Eingabe, nach denen die Assistenz ein fertiges
+    Agenten-Ergebnis von selbst meldet; 0 = nur in der naechsten Antwort."""
+    value = get_setting(AGENT_RESULT_IDLE_SETTING)
+    try:
+        return max(0.0, float(value)) if value else settings.agent_result_idle_s
+    except ValueError:
+        return settings.agent_result_idle_s
+
+
+def set_agent_background(enabled: bool | None = None, idle_s: float | None = None) -> None:
+    if enabled is not None:
+        set_setting(AGENT_BACKGROUND_SETTING, "1" if enabled else "0")
+    if idle_s is not None:
+        set_setting(AGENT_RESULT_IDLE_SETTING, str(idle_s))
+
+
 # ---- Sprachausgaben nach dem Engine-Vertrag (v1.20) ---------------------------------
 
 
@@ -477,12 +503,13 @@ def append_message(
     cards: list[dict] | None = None,
     has_image: bool = False,
     tools: list[dict] | None = None,
+    agent_results: list[dict] | None = None,
 ) -> dict:
     now = _utc_now()
     with db_session() as conn:
         cursor = conn.execute(
             "INSERT INTO messages (conversation_id, role, content, cards_json, has_image,"
-            " tools_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            " tools_json, agent_results_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 conversation_id,
                 role,
@@ -490,6 +517,7 @@ def append_message(
                 json.dumps(cards, ensure_ascii=False) if cards else None,
                 int(has_image),
                 json.dumps(tools, ensure_ascii=False) if tools else None,
+                json.dumps(agent_results, ensure_ascii=False) if agent_results else None,
                 now,
             ),
         )
@@ -500,7 +528,18 @@ def append_message(
         message_id = cursor.lastrowid
     return {"id": message_id, "role": role, "content": content,
             "cards": cards or [], "has_image": has_image,
-            "tools": tools or [], "created_at": now}
+            "tools": tools or [], "agent_results": agent_results or [], "created_at": now}
+
+
+def update_message_tools(message_id: int, tools: list[dict]) -> None:
+    """Chips einer schon gespeicherten Antwort nachziehen (v1.29): ein
+    Hintergrund-Agent wird erst nach dem Turn fertig, der ihn gestartet hat."""
+    with db_session() as conn:
+        conn.execute(
+            "UPDATE messages SET tools_json = ? WHERE id = ?",
+            (json.dumps(tools, ensure_ascii=False) if tools else None, message_id),
+        )
+        conn.commit()
 
 
 def list_messages(conversation_id: str) -> list[dict]:
@@ -516,6 +555,8 @@ def list_messages(conversation_id: str) -> list[dict]:
                 "cards": json.loads(r["cards_json"]) if r["cards_json"] else [],
                 "has_image": bool(r["has_image"]),
                 "tools": json.loads(r["tools_json"]) if r["tools_json"] else [],
+                "agent_results": (json.loads(r["agent_results_json"])
+                                  if r["agent_results_json"] else []),
                 "created_at": r["created_at"],
             }
             for r in rows

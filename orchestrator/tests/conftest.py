@@ -32,6 +32,9 @@ def temp_environment(tmp_path, monkeypatch):
     # Bestehende Tests pruefen den klassischen Pfad (Antwort am Stueck);
     # die Streaming-Tests (v1.26) schalten es selbst ein.
     monkeypatch.setattr(settings, "llm_streaming_enabled", False)
+    # Ebenso laufen Agenten in den bestehenden Tests im Turn; die Tests der
+    # Hintergrund-Agenten (v1.29) schalten sie selbst ein.
+    monkeypatch.setattr(settings, "agent_background_enabled", False)
     monkeypatch.setattr(
         mcp_gateway_module.mcp_gateway, "list_openai_tools", AsyncMock(return_value=[])
     )

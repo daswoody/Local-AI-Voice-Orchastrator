@@ -36,6 +36,12 @@ class OrchestratorState(TypedDict):
     # (schnell), True/None = Modell-Default (Gemma 4: denkt). Gilt fuer
     # alle Agent-Runden des Turns, auch nach Tool-Ergebnissen.
     think: bool | None
+    # Hintergrund-Agenten (v1.29): fertiger System-Prompt-Absatz mit
+    # laufenden Agenten und neu eingetroffenen Ergebnissen; leer = keiner.
+    background_context: str
+    # True = die Assistenz meldet sich von selbst mit einem Agenten-
+    # Ergebnis (keine Nutzereingabe, kein RAG).
+    proactive: bool
     context_chunks: list[str]
     # Vollstaendiger Nachrichtenverlauf des Turns inkl. assistant-Messages
     # mit tool_calls und deren tool-Ergebnissen (OpenAI-Format).
@@ -52,7 +58,7 @@ class OrchestratorState(TypedDict):
 async def retrieve_node(state: OrchestratorState) -> OrchestratorState:
     # Reine Bild-Turns ("was siehst du?") haben keinen sinnvollen
     # Suchbegriff - RAG dann ueberspringen.
-    if not state["text"].strip():
+    if not state["text"].strip() or state.get("proactive"):
         return {**state, "context_chunks": []}
     chunks = await weaviate_client.search(state["text"], tier=state["tier"])
     return {**state, "context_chunks": chunks}
@@ -170,6 +176,17 @@ _VOICE_MODE_PROMPT = (
 )
 
 
+# Proaktive Meldung (v1.29): Die Assistenz spricht von sich aus - als
+# user-Message, weil strenge Chat-Templates (Gemma) auf user/assistant im
+# Wechsel bestehen und nach einer Antwort keine zweite erlauben.
+_PROACTIVE_PROMPT = (
+    "[Hinweis des Systems, nicht vom Nutzer: Ein Hintergrund-Agent ist "
+    "fertig, der Nutzer hat seitdem nichts gesagt. Melde dich jetzt von dir "
+    "aus mit dem Ergebnis - kurz und natuerlich, als wuerdest du dich "
+    "wieder dazugesellen.]"
+)
+
+
 def _initial_messages(state: OrchestratorState) -> list[dict]:
     system_prompt = state.get("system_prompt") or _SYSTEM_PROMPT
     # Faehigkeiten gehoeren in den System-Prompt (v1.12.6): kleine Modelle
@@ -183,6 +200,8 @@ def _initial_messages(state: OrchestratorState) -> list[dict]:
             system_prompt += f"\n\n{hint}"
     if state.get("voice_mode"):
         system_prompt += f"\n\n{_VOICE_MODE_PROMPT}"
+    if state.get("background_context"):
+        system_prompt += f"\n\n{state['background_context']}"
     if state["context_chunks"]:
         # Kleine Modelle uebergehen einen nackten Kontext-Block gern - daher
         # ausdruecklich sagen, woher er kommt und wie er zu nutzen ist.
@@ -194,10 +213,12 @@ def _initial_messages(state: OrchestratorState) -> list[dict]:
             f"es nicht, ignoriere es:\n{context}"
         )
 
-    if state.get("image_data_url"):
+    if state.get("proactive"):
+        user_content: Any = _PROACTIVE_PROMPT
+    elif state.get("image_data_url"):
         # Multimodale user-Message (OpenAI-Format): Text + Bild.
         text = state["text"].strip() or "Beschreibe, was du auf dem Bild siehst."
-        user_content: Any = [
+        user_content = [
             {"type": "text", "text": text},
             {"type": "image_url", "image_url": {"url": state["image_data_url"]}},
         ]
@@ -223,6 +244,8 @@ def initial_state(
     history: list[dict] | None = None,
     streamer: Any = None,
     think: bool | None = None,
+    background_context: str = "",
+    proactive: bool = False,
 ) -> OrchestratorState:
     return {
         "text": text,
@@ -232,6 +255,8 @@ def initial_state(
         "history": history or [],
         "image_data_url": image_data_url,
         "think": think,
+        "background_context": background_context,
+        "proactive": proactive,
         "context_chunks": [],
         "messages": [],
         "executor": executor,

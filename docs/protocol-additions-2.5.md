@@ -124,3 +124,37 @@ wie der Live-Turn.
   auf Gast heruntergestuft. Clients sollten auf Close 4401 mit einem
   Re-Login-Dialog reagieren. Verbindungen **ohne** Token bleiben als
   Gast-Session erlaubt (Satelliten-Szenario).
+
+## 8. Hintergrund-Agenten (additiv — v1.29)
+
+Agenten-Aufrufe (`agent-<slug>`, außer `code-card`) blockieren den Turn
+nicht mehr: Der Server startet den Agenten neben dem Gespräch, der Turn
+endet wie gewohnt mit `done`, und das Ergebnis fließt in eine spätere
+Antwort ein.
+
+**`tool_activity` mit `job_id`:** Der Start kommt im Turn mit dem neuen
+Status `background`, das Ende irgendwann später — auch zwischen zwei
+Turns — als `done` bzw. `error` mit derselben `job_id`:
+
+```json
+{ "type": "tool_activity", "tool": "agent-routen", "status": "background", "job_id": "<hex>" }
+{ "type": "tool_activity", "tool": "agent-routen", "status": "done", "job_id": "<hex>" }
+```
+
+Clients aktualisieren den Chip mit dieser `job_id`, egal in welchem Turn
+er steht, und verwerfen das End-Frame auch nach einem `interrupt` nicht
+(es gehört zu keinem Turn). In `GET /v1/conversations/{id}` trägt der
+Chip in `tools` ebenfalls die `job_id` und nach dem Agenten-Ende den
+Endstatus (`error` auch bei Verbindungsabbruch — dann wird der Agent
+abgebrochen).
+
+**Proaktive Meldung:** Sagt der Nutzer nach dem Agenten-Ende eine Weile
+nichts (Admin-Panel, Default 20 s, 0 = nie), schickt der Server von sich
+aus einen Turn: `assistant_text` (ggf. mit Deltas), `audio_chunk`s, wenn
+die letzte Eingabe gesprochen war, und `done` — **ohne** vorherige
+Nutzereingabe. Clients müssen also Antworten außerhalb eines eigenen
+Requests annehmen (Web-UI: ja; Android-App: prüfen, sonst im Panel 0
+einstellen). Jede Eingabe (`text_input`, `audio_chunk`, `audio_end`,
+`image_input`) hält die proaktive Meldung an; das Ergebnis kommt dann in
+die Antwort auf diese Eingabe. In der Historie steht die proaktive
+Meldung als Assistant-Message ohne User-Message davor.
